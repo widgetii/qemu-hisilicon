@@ -122,6 +122,36 @@ SDHCI:      0x10010000+ (V4) / 0x10010000+ (V4A)
 | Cortex-A7 (ARMv7-A) | GICv2 | V2A, V4, V4A, 3536x |
 | Cortex-A17+A7 (ARMv7-A) | GICv2 | V3A |
 
+### V4 Intra-Family Differences (Media Pipeline, Not System Peripherals)
+
+Within the V4 family (EV200, EV300, 18EV300, DV200), all system-level
+peripherals (UARTs, timers, GIC, SPI, SDHCI, FMC, FEMAC) share identical
+addresses and IRQs.  The differences are entirely in the media processing
+pipeline and I/O sizing — relevant only if we ever emulate the ISP/VENC:
+
+| Feature | EV200 | EV300 | 18EV300 | DV200 |
+|---------|-------|-------|---------|-------|
+| **Max video input** | 2304x1296 | 2688x1520 | same as EV200 | same as EV300 |
+| **H.264/H.265 encode** | 2304x1296@20fps | 2688x1520@25fps | same as EV200 | same as EV300 |
+| **ISP WDR** | 2F-WDR frame | 2F-WDR line+frame | same as EV200 | same as EV300 |
+| **Audio** | mono | stereo | same as EV200 | same as EV300 |
+| **LCD output** | no | 16-bit parallel | same as EV200 | same as EV300 |
+| **eMMC bus width** | 4-bit only | 8-bit, HS400 | 4-bit only | 8-bit, HS400 |
+| **MIPI Rx lanes** | 2 | 4 | 2 | 4 |
+| **GPIO groups** | 8 | 10 | 8 | 10 |
+| **Integrated FE PHY** | yes | yes | **no** | yes |
+| **On-package DDR** | 512Mb DDR2 | 1Gb DDR3L | 512Mb DDR2 | up to 512MB DDR3 |
+| **LSADC channels** | 2 | 4 | 2 | 4 |
+
+Source: HiSilicon SDK `Hi3516EV200R001C01SPC012` difference documents:
+- `Hi3516EV300与Hi3516EV200 开发包差异说明.pdf`
+- `Hi3518EV300与Hi3516EV200 开发包差异说明.pdf`
+- `Hi3516EV300与Hi3516DV200 开发包差异说明.pdf`
+
+Goke equivalents (gk7205v200/v300, gk7202v300, gk7605v100) are
+pin-compatible, register-compatible silicon — only the SoC ID at
+SCSYSID (0x72xxxxxx) differs.
+
 ---
 
 ## 3. SDK & Software Stack
