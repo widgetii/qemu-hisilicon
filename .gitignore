@@ -1,0 +1,8 @@
+qemu-src/
+qemu-boot/*.tgz
+qemu-boot/*.md5sum
+qemu-boot/uImage.*
+qemu-boot/rootfs.squashfs.*
+qemu-boot/rootfs-*.squashfs.*
+qemu-boot/ipctool
+qemu-boot/qemu-*.log
