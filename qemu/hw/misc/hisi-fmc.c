@@ -2,8 +2,13 @@
  * HiSilicon HiFMC V100 Flash Memory Controller emulation.
  *
  * Emulates the FMC found on Hi3516CV300 / Hi3516EV300 SoCs, with a
- * RAM-backed SPI NOR flash (Winbond W25Q64, 8 MiB).  Supports both
- * register-mode (small reads via memory window) and DMA-mode transfers.
+ * RAM-backed SPI NOR flash (Winbond W25Q64, 8 MiB) or SPI NAND flash
+ * (Winbond W25N01GV, 128 MiB).  Supports both register-mode (small
+ * reads via memory window) and DMA-mode transfers.
+ *
+ * The flash-type property selects which flash is physically present:
+ *   0 = SPI NOR  (default, W25Q64 8 MiB)
+ *   1 = SPI NAND (W25N01GV 128 MiB, 2K+64 pages)
  *
  * Copyright (c) 2026 OpenIPC.
  * Written by Dmitry Ilyin
@@ -34,10 +39,20 @@
 #define FMC_DATA_NUM        0x38
 #define FMC_OP              0x3C
 #define FMC_DMA_LEN         0x40
+#define FMC_DMA_AHB_CTRL    0x48
 #define FMC_DMA_SADDR_D0    0x4C
+#define FMC_DMA_SADDR_OOB   0x5C
 #define FMC_OP_CTRL         0x68
 #define FMC_STATUS          0xAC
 #define FMC_VERSION         0xBC
+#define FMC_DMA_SADDRH_D0   0x200
+#define FMC_DMA_SADDRH_OOB  0x210
+
+/* FMC_CFG bits */
+#define FMC_CFG_FLASH_SEL_SHIFT 1
+#define FMC_CFG_FLASH_SEL_MASK  (0x3 << FMC_CFG_FLASH_SEL_SHIFT)
+#define FLASH_TYPE_SPI_NOR      0
+#define FLASH_TYPE_SPI_NAND     1
 
 /* FMC_OP bits */
 #define FMC_OP_REG_OP_START     BIT(0)
@@ -51,12 +66,13 @@
 #define FMC_OP_CTRL_DMA_OP_READY BIT(0)
 #define FMC_OP_CTRL_RW_OP        BIT(1)
 #define FMC_OP_CTRL_DMA_OP       BIT(2)
+#define FMC_OP_CTRL_RD_OP_SEL_SHIFT 4
 #define FMC_OP_CTRL_RD_OPCODE_SHIFT 16
 
 /* FMC_INT bits */
 #define FMC_INT_OP_DONE     BIT(0)
 
-/* SPI NOR commands */
+/* SPI commands (shared NOR + NAND) */
 #define SPI_CMD_WRITE_ENABLE  0x06
 #define SPI_CMD_READ_STATUS   0x05
 #define SPI_CMD_READ_ID       0x9F
@@ -66,16 +82,38 @@
 #define SPI_CMD_SECTOR_ERASE  0xD8
 #define SPI_CMD_CHIP_ERASE    0xC7
 
+/* SPI NAND specific commands */
+#define SPI_CMD_RESET         0xFF
+#define SPI_CMD_GET_FEATURES  0x0F
+#define SPI_CMD_SET_FEATURE   0x1F
+
+/* NAND feature register addresses */
+#define NAND_FEATURE_PROTECT  0xA0
+#define NAND_FEATURE_FEATURE  0xB0
+#define NAND_FEATURE_STATUS   0xC0
+
 /* SPI status register bits */
 #define SPI_SR_WEL          BIT(1)
 
-/* Flash identity: Winbond W25Q64 (8 MiB) */
-#define FLASH_JEDEC_0       0xEF    /* Winbond */
-#define FLASH_JEDEC_1       0x40
-#define FLASH_JEDEC_2       0x17    /* 64Mbit = 8 MiB */
-#define FLASH_SIZE_DEFAULT  (8 * 1024 * 1024)
-#define FLASH_SECTOR_SIZE   (64 * 1024)
-#define FLASH_PAGE_SIZE     256
+/* NOR flash identity: Winbond W25Q64 (8 MiB) */
+#define NOR_JEDEC_0         0xEF    /* Winbond */
+#define NOR_JEDEC_1         0x40
+#define NOR_JEDEC_2         0x17    /* 64Mbit = 8 MiB */
+#define NOR_FLASH_SIZE      (8 * 1024 * 1024)
+#define NOR_SECTOR_SIZE     (64 * 1024)
+#define NOR_PAGE_SIZE       256
+
+/* NAND flash identity: Winbond W25N01GV (128 MiB) */
+#define NAND_JEDEC_0        0xEF    /* Winbond */
+#define NAND_JEDEC_1        0xAA
+#define NAND_JEDEC_2        0x21
+#define NAND_FLASH_SIZE     (128 * 1024 * 1024)
+#define NAND_PAGE_SIZE      2048
+#define NAND_OOB_SIZE       64
+#define NAND_PAGES_PER_BLOCK 64
+#define NAND_BLOCK_SIZE     (NAND_PAGE_SIZE * NAND_PAGES_PER_BLOCK)
+#define NAND_BLOCK_COUNT    1024
+#define NAND_TOTAL_PAGES    (NAND_BLOCK_COUNT * NAND_PAGES_PER_BLOCK)
 
 #define IOBUF_SIZE          256
 #define CTRL_REG_SIZE       0x1000
@@ -92,6 +130,9 @@ struct HisiFmcState {
     MemoryRegion ctrl_iomem;
     MemoryRegion mem_iomem;
 
+    /* Configuration property */
+    uint32_t flash_type;          /* 0=NOR, 1=NAND */
+
     /* Control registers */
     uint32_t cfg;
     uint32_t global_cfg;
@@ -106,21 +147,51 @@ struct HisiFmcState {
     uint32_t data_num;
     uint32_t dma_len;
     uint32_t dma_saddr;
+    uint32_t dma_ahb_ctrl;
+    uint32_t dma_saddr_oob;
+    uint32_t dma_saddrh_d0;
+    uint32_t dma_saddrh_oob;
     uint32_t op_ctrl;
     uint32_t status;
 
-    /* SPI NOR state */
+    /* SPI flash state */
     uint8_t  sr;
     uint8_t *flash;
     uint32_t flash_size;
+
+    /* NAND-specific state */
+    uint8_t *nand_oob;            /* OOB area: NAND_OOB_SIZE per page */
+    uint8_t  nand_feature_protect; /* feature reg 0xA0 */
+    uint8_t  nand_feature_config;  /* feature reg 0xB0 */
 
     /* Register-mode I/O buffer (shared via memory window) */
     uint8_t  iobuf[IOBUF_SIZE];
 };
 
-/* ── SPI command execution (register mode) ───────────────────────────── */
+/* ── Helpers ─────────────────────────────────────────────────────────── */
 
-static void hisi_fmc_exec_reg_op(HisiFmcState *s)
+/* Return current flash selection from FMC_CFG register */
+static inline int hisi_fmc_current_flash_sel(HisiFmcState *s)
+{
+    return (s->cfg >> FMC_CFG_FLASH_SEL_SHIFT) & 0x3;
+}
+
+/* Decode NAND page address from ADDRL/ADDRH */
+static void hisi_fmc_nand_decode_addr(HisiFmcState *s,
+                                       uint32_t *block_out,
+                                       uint32_t *page_out,
+                                       uint32_t *column_out)
+{
+    uint32_t block_lo = (s->addrl >> 22) & 0x3FF;
+    uint32_t block_hi = (s->addrh & 0xFF) << 10;
+    *block_out = block_hi | block_lo;
+    *page_out = (s->addrl >> 16) & 0x3F;
+    *column_out = s->addrl & 0xFFF;
+}
+
+/* ── SPI NOR command execution (register mode) ──────────────────────── */
+
+static void hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
 {
     uint8_t spi_cmd = s->cmd & 0xFF;
     uint32_t addr = s->addrl;
@@ -132,10 +203,9 @@ static void hisi_fmc_exec_reg_op(HisiFmcState *s)
 
     switch (spi_cmd) {
     case SPI_CMD_READ_ID:
-        s->iobuf[0] = FLASH_JEDEC_0;
-        s->iobuf[1] = FLASH_JEDEC_1;
-        s->iobuf[2] = FLASH_JEDEC_2;
-        /* Pad remaining bytes with 0 */
+        s->iobuf[0] = NOR_JEDEC_0;
+        s->iobuf[1] = NOR_JEDEC_1;
+        s->iobuf[2] = NOR_JEDEC_2;
         if (len > 3) {
             memset(&s->iobuf[3], 0, len - 3);
         }
@@ -175,8 +245,8 @@ static void hisi_fmc_exec_reg_op(HisiFmcState *s)
 
     case SPI_CMD_SECTOR_ERASE:
         if (s->sr & SPI_SR_WEL) {
-            uint32_t base = addr & ~(FLASH_SECTOR_SIZE - 1);
-            uint32_t end = base + FLASH_SECTOR_SIZE;
+            uint32_t base = addr & ~(NOR_SECTOR_SIZE - 1);
+            uint32_t end = base + NOR_SECTOR_SIZE;
             if (end > s->flash_size) {
                 end = s->flash_size;
             }
@@ -196,17 +266,125 @@ static void hisi_fmc_exec_reg_op(HisiFmcState *s)
 
     default:
         qemu_log_mask(LOG_UNIMP,
-                      "hisi-fmc: unhandled SPI command 0x%02x\n", spi_cmd);
+                      "hisi-fmc: NOR unhandled SPI command 0x%02x\n", spi_cmd);
+        break;
+    }
+}
+
+/* ── SPI NAND command execution (register mode) ─────────────────────── */
+
+static void hisi_fmc_exec_nand_reg_op(HisiFmcState *s)
+{
+    uint8_t spi_cmd = s->cmd & 0xFF;
+    uint32_t len = s->data_num & 0x3FFF;
+    uint8_t feat_addr;
+
+    if (len > IOBUF_SIZE) {
+        len = IOBUF_SIZE;
+    }
+
+    switch (spi_cmd) {
+    case SPI_CMD_READ_ID:
+        s->iobuf[0] = NAND_JEDEC_0;
+        s->iobuf[1] = NAND_JEDEC_1;
+        s->iobuf[2] = NAND_JEDEC_2;
+        if (len > 3) {
+            memset(&s->iobuf[3], 0, len - 3);
+        }
+        break;
+
+    case SPI_CMD_RESET:
+        s->sr = 0;
+        s->nand_feature_protect = 0;
+        s->nand_feature_config = 0;
+        break;
+
+    case SPI_CMD_WRITE_ENABLE:
+        s->sr |= SPI_SR_WEL;
+        break;
+
+    case SPI_CMD_GET_FEATURES:
+        feat_addr = s->addrl & 0xFF;
+        switch (feat_addr) {
+        case NAND_FEATURE_PROTECT:
+            s->iobuf[0] = s->nand_feature_protect;
+            break;
+        case NAND_FEATURE_FEATURE:
+            s->iobuf[0] = s->nand_feature_config;
+            break;
+        case NAND_FEATURE_STATUS:
+            s->iobuf[0] = s->sr;
+            break;
+        default:
+            s->iobuf[0] = 0;
+            break;
+        }
+        break;
+
+    case SPI_CMD_SET_FEATURE:
+        feat_addr = s->addrl & 0xFF;
+        switch (feat_addr) {
+        case NAND_FEATURE_PROTECT:
+            s->nand_feature_protect = s->iobuf[0];
+            break;
+        case NAND_FEATURE_FEATURE:
+            s->nand_feature_config = s->iobuf[0];
+            break;
+        case NAND_FEATURE_STATUS:
+            /* Status register: only WEL is writable by SET_FEATURE in practice */
+            break;
+        default:
+            break;
+        }
+        break;
+
+    case SPI_CMD_SECTOR_ERASE: { /* 0xD8 = Block Erase for NAND */
+        if (s->sr & SPI_SR_WEL) {
+            uint32_t block, page, column;
+            hisi_fmc_nand_decode_addr(s, &block, &page, &column);
+            if (block < NAND_BLOCK_COUNT) {
+                uint32_t flash_off = block * NAND_BLOCK_SIZE;
+                uint32_t oob_off = block * NAND_PAGES_PER_BLOCK * NAND_OOB_SIZE;
+                memset(&s->flash[flash_off], 0xFF, NAND_BLOCK_SIZE);
+                memset(&s->nand_oob[oob_off], 0xFF,
+                       NAND_PAGES_PER_BLOCK * NAND_OOB_SIZE);
+            }
+            s->sr &= ~SPI_SR_WEL;
+        }
         break;
     }
 
-    /* Operation completes instantly */
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "hisi-fmc: NAND unhandled SPI command 0x%02x\n", spi_cmd);
+        break;
+    }
+}
+
+/* ── Register-mode dispatch ──────────────────────────────────────────── */
+
+static void hisi_fmc_exec_reg_op(HisiFmcState *s)
+{
+    if (s->flash_type == FLASH_TYPE_SPI_NAND &&
+        hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NAND) {
+        hisi_fmc_exec_nand_reg_op(s);
+    } else if (s->flash_type == FLASH_TYPE_SPI_NOR &&
+               hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NOR) {
+        hisi_fmc_exec_nor_reg_op(s);
+    } else {
+        /* Wrong flash selected — no chip responds, return 0x00 ID */
+        uint32_t len = s->data_num & 0x3FFF;
+        if (len > IOBUF_SIZE) {
+            len = IOBUF_SIZE;
+        }
+        memset(s->iobuf, 0x00, len);
+    }
     s->fmc_int |= FMC_INT_OP_DONE;
 }
 
 /* ── DMA command execution ───────────────────────────────────────────── */
 
-static void hisi_fmc_exec_dma_op(HisiFmcState *s)
+static void hisi_fmc_exec_dma_nor(HisiFmcState *s)
 {
     uint32_t addr = s->addrl;
     uint32_t len = s->dma_len;
@@ -217,16 +395,13 @@ static void hisi_fmc_exec_dma_op(HisiFmcState *s)
     }
 
     if (len == 0) {
-        s->fmc_int |= FMC_INT_OP_DONE;
         return;
     }
 
     if (!is_write) {
-        /* DMA read: flash → guest memory */
         dma_memory_write(&address_space_memory, s->dma_saddr,
                          &s->flash[addr], len, MEMTXATTRS_UNSPECIFIED);
     } else {
-        /* DMA write: guest memory → flash */
         if (s->sr & SPI_SR_WEL) {
             uint8_t *buf = g_malloc(len);
             dma_memory_read(&address_space_memory, s->dma_saddr,
@@ -238,6 +413,82 @@ static void hisi_fmc_exec_dma_op(HisiFmcState *s)
             s->sr &= ~SPI_SR_WEL;
         }
     }
+}
+
+static void hisi_fmc_exec_dma_nand(HisiFmcState *s)
+{
+    uint32_t block, page, column;
+    bool is_write = s->op_ctrl & FMC_OP_CTRL_RW_OP;
+
+    hisi_fmc_nand_decode_addr(s, &block, &page, &column);
+
+    if (block >= NAND_BLOCK_COUNT || page >= NAND_PAGES_PER_BLOCK) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "hisi-fmc: NAND DMA out of range block=%u page=%u\n",
+                      block, page);
+        return;
+    }
+
+    uint32_t page_idx = block * NAND_PAGES_PER_BLOCK + page;
+    uint32_t flash_off = page_idx * NAND_PAGE_SIZE;
+    uint32_t oob_off = page_idx * NAND_OOB_SIZE;
+    uint32_t dma_len = s->dma_len;
+
+    if (dma_len > NAND_PAGE_SIZE) {
+        dma_len = NAND_PAGE_SIZE;
+    }
+
+    if (!is_write) {
+        /* DMA read: flash → guest memory (page data) */
+        if (dma_len > 0) {
+            dma_memory_write(&address_space_memory, s->dma_saddr,
+                             &s->flash[flash_off], dma_len,
+                             MEMTXATTRS_UNSPECIFIED);
+        }
+        /* OOB → guest memory */
+        if (s->dma_saddr_oob) {
+            dma_memory_write(&address_space_memory, s->dma_saddr_oob,
+                             &s->nand_oob[oob_off], NAND_OOB_SIZE,
+                             MEMTXATTRS_UNSPECIFIED);
+        }
+    } else {
+        /* DMA write: guest memory → flash (page program) */
+        if (s->sr & SPI_SR_WEL) {
+            if (dma_len > 0) {
+                uint8_t *buf = g_malloc(dma_len);
+                dma_memory_read(&address_space_memory, s->dma_saddr,
+                                buf, dma_len, MEMTXATTRS_UNSPECIFIED);
+                /* NAND program: can only clear bits */
+                for (uint32_t i = 0; i < dma_len; i++) {
+                    s->flash[flash_off + i] &= buf[i];
+                }
+                g_free(buf);
+            }
+            /* OOB write */
+            if (s->dma_saddr_oob) {
+                uint8_t oob_buf[NAND_OOB_SIZE];
+                dma_memory_read(&address_space_memory, s->dma_saddr_oob,
+                                oob_buf, NAND_OOB_SIZE,
+                                MEMTXATTRS_UNSPECIFIED);
+                for (int i = 0; i < NAND_OOB_SIZE; i++) {
+                    s->nand_oob[oob_off + i] &= oob_buf[i];
+                }
+            }
+            s->sr &= ~SPI_SR_WEL;
+        }
+    }
+}
+
+static void hisi_fmc_exec_dma_op(HisiFmcState *s)
+{
+    if (s->flash_type == FLASH_TYPE_SPI_NAND &&
+        hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NAND) {
+        hisi_fmc_exec_dma_nand(s);
+    } else if (s->flash_type == FLASH_TYPE_SPI_NOR &&
+               hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NOR) {
+        hisi_fmc_exec_dma_nor(s);
+    }
+    /* else: wrong flash type selected, no-op */
 
     s->fmc_int |= FMC_INT_OP_DONE;
 }
@@ -262,10 +513,14 @@ static uint64_t hisi_fmc_ctrl_read(void *opaque, hwaddr offset, unsigned size)
     case FMC_DATA_NUM:      return s->data_num;
     case FMC_OP:            return 0; /* REG_OP_START always reads as clear */
     case FMC_DMA_LEN:       return s->dma_len;
+    case FMC_DMA_AHB_CTRL:  return s->dma_ahb_ctrl;
     case FMC_DMA_SADDR_D0:  return s->dma_saddr;
+    case FMC_DMA_SADDR_OOB: return s->dma_saddr_oob;
     case FMC_OP_CTRL:       return 0; /* DMA_OP_READY always reads as clear */
     case FMC_STATUS:        return s->status;
     case FMC_VERSION:       return 0x100; /* HIFMC_VER_100 */
+    case FMC_DMA_SADDRH_D0: return s->dma_saddrh_d0;
+    case FMC_DMA_SADDRH_OOB: return s->dma_saddrh_oob;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "hisi-fmc: read from unknown reg 0x%03x\n",
@@ -292,7 +547,11 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
     case FMC_SPI_OP_ADDR:   s->spi_op_addr = value;   break;
     case FMC_DATA_NUM:      s->data_num = value;      break;
     case FMC_DMA_LEN:       s->dma_len = value;       break;
+    case FMC_DMA_AHB_CTRL:  s->dma_ahb_ctrl = value;  break;
     case FMC_DMA_SADDR_D0:  s->dma_saddr = value;     break;
+    case FMC_DMA_SADDR_OOB: s->dma_saddr_oob = value; break;
+    case FMC_DMA_SADDRH_D0: s->dma_saddrh_d0 = value; break;
+    case FMC_DMA_SADDRH_OOB: s->dma_saddrh_oob = value; break;
 
     case FMC_OP:
         if (value & FMC_OP_REG_OP_START) {
@@ -372,8 +631,21 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
 {
     HisiFmcState *s = HISI_FMC(dev);
 
-    s->flash = g_malloc(s->flash_size);
-    memset(s->flash, 0xFF, s->flash_size);
+    if (s->flash_type == FLASH_TYPE_SPI_NAND) {
+        s->flash_size = NAND_FLASH_SIZE;
+        s->flash = g_malloc(NAND_FLASH_SIZE);
+        memset(s->flash, 0xFF, NAND_FLASH_SIZE);
+        s->nand_oob = g_malloc(NAND_TOTAL_PAGES * NAND_OOB_SIZE);
+        memset(s->nand_oob, 0xFF, NAND_TOTAL_PAGES * NAND_OOB_SIZE);
+        /* Set initial FMC_CFG to SPI_NAND */
+        s->cfg = (s->cfg & ~FMC_CFG_FLASH_SEL_MASK) |
+                 (FLASH_TYPE_SPI_NAND << FMC_CFG_FLASH_SEL_SHIFT);
+    } else {
+        s->flash_size = NOR_FLASH_SIZE;
+        s->flash = g_malloc(NOR_FLASH_SIZE);
+        memset(s->flash, 0xFF, NOR_FLASH_SIZE);
+        /* FMC_CFG defaults to 0 (SPI_NOR) */
+    }
 }
 
 static void hisi_fmc_init(Object *obj)
@@ -394,11 +666,12 @@ static void hisi_fmc_finalize(Object *obj)
 {
     HisiFmcState *s = HISI_FMC(obj);
     g_free(s->flash);
+    g_free(s->nand_oob);
 }
 
 static const Property hisi_fmc_properties[] = {
-    DEFINE_PROP_UINT32("flash-size", HisiFmcState, flash_size,
-                       FLASH_SIZE_DEFAULT),
+    DEFINE_PROP_UINT32("flash-type", HisiFmcState, flash_type,
+                       FLASH_TYPE_SPI_NOR),
 };
 
 static void hisi_fmc_class_init(ObjectClass *klass, const void *data)
