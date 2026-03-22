@@ -15,6 +15,7 @@ targeting QEMU v10.2.0. Runs [OpenIPC](https://openipc.org/) firmware.
 | SysCtrl | 0x12020000 | 0x12020000 |
 | CRG | 0x12010000 | 0x12010000 |
 | GPIO | 9 × PL061 @ 0x12140000 | 10 × PL061 @ 0x120b0000 |
+| Ethernet | FEMAC @ 0x10050000, IRQ 12 | FEMAC @ 0x10040000, SPI 33 |
 
 ## Project Structure
 
@@ -23,6 +24,7 @@ qemu/
 ├── hw/arm/hisilicon.c           # Machine definitions (CV300 + EV300)
 ├── hw/misc/hisi-sysctl.c        # SysCtrl device (SoC ID, reboot)
 ├── hw/misc/hisi-crg.c           # CRG clock/reset stub
+├── hw/net/hisi-femac.c          # Fast Ethernet MAC + MDIO PHY stub
 ├── include/hw/arm/hisilicon.h   # Memory map constants
 └── setup.sh                     # Clone QEMU v10.2.0, copy sources, build
 qemu-boot/
@@ -58,6 +60,7 @@ Default login: `root` / `12345`
 
 - Linux 4.9.37 boots to login prompt
 - All core peripherals: GICv2, UARTs, timers, GPIOs, SPI, I2C, RTC
+- Ethernet: FEMAC probes, Generic PHY links up at 100 Mbps FD, `eth0` created
 - OpenIPC userspace: syslogd, dropbear (SSH), crond, ntpd, majestic
 - `ipctool` correctly identifies **HiSilicon 3516EV300**, reports RAM, kernel, firmware version
 - Clean debug log (8 lines — PL022 extended regs and one sysctl offset)
@@ -65,23 +68,19 @@ Default login: `root` / `12345`
 ### CV300 — Boots to Userspace
 
 - Linux 3.18.20 boots, mounts rootfs, starts services
+- Ethernet: FEMAC probes, PHY detected at address 1, `eth0` created
 - `ipctool -c` correctly identifies **hi3516cv300**
 - Full `ipctool` (with hardware probing) hangs due to slow ARM926 emulation (see below)
 - Does not reach a login prompt with full init — hangs during vendor module loading (`mmz` allocator)
 
 ## Known Issues
 
-### CV300: Slow MDIO/I2C Polling on ARM926
+### CV300: Slow I2C Polling on ARM926
 
-The `ipctool` binary probes Ethernet (MDIO) and sensor (I2C/SPI) hardware by polling
-registers via `/dev/mem` with `usleep(1)` loops. On emulated ARM926EJ-S, each poll
-iteration takes orders of magnitude longer than real hardware, causing the full
-`ipctool` to hang for minutes.
-
-**Workaround**: Use `initcall_blacklist=hisi_femac_driver_init,himci_init` in kernel
-args (already set in `run-cv300.sh`) to disable the kernel-side Ethernet and MMC
-drivers that cause similar polling timeouts during boot. The `ipctool -c` (chip
-detection only) works instantly.
+The `ipctool` binary probes sensor (I2C/SPI) hardware by polling registers via
+`/dev/mem` with `usleep(1)` loops. On emulated ARM926EJ-S, each poll iteration
+takes orders of magnitude longer than real hardware, causing the full `ipctool`
+to hang for minutes. The `ipctool -c` (chip detection only) works instantly.
 
 ### CV300: No Login Prompt with Full Init
 
@@ -119,8 +118,30 @@ probes it and fails gracefully. Rootfs must be loaded via `-initrd` as a ramdisk
 | GPIO × 9/10 | PL061 | |
 | SPI × 2 | PL022 | |
 | DMA | PL080 | CV300 only |
+| Ethernet | hisi-femac | FEMAC + MDIO PHY stub, `-nic user` for SLIRP |
 | SysCtrl | hisi-sysctl | SoC ID + reset |
 | CRG | hisi-crg | Clock stub with PLL lock |
+
+## Ethernet (FEMAC)
+
+The FEMAC device (`hisi-femac`) emulates the Fast Ethernet MAC found in both SoCs.
+It provides a single 8 KiB MMIO region containing three register blocks:
+
+| Offset | Block | Function |
+|--------|-------|----------|
+| 0x0000 | Port  | MAC control, DMA queue addresses, status |
+| 0x1100 | MDIO  | PHY management bus (read/write PHY registers) |
+| 0x1300 | GLB   | Interrupts, MAC address, forwarding control |
+
+An integrated MDIO PHY stub at address 1 reports 100 Mbps full-duplex link
+permanently up. The kernel's Generic PHY driver binds to it (PHY ID `0x00446161`).
+
+The TX path performs a DMA read from guest memory and forwards frames via
+`qemu_send_packet()`. The RX path uses a 64-entry ring of guest-supplied DMA
+buffer addresses, filled on packet arrival with IRQ notification.
+
+The run scripts pass `-nic user` for QEMU's built-in SLIRP user-mode networking.
+The guest network is NAT'd to the host with a default gateway at `10.0.2.2`.
 
 ## References
 
