@@ -102,11 +102,6 @@ The CRG stub returns PLL lock (bit 28) for known PLL status register offsets
 (0x04, 0x14, 0x24, 0x34). Other PLL registers may exist — add them if the kernel
 hangs waiting for a PLL lock.
 
-### No Flash Emulation
-
-SPI NOR/NAND flash controller (FMC at 0x10000000) is not emulated. The kernel
-probes it and fails gracefully. Rootfs must be loaded via `-initrd` as a ramdisk.
-
 ## Emulated Peripherals
 
 | Peripheral | Type | Notes |
@@ -114,13 +109,80 @@ probes it and fails gracefully. Rootfs must be loaded via `-initrd` as a ramdisk
 | CPU | ARM926 / Cortex-A7 | |
 | Interrupt ctrl | PL190 / GICv2 | |
 | UART × 3 | PL011 | |
-| Timer × 2 | SP804 (dual) | |
+| Timer × 2 | SP804 (dual) | CV300: 24 MHz |
 | GPIO × 9/10 | PL061 | |
 | SPI × 2 | PL022 | |
 | DMA | PL080 | CV300 only |
 | Ethernet | hisi-femac | FEMAC + MDIO PHY stub, `-nic user` for SLIRP |
+| Flash | hisi-fmc | HiFMC V100: SPI NOR (W25Q64 8M) or SPI NAND (W25N01GV 128M) |
+| SD/MMC (CV300) | hisi-himci | DW MMC stub — reports "no card", prevents driver hangs |
+| SD/MMC (EV300) | generic-sdhci | SDHCI with SD card passthrough (see below) |
 | SysCtrl | hisi-sysctl | SoC ID + reset |
 | CRG | hisi-crg | Clock stub with PLL lock |
+
+## SD Card Emulation (EV300)
+
+The EV300 SDHCI controller supports attaching a virtual SD card image.
+This works in both U-Boot and Linux — the same image is accessible from
+both environments.
+
+### Creating an SD card image
+
+```bash
+# Create a 64 MB image with a FAT32 partition
+dd if=/dev/zero of=sdcard.img bs=1M count=64
+echo -e "o\nn\np\n1\n\n\nt\nc\nw\n" | fdisk sdcard.img
+
+# Format and populate (requires root for losetup)
+LOOP=$(sudo losetup --find --show --partscan sdcard.img)
+sudo mkfs.vfat -F 32 -n SDCARD "${LOOP}p1"
+sudo mount "${LOOP}p1" /mnt
+echo "Hello from SD card" | sudo tee /mnt/test.txt
+# ... add any files you want ...
+sudo umount /mnt
+sudo losetup -d "$LOOP"
+```
+
+### Booting with the SD card
+
+```bash
+# Linux kernel boot
+bash qemu-boot/run-ev300.sh -drive file=sdcard.img,if=sd,format=raw
+
+# U-Boot
+bash qemu-boot/run-ev300-nand.sh -drive file=sdcard.img,if=sd,format=raw
+```
+
+### Verifying in Linux
+
+The kernel detects the card during boot:
+```
+mmc0: new ultra high speed SDR12 SD card at address aaec
+mmcblk0: mmc0:aaec QEMU! 64.0 MiB
+ mmcblk0: p1
+```
+
+Mount and read:
+```bash
+mkdir -p /mnt/sd
+mount /dev/mmcblk0p1 /mnt/sd
+cat /mnt/sd/test.txt
+```
+
+### Verifying in U-Boot
+
+```
+OpenIPC # fatls mmc 0:1
+       19   test.txt
+1 file(s), 0 dir(s)
+
+OpenIPC # fatload mmc 0:1 0x42000000 test.txt
+19 bytes read in 0 ms
+
+OpenIPC # md.b 0x42000000 0x20
+42000000: 48 65 6c 6c 6f 20 66 72 6f 6d 20 53 44 20 63 61    Hello from SD ca
+42000010: 72 64 0a                                            rd.
+```
 
 ## Ethernet (FEMAC)
 
