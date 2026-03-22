@@ -28,6 +28,9 @@
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "hw/sd/sdhci.h"
+#include "hw/sd/sd.h"
+#include "system/blockdev.h"
+#include "system/block-backend.h"
 #include "net/net.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
@@ -335,9 +338,23 @@ static void hi3516ev300_init(MachineState *machine)
         for (int i = 0; i < ARRAY_SIZE(sdhci_bases); i++) {
             DeviceState *sdhci = qdev_new(TYPE_SYSBUS_SDHCI);
             qdev_prop_set_uint8(sdhci, "sd-spec-version", 3);
+            qdev_prop_set_uint8(sdhci, "uhs", UHS_I);
+            /* Clear V18 cap so kernel doesn't attempt 1.8V switch */
+            qdev_prop_set_uint64(sdhci, "capareg", 0x017834b4);
             SysBusDevice *busdev = SYS_BUS_DEVICE(sdhci);
             sysbus_realize_and_unref(busdev, &error_fatal);
             sysbus_mmio_map(busdev, 0, sdhci_bases[i]);
+
+            /* Attach SD card drive if provided via -drive if=sd */
+            DriveInfo *di = drive_get(IF_SD, 0, i);
+            if (di) {
+                BusState *bus = qdev_get_child_bus(sdhci, "sd-bus");
+                DeviceState *card = qdev_new(TYPE_SD_CARD);
+                qdev_prop_set_drive_err(card, "drive",
+                                        blk_by_legacy_dinfo(di),
+                                        &error_fatal);
+                qdev_realize_and_unref(card, bus, &error_fatal);
+            }
         }
     }
 
