@@ -18,11 +18,18 @@
 #include "exec/hwaddr.h"
 
 /* Maximum peripheral counts */
-#define HISI_MAX_UARTS  3
-#define HISI_MAX_TIMERS 2
-#define HISI_MAX_SPIS   2
-#define HISI_MAX_HIMCI  3
-#define HISI_MAX_SDHCI  2
+#define HISI_MAX_UARTS    3
+#define HISI_MAX_TIMERS   2
+#define HISI_MAX_SPIS     2
+#define HISI_MAX_HIMCI    3
+#define HISI_MAX_SDHCI    2
+#define HISI_MAX_REGBANKS 8
+
+typedef struct HisiRegbankEntry {
+    const char *name;
+    hwaddr      base;     /* 0 = skip */
+    uint32_t    size;
+} HisiRegbankEntry;
 
 typedef struct HisiSoCConfig {
     const char     *name;
@@ -84,11 +91,16 @@ typedef struct HisiSoCConfig {
     /* SD/MMC — himciv200 (older SoCs) */
     int             num_himci;
     hwaddr          himci_bases[HISI_MAX_HIMCI];
+    int             himci_irqs[HISI_MAX_HIMCI];
 
     /* SD/MMC — SDHCI (newer SoCs) */
     int             num_sdhci;
     hwaddr          sdhci_bases[HISI_MAX_SDHCI];
     int             sdhci_irqs[HISI_MAX_SDHCI];
+
+    /* Generic RAM-backed register banks (pin mux, DDR PHY, PWM, etc.) */
+    int             num_regbanks;
+    HisiRegbankEntry regbanks[HISI_MAX_REGBANKS];
 } HisiSoCConfig;
 
 /*

@@ -246,7 +246,8 @@ qemu/hw/misc/hisi-sysctl.c       — SysCtrl: SoC ID, misc ctrl, reset
 qemu/hw/misc/hisi-crg.c          — CRG: clock/reset gate stub
 qemu/hw/misc/hisi-fmc.c          — HiFMC V100 flash controller
 qemu/hw/net/hisi-femac.c         — FEMAC 100M Ethernet + MDIO
-qemu/hw/misc/hisi-himci.c        — himciv200 SD/MMC stub (V1-V3)
+qemu/hw/misc/hisi-himci.c        — himciv200 SD/MMC controller (V1-V3)
+                                    Full DW MMC with IDMAC + ADMA3 DMA
                                     (V4+ uses built-in SDHCI)
 ```
 

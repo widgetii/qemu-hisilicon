@@ -86,6 +86,7 @@ static const HisiSoCConfig hi3516cv300_soc = {
 
     .num_himci          = 3,
     .himci_bases        = { 0x100c0000, 0x100d0000, 0x100e0000 },
+    .himci_irqs         = { 18, 27, 27 },
 };
 
 static const HisiSoCConfig hi3516ev300_soc = {
@@ -321,7 +322,16 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .femac_irq          = 33,                              \
     .num_sdhci          = 2,                                \
     .sdhci_bases        = { 0x10010000, 0x10020000 },       \
-    .sdhci_irqs         = { 30, 31 }
+    .sdhci_irqs         = { 30, 31 },                       \
+    .num_regbanks       = 6,                                \
+    .regbanks           = {                                 \
+        { "hisi-misc",       0x12028000, 0x8000  },         \
+        { "hisi-ddr",        0x120d0000, 0x10000 },         \
+        { "hisi-iocfg-vio",  0x112c0000, 0x10000 },         \
+        { "hisi-iocfg-core", 0x120c0000, 0x10000 },         \
+        { "hisi-iocfg-ahb",  0x100c0000, 0x10000 },         \
+        { "hisi-pwm",        0x12080000, 0x10000 },         \
+    }
 
 static const HisiSoCConfig gk7205v200_soc = {
     .name               = "gk7205v200",
@@ -553,6 +563,18 @@ static void hisilicon_common_init(MachineState *machine,
         SysBusDevice *busdev = SYS_BUS_DEVICE(mmc);
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, c->himci_bases[n]);
+        if (c->himci_irqs[n]) {
+            sysbus_connect_irq(busdev, 0, pic[c->himci_irqs[n]]);
+        }
+
+        DriveInfo *di = drive_get(IF_SD, 0, n);
+        if (di) {
+            BusState *bus = qdev_get_child_bus(DEVICE(mmc), "sd-bus");
+            DeviceState *card = qdev_new(TYPE_SD_CARD);
+            qdev_prop_set_drive_err(card, "drive",
+                                    blk_by_legacy_dinfo(di), &error_fatal);
+            qdev_realize_and_unref(card, bus, &error_fatal);
+        }
     }
 
     /* SD/MMC — SDHCI */
@@ -575,6 +597,17 @@ static void hisilicon_common_init(MachineState *machine,
             qdev_prop_set_drive_err(card, "drive",
                                     blk_by_legacy_dinfo(di), &error_fatal);
             qdev_realize_and_unref(card, bus, &error_fatal);
+        }
+    }
+
+    /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */
+    for (n = 0; n < c->num_regbanks; n++) {
+        if (c->regbanks[n].base) {
+            DeviceState *rb = qdev_new("hisi-regbank");
+            qdev_prop_set_uint32(rb, "size", c->regbanks[n].size);
+            qdev_prop_set_string(rb, "name", c->regbanks[n].name);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(rb), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(rb), 0, c->regbanks[n].base);
         }
     }
 

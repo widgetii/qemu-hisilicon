@@ -115,16 +115,17 @@ hangs waiting for a PLL lock.
 | DMA | PL080 | CV300 only |
 | Ethernet | hisi-femac | FEMAC + MDIO PHY stub, `-nic user` for SLIRP |
 | Flash | hisi-fmc | HiFMC V100: SPI NOR (W25Q64 8M) or SPI NAND (W25N01GV 128M) |
-| SD/MMC (CV300) | hisi-himci | DW MMC stub — reports "no card", prevents driver hangs |
-| SD/MMC (EV300) | generic-sdhci | SDHCI with SD card passthrough (see below) |
+| SD/MMC (CV300) | hisi-himci | DW MMC with IDMAC + ADMA3 DMA, SD card passthrough |
+| SD/MMC (EV300) | generic-sdhci | SDHCI with SD card passthrough |
 | SysCtrl | hisi-sysctl | SoC ID + reset |
 | CRG | hisi-crg | Clock stub with PLL lock |
 
-## SD Card Emulation (EV300)
+## SD Card Emulation
 
-The EV300 SDHCI controller supports attaching a virtual SD card image.
-This works in both U-Boot and Linux — the same image is accessible from
-both environments.
+Both CV300 and EV300 support attaching a virtual SD card image.
+
+- **EV300**: uses QEMU's built-in SDHCI controller
+- **CV300**: uses `hisi-himci` (DW MMC) with both IDMAC (U-Boot) and ADMA3 (kernel) DMA
 
 ### Creating an SD card image
 
@@ -146,19 +147,33 @@ sudo losetup -d "$LOOP"
 ### Booting with the SD card
 
 ```bash
-# Linux kernel boot
+# EV300 — Linux kernel
 bash qemu-boot/run-ev300.sh -drive file=sdcard.img,if=sd,format=raw
 
-# U-Boot
+# EV300 — U-Boot
 bash qemu-boot/run-ev300-nand.sh -drive file=sdcard.img,if=sd,format=raw
+
+# CV300 — Linux kernel (card on SD0 controller, index 0 = default)
+bash qemu-boot/run-cv300.sh -drive file=sdcard.img,if=sd,format=raw
+
+# CV300 — U-Boot (probes eMMC controller first = index 2)
+qemu-src/build/qemu-system-arm -M hi3516cv300 -m 256M \
+  -kernel qemu-boot/u-boot-hi3516cv300-universal.bin \
+  -nographic -serial mon:stdio \
+  -drive file=sdcard.img,if=sd,format=raw,index=2
 ```
+
+**Note:** CV300 U-Boot probes the eMMC controller (0x100e0000) first, which
+is the third himci instance (index 2).  The Linux kernel detects cards on
+the SD0 controller (0x100c0000, index 0).  Use `index=2` for U-Boot,
+default (index=0) for Linux.
 
 ### Verifying in Linux
 
 The kernel detects the card during boot:
 ```
-mmc0: new ultra high speed SDR12 SD card at address aaec
-mmcblk0: mmc0:aaec QEMU! 64.0 MiB
+mmc1: new ultra high speed SDR12 SD card at address aaec
+mmcblk0: mmc1:aaec QEMU! 64.0 MiB
  mmcblk0: p1
 ```
 
