@@ -1,5 +1,9 @@
 /*
- * HiSilicon CV300/EV300 SoC memory map constants.
+ * HiSilicon IP camera SoC family definitions.
+ *
+ * Table-driven configuration for all supported SoC variants.
+ * Add new SoCs by defining a HisiSoCConfig instance — the shared
+ * hisilicon_common_init() handles the rest.
  *
  * Copyright (c) 2020-2021, 2026 OpenIPC.
  * Written by Dmitry Ilyin
@@ -10,136 +14,92 @@
 #ifndef HW_ARM_HISILICON_H
 #define HW_ARM_HISILICON_H
 
-/* SoC identification */
+#include "qemu/units.h"
+#include "exec/hwaddr.h"
+
+/* Maximum peripheral counts */
+#define HISI_MAX_UARTS  3
+#define HISI_MAX_TIMERS 2
+#define HISI_MAX_SPIS   2
+#define HISI_MAX_HIMCI  3
+#define HISI_MAX_SDHCI  2
+
+typedef struct HisiSoCConfig {
+    const char     *name;
+    const char     *desc;
+    const char     *cpu_type;       /* full QOM type, set at runtime */
+    uint32_t        soc_id;
+    ram_addr_t      ram_size_default;
+
+    /* Memory regions */
+    hwaddr          ram_base;
+    hwaddr          sram_base;
+    size_t          sram_size;
+
+    /* Interrupt controller — VIC or GIC, selected by use_gic */
+    bool            use_gic;
+    hwaddr          vic_base;       /* PL190, when !use_gic */
+    hwaddr          gic_dist_base;  /* GICv2, when use_gic */
+    hwaddr          gic_cpu_base;
+    int             gic_num_spi;
+
+    /* System controller + CRG */
+    hwaddr          sysctl_base;
+    hwaddr          crg_base;
+
+    /* UARTs (PL011) */
+    int             num_uarts;
+    hwaddr          uart_bases[HISI_MAX_UARTS];
+    int             uart_irqs[HISI_MAX_UARTS];
+
+    /* Timers (SP804) */
+    int             num_timers;
+    hwaddr          timer_bases[HISI_MAX_TIMERS];
+    int             timer_irqs[HISI_MAX_TIMERS];
+    uint32_t        timer_freq;     /* 0 = device default */
+
+    /* SPI (PL022) */
+    int             num_spis;
+    hwaddr          spi_bases[HISI_MAX_SPIS];
+    int             spi_irqs[HISI_MAX_SPIS];
+
+    /* Flash Memory Controller (HiFMC) */
+    hwaddr          fmc_ctrl_base;  /* 0 = no FMC */
+    hwaddr          fmc_mem_base;
+
+    /* GPIO (PL061) */
+    hwaddr          gpio_base;
+    int             gpio_count;
+    int             gpio_irq;       /* VIC: shared IRQ for all ports */
+    int             gpio_irq_start; /* GIC: first SPI, one per port */
+
+    /* DMA (PL080) */
+    hwaddr          dma_base;       /* 0 = no DMA controller */
+    int             dma_irq;
+
+    /* FEMAC (Fast Ethernet MAC) */
+    hwaddr          femac_base;     /* 0 = no FEMAC */
+    int             femac_irq;
+
+    /* SD/MMC — himciv200 (older SoCs) */
+    int             num_himci;
+    hwaddr          himci_bases[HISI_MAX_HIMCI];
+
+    /* SD/MMC — SDHCI (newer SoCs) */
+    int             num_sdhci;
+    hwaddr          sdhci_bases[HISI_MAX_SDHCI];
+    int             sdhci_irqs[HISI_MAX_SDHCI];
+} HisiSoCConfig;
+
+/*
+ * SoC identification values — written to SCSYSID register at
+ * sysctl_base + 0xEE0.  Software (U-Boot, kernel, ipctool)
+ * reads this to auto-detect the chip model.
+ */
 #define HISI_SOC_ID_CV300       0x3516C300
+#define HISI_SOC_ID_EV200       0x3516E200
 #define HISI_SOC_ID_EV300       0x3516E300
-
-/* ── CV300 (ARM926EJ-S, ARMv5) ─────────────────────────────────────── */
-
-#define CV300_SRAM_BASE         0x04010000
-#define CV300_SRAM_SIZE         (64 * KiB)
-
-#define CV300_RAM_BASE          0x80000000
-#define CV300_RAM_SIZE_DEFAULT  (64 * MiB)
-
-/* Interrupt controller: PL190 VIC */
-#define CV300_VIC_BASE          0x10040000
-
-/* UARTs (PL011) */
-#define CV300_UART0_BASE        0x12100000
-#define CV300_UART0_IRQ         5
-#define CV300_UART1_BASE        0x12101000
-#define CV300_UART1_IRQ         30
-#define CV300_UART2_BASE        0x12102000
-#define CV300_UART2_IRQ         25
-
-/* Timers (SP804) */
-#define CV300_TIMER01_BASE      0x12000000
-#define CV300_TIMER01_IRQ       3
-#define CV300_TIMER23_BASE      0x12001000
-#define CV300_TIMER23_IRQ       4
-
-/* Timer frequency (bus clock) */
-#define CV300_TIMER_FREQ        24000000  /* 24 MHz */
-
-/* System controller */
-#define CV300_SYSCTL_BASE       0x12020000
-
-/* Clock/Reset generator */
-#define CV300_CRG_BASE          0x12010000
-
-/* GPIO (PL061) — 9 ports, all share IRQ 31 */
-#define CV300_GPIO_BASE         0x12140000
-#define CV300_GPIO_COUNT        9
-#define CV300_GPIO_IRQ          31
-
-/* SPI (PL022) */
-#define CV300_SPI0_BASE         0x12120000
-#define CV300_SPI0_IRQ          6
-#define CV300_SPI1_BASE         0x12121000
-#define CV300_SPI1_IRQ          7
-
-/* Flash Memory Controller */
-#define CV300_FMC_CTRL_BASE     0x10000000
-#define CV300_FMC_MEM_BASE      0x14000000
-
-/* DMA (PL080) */
-#define CV300_DMA_BASE          0x10030000
-#define CV300_DMA_IRQ           14
-
-/* ── EV300 (Cortex-A7, ARMv7-A) ───────────────────────────────────── */
-
-#define EV300_SRAM_BASE         0x04010000
-#define EV300_SRAM_SIZE         (64 * KiB)
-
-#define EV300_RAM_BASE          0x40000000
-#define EV300_RAM_SIZE_DEFAULT  (64 * MiB)
-
-/* GICv2 */
-#define EV300_GIC_DIST_BASE     0x10301000
-#define EV300_GIC_CPU_BASE      0x10302000
-#define EV300_GIC_NUM_SPI       128
-#define EV300_GIC_NUM_IRQ       (EV300_GIC_NUM_SPI + GIC_INTERNAL) /* 160 */
-
-/* ARM generic timer PPIs */
-#define EV300_PPI_MAINT         9
-#define EV300_PPI_HYPTIMER      10
-#define EV300_PPI_VIRTTIMER     11
-#define EV300_PPI_SECTIMER      13
-#define EV300_PPI_PHYSTIMER     14
-
-/* UARTs (PL011) — IRQs are GIC SPI numbers */
-#define EV300_UART0_BASE        0x12040000
-#define EV300_UART0_IRQ         7
-#define EV300_UART1_BASE        0x12041000
-#define EV300_UART1_IRQ         8
-#define EV300_UART2_BASE        0x12042000
-#define EV300_UART2_IRQ         9
-
-/* Timers (SP804) */
-#define EV300_TIMER01_BASE      0x12000000
-#define EV300_TIMER01_IRQ       5
-#define EV300_TIMER23_BASE      0x12001000
-#define EV300_TIMER23_IRQ       6
-
-/* System controller */
-#define EV300_SYSCTL_BASE       0x12020000
-
-/* Clock/Reset generator */
-#define EV300_CRG_BASE          0x12010000
-
-/* GPIO (PL061) — 10 ports, SPI 16-25 */
-#define EV300_GPIO_BASE         0x120b0000
-#define EV300_GPIO_COUNT        10
-#define EV300_GPIO_IRQ_START    16
-
-/* SPI (PL022) */
-#define EV300_SPI0_BASE         0x12070000
-#define EV300_SPI0_IRQ          14
-#define EV300_SPI1_BASE         0x12071000
-#define EV300_SPI1_IRQ          15
-
-/* Flash Memory Controller */
-#define EV300_FMC_CTRL_BASE     0x10000000
-#define EV300_FMC_MEM_BASE      0x14000000
-
-/* ARM generic timer frequency */
-#define EV300_TIMER_FREQ        50000000  /* 50 MHz */
-
-/* SD/MMC (himciv200 DW MMC) */
-#define CV300_MMC0_BASE         0x100c0000  /* SD0 */
-#define CV300_MMC1_BASE         0x100d0000  /* SD1 */
-#define CV300_MMC2_BASE         0x100e0000  /* eMMC */
-
-/* SDHCI */
-#define EV300_SDHCI0_BASE       0x10010000  /* eMMC/SD0 */
-#define EV300_SDHCI1_BASE       0x10020000  /* SDIO1 */
-
-/* FEMAC (Fast Ethernet MAC) */
-#define CV300_FEMAC_BASE        0x10050000
-#define CV300_FEMAC_IRQ         12
-
-#define EV300_FEMAC_BASE        0x10040000
-#define EV300_FEMAC_IRQ         33
+#define HISI_SOC_ID_18EV300     0x3518E300
+#define HISI_SOC_ID_DV200       0x3516D200
 
 #endif /* HW_ARM_HISILICON_H */

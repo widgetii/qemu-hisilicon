@@ -119,7 +119,21 @@ else
     echo "  hw/net/meson.build already patched"
 fi
 
-# ── 4. Build ────────────────────────────────────────────────────────────
+# ── 4. Patch QEMU SD card model to accept 1.8V ─────────────────────────
+# The EV300 kernel DT forces UHS-I / HS200 1.8V signaling.  QEMU's SD
+# card model rejects 1.8V by default.  Patch it to accept 1.8V and
+# advertise the capability in OCR so card enumeration succeeds.
+if ! grep -q '1701.*2000' "$QEMU_DIR/hw/sd/sd.c"; then
+    sed -i '/case 2001 \.\.\. 3000:/i\    case 1701 ... 2000: /* SD_VOLTAGE_1_8V */' \
+        "$QEMU_DIR/hw/sd/sd.c"
+    sed -i 's/sd->ocr = R_OCR_VDD_VOLTAGE_WIN_HI_MASK;/sd->ocr = R_OCR_VDD_VOLTAGE_WIN_HI_MASK | R_OCR_ACCEPT_SWITCH_1V8_MASK;/' \
+        "$QEMU_DIR/hw/sd/sd.c"
+    echo "  patched hw/sd/sd.c (1.8V voltage support)"
+else
+    echo "  hw/sd/sd.c already patched"
+fi
+
+# ── 5. Build ────────────────────────────────────────────────────────────
 echo "Building QEMU (arm target)..."
 cd "$QEMU_DIR"
 mkdir -p build && cd build
