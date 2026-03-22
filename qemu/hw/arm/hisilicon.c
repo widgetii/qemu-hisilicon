@@ -27,6 +27,7 @@
 #include "hw/arm/machines-qom.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
+#include "net/net.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
 
@@ -100,6 +101,16 @@ static void hi3516cv300_init(MachineState *machine)
     for (n = 0; n < CV300_GPIO_COUNT; n++) {
         sysbus_create_simple("pl061", CV300_GPIO_BASE + n * 0x1000,
                              pic[CV300_GPIO_IRQ]);
+    }
+
+    /* FEMAC */
+    {
+        DeviceState *femac = qdev_new("hisi-femac");
+        qemu_configure_nic_device(femac, true, NULL);
+        SysBusDevice *busdev = SYS_BUS_DEVICE(femac);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, CV300_FEMAC_BASE);
+        sysbus_connect_irq(busdev, 0, pic[CV300_FEMAC_IRQ]);
     }
 
     /* Boot */
@@ -217,6 +228,16 @@ static void hi3516ev300_init(MachineState *machine)
     for (n = 0; n < EV300_GPIO_COUNT; n++) {
         sysbus_create_simple("pl061", EV300_GPIO_BASE + n * 0x1000,
                              pic[EV300_GPIO_IRQ_START + n]);
+    }
+
+    /* FEMAC */
+    {
+        DeviceState *femac = qdev_new("hisi-femac");
+        qemu_configure_nic_device(femac, true, NULL);
+        SysBusDevice *busdev = SYS_BUS_DEVICE(femac);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, EV300_FEMAC_BASE);
+        sysbus_connect_irq(busdev, 0, pic[EV300_FEMAC_IRQ]);
     }
 
     /* Boot */

@@ -1,0 +1,530 @@
+/*
+ * HiSilicon Fast Ethernet MAC (FEMAC) emulation.
+ *
+ * Emulates the FEMAC found in Hi3516CV300 and Hi3516EV300 SoCs.
+ * Compatible with kernel drivers:
+ *   - drivers/net/ethernet/hisilicon/hisi_femac.c  (MAC + DMA)
+ *   - drivers/net/phy/mdio-hisi-femac.c            (MDIO bus)
+ *
+ * The device exposes a single 8 KiB MMIO region containing three
+ * register blocks at fixed offsets from the base address:
+ *
+ *   Offset  Size   Block
+ *   0x0000  0x1000 Port registers (MAC control, DMA queues, status)
+ *   0x1100  0x0010 MDIO registers (PHY management interface)
+ *   0x1300  0x0200 GLB registers  (IRQs, MAC address, forwarding)
+ *
+ * The kernel maps each block via separate platform resources
+ * (port_base, glb_base, mdio membase) that all fall within our
+ * single MMIO region.
+ *
+ * TX: guest writes DMA address to EQ_ADDR, then frame length to
+ * EQFRM_LEN which triggers immediate DMA read + qemu_send_packet().
+ *
+ * RX: guest pushes buffer DMA addresses via IQ_ADDR writes into a
+ * 64-entry ring.  When a packet arrives, we pop a buffer, DMA-write
+ * the payload, set IQFRM_DES (length + 4 for FCS), and raise IRQ.
+ *
+ * MDIO: integrated PHY stub at address 1 presenting standard MII
+ * registers.  Reports 100 Mbps full-duplex link permanently up.
+ * The Generic PHY driver binds to it via PHY ID 0x00446161.
+ *
+ * Copyright (c) 2026 OpenIPC.
+ * Written by Dmitry Ilyin
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include "qemu/osdep.h"
+#include "qemu/log.h"
+#include "qemu/units.h"
+#include "hw/sysbus.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
+#include "net/net.h"
+#include "net/eth.h"
+#include "system/dma.h"
+
+#define TYPE_HISI_FEMAC "hisi-femac"
+OBJECT_DECLARE_SIMPLE_TYPE(HisiFemacState, HISI_FEMAC)
+
+/* Port registers */
+#define REG_MAC_PORTSEL         0x0200
+#define REG_MAC_PORTSET         0x0208
+#define REG_MAC_SET             0x0210
+#define REG_RX_COALESCE_SET     0x0340
+#define REG_QLEN_SET            0x0344
+#define REG_FC_LEVEL            0x0348
+#define REG_IQFRM_DES           0x0354
+#define REG_IQ_ADDR             0x0358
+#define REG_EQ_ADDR             0x0360
+#define REG_EQFRM_LEN           0x0364
+#define REG_ADDRQ_STAT          0x036C
+#define REG_RX_COE_CTRL         0x0380
+
+/* MDIO registers */
+#define REG_MDIO_RWCTRL         0x1100
+#define REG_MDIO_RO_DATA        0x1104
+
+/* GLB registers */
+#define REG_GLB_HOSTMAC_L32     0x1300
+#define REG_GLB_HOSTMAC_H16     0x1304
+#define REG_GLB_SOFT_RESET      0x1308
+#define REG_GLB_FWCTRL          0x1310
+#define REG_GLB_MACTCTRL        0x1314
+#define REG_GLB_IRQ_STAT        0x1330
+#define REG_GLB_IRQ_ENA         0x1334
+#define REG_GLB_IRQ_RAW         0x1338
+#define REG_MAC_FILTER_BASE     0x1400
+
+/* IRQ bits */
+#define IRQ_RX_RDY              (1 << 0)
+#define IRQ_TX_PER_PACKET       (1 << 1)
+#define IRQ_TX_FIFO_EMPTY       (1 << 6)
+#define IRQ_MULTI_RXRDY         (1 << 7)
+#define IRQ_ENA_PORT0           (1 << 18)
+#define IRQ_ENA_ALL             (1 << 19)
+
+/* MDIO RWCTRL bits */
+#define MDIO_RW_FINISH          (1 << 15)
+#define MDIO_RW_WRITE           (1 << 13)
+#define MDIO_PHY_ADDR_SHIFT     8
+#define MDIO_PHY_ADDR_MASK      0x1f
+#define MDIO_REG_ADDR_SHIFT     0  /* actually bits 4:0 per driver but offset varies */
+#define MDIO_REG_ADDR_MASK      0x1f
+
+/* ADDRQ_STAT bits */
+#define ADDRQ_TX_READY          (1 << 24)
+
+/* PHY address we respond to */
+#define FEMAC_PHY_ADDR          1
+
+/* RX ring size */
+#define RX_RING_SIZE            64
+
+struct HisiFemacState {
+    SysBusDevice parent;
+    MemoryRegion iomem;
+    qemu_irq irq;
+    NICState *nic;
+    NICConf conf;
+
+    /* Port registers */
+    uint32_t mac_portsel;
+    uint32_t mac_portset;
+    uint32_t mac_set;
+    uint32_t rx_coalesce_set;
+    uint32_t qlen_set;
+    uint32_t fc_level;
+    uint32_t rx_coe_ctrl;
+
+    /* TX */
+    uint32_t eq_addr;
+
+    /* RX ring of buffer DMA addresses */
+    uint32_t rx_ring[RX_RING_SIZE];
+    uint32_t rx_ring_head;
+    uint32_t rx_ring_tail;
+    uint32_t rx_ring_count;
+
+    /* RX frame descriptor */
+    uint32_t iqfrm_des;
+
+    /* MDIO */
+    uint32_t mdio_rwctrl;
+    uint32_t mdio_ro_data;
+    uint16_t phy_bmcr;
+    uint16_t phy_bmsr;
+    uint16_t phy_anar;
+    uint16_t phy_anlpar;
+
+    /* GLB */
+    uint32_t hostmac_l32;
+    uint32_t hostmac_h16;
+    uint32_t soft_reset;
+    uint32_t fwctrl;
+    uint32_t mactctrl;
+    uint32_t irq_ena;
+    uint32_t irq_raw;
+    uint32_t mac_filter[16];
+};
+
+static void hisi_femac_update_irq(HisiFemacState *s)
+{
+    bool level = (s->irq_raw & s->irq_ena) != 0;
+    qemu_set_irq(s->irq, level);
+}
+
+/* ── MDIO PHY stub ─────────────────────────────────────────────────── */
+
+static uint16_t hisi_femac_phy_read(HisiFemacState *s, uint8_t reg)
+{
+    switch (reg) {
+    case 0: /* BMCR */
+        return s->phy_bmcr;
+    case 1: /* BMSR */
+        return s->phy_bmsr;
+    case 2: /* PHYID1 */
+        return 0x0044;
+    case 3: /* PHYID2 */
+        return 0x6161;
+    case 4: /* ANAR */
+        return s->phy_anar;
+    case 5: /* ANLPAR */
+        return s->phy_anlpar;
+    default:
+        return 0;
+    }
+}
+
+static void hisi_femac_phy_write(HisiFemacState *s, uint8_t reg, uint16_t val)
+{
+    switch (reg) {
+    case 0: /* BMCR */
+        /* bit 15 (reset) and bit 9 (restart autoneg) are self-clearing */
+        s->phy_bmcr = val & ~(0x8000 | 0x0200);
+        break;
+    case 4: /* ANAR */
+        s->phy_anar = val;
+        break;
+    default:
+        break;
+    }
+}
+
+static void hisi_femac_mdio_access(HisiFemacState *s, uint32_t val)
+{
+    uint8_t phy_addr = (val >> MDIO_PHY_ADDR_SHIFT) & MDIO_PHY_ADDR_MASK;
+    uint8_t reg_addr = val & MDIO_REG_ADDR_MASK;
+    bool is_write = val & MDIO_RW_WRITE;
+
+    s->mdio_rwctrl = val | MDIO_RW_FINISH;
+
+    if (phy_addr != FEMAC_PHY_ADDR) {
+        s->mdio_ro_data = 0xffff;
+        return;
+    }
+
+    if (is_write) {
+        hisi_femac_phy_write(s, reg_addr, (val >> 16) & 0xffff);
+    } else {
+        s->mdio_ro_data = hisi_femac_phy_read(s, reg_addr);
+    }
+}
+
+/* ── TX path ───────────────────────────────────────────────────────── */
+
+static void hisi_femac_do_tx(HisiFemacState *s, uint32_t len)
+{
+    uint8_t buf[2048];
+
+    /* Driver includes 4-byte FCS in length; strip it */
+    if (len <= 4 || len > sizeof(buf) + 4) {
+        return;
+    }
+    uint32_t real_len = len - 4;
+
+    if (dma_memory_read(&address_space_memory, s->eq_addr, buf, real_len,
+                        MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "hisi-femac: TX DMA read failed at 0x%08x\n", s->eq_addr);
+        return;
+    }
+
+    qemu_send_packet(qemu_get_queue(s->nic), buf, real_len);
+
+    s->irq_raw |= IRQ_TX_PER_PACKET | IRQ_TX_FIFO_EMPTY;
+    hisi_femac_update_irq(s);
+}
+
+/* ── RX path ───────────────────────────────────────────────────────── */
+
+static bool hisi_femac_can_receive(NetClientState *nc)
+{
+    HisiFemacState *s = qemu_get_nic_opaque(nc);
+    return s->rx_ring_count > 0;
+}
+
+static ssize_t hisi_femac_receive(NetClientState *nc, const uint8_t *buf,
+                                  size_t size)
+{
+    HisiFemacState *s = qemu_get_nic_opaque(nc);
+
+    if (s->rx_ring_count == 0) {
+        return -1;
+    }
+
+    /* Pop buffer address from ring */
+    uint32_t dma_addr = s->rx_ring[s->rx_ring_head];
+    s->rx_ring_head = (s->rx_ring_head + 1) % RX_RING_SIZE;
+    s->rx_ring_count--;
+
+    /* Write packet data to guest memory */
+    if (dma_memory_write(&address_space_memory, dma_addr, buf, size,
+                         MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "hisi-femac: RX DMA write failed at 0x%08x\n", dma_addr);
+        return -1;
+    }
+
+    /* Set frame descriptor: size + 4 for FCS */
+    s->iqfrm_des = (size + 4) & 0xfff;
+
+    s->irq_raw |= IRQ_RX_RDY | IRQ_MULTI_RXRDY;
+    hisi_femac_update_irq(s);
+
+    return size;
+}
+
+/* ── MMIO ──────────────────────────────────────────────────────────── */
+
+static uint64_t hisi_femac_read(void *opaque, hwaddr offset, unsigned size)
+{
+    HisiFemacState *s = opaque;
+
+    switch (offset) {
+    /* Port */
+    case REG_MAC_PORTSEL:
+        return s->mac_portsel;
+    case REG_MAC_PORTSET:
+        return s->mac_portset;
+    case REG_MAC_SET:
+        return s->mac_set;
+    case REG_RX_COALESCE_SET:
+        return s->rx_coalesce_set;
+    case REG_QLEN_SET:
+        return s->qlen_set;
+    case REG_FC_LEVEL:
+        return s->fc_level;
+    case REG_IQFRM_DES:
+        return s->iqfrm_des;
+    case REG_ADDRQ_STAT:
+        /* TX_CNT (bits 5:0) = 0 (instant completion),
+         * BIT_TX_READY (bit 24) always set,
+         * BIT_RX_READY (bit 25) set if ring has room for buffers */
+        return ADDRQ_TX_READY |
+               ((s->rx_ring_count < RX_RING_SIZE) ? (1 << 25) : 0);
+    case REG_RX_COE_CTRL:
+        return s->rx_coe_ctrl;
+
+    /* MDIO */
+    case REG_MDIO_RWCTRL:
+        return s->mdio_rwctrl;
+    case REG_MDIO_RO_DATA:
+        return s->mdio_ro_data;
+
+    /* GLB */
+    case REG_GLB_HOSTMAC_L32:
+        return s->hostmac_l32;
+    case REG_GLB_HOSTMAC_H16:
+        return s->hostmac_h16;
+    case REG_GLB_SOFT_RESET:
+        return s->soft_reset;
+    case REG_GLB_FWCTRL:
+        return s->fwctrl;
+    case REG_GLB_MACTCTRL:
+        return s->mactctrl;
+    case REG_GLB_IRQ_STAT:
+        return s->irq_raw & s->irq_ena;
+    case REG_GLB_IRQ_ENA:
+        return s->irq_ena;
+    case REG_GLB_IRQ_RAW:
+        return s->irq_raw;
+    default:
+        if (offset >= REG_MAC_FILTER_BASE &&
+            offset < REG_MAC_FILTER_BASE + 16 * 4) {
+            return s->mac_filter[(offset - REG_MAC_FILTER_BASE) / 4];
+        }
+        qemu_log_mask(LOG_UNIMP,
+                      "hisi-femac: read from unimplemented reg 0x%03" HWADDR_PRIx "\n",
+                      offset);
+        return 0;
+    }
+}
+
+static void hisi_femac_write(void *opaque, hwaddr offset, uint64_t val,
+                             unsigned size)
+{
+    HisiFemacState *s = opaque;
+
+    switch (offset) {
+    /* Port */
+    case REG_MAC_PORTSEL:
+        s->mac_portsel = val;
+        break;
+    case REG_MAC_PORTSET:
+        s->mac_portset = val;
+        break;
+    case REG_MAC_SET:
+        s->mac_set = val;
+        break;
+    case REG_RX_COALESCE_SET:
+        s->rx_coalesce_set = val;
+        break;
+    case REG_QLEN_SET:
+        s->qlen_set = val;
+        break;
+    case REG_FC_LEVEL:
+        s->fc_level = val;
+        break;
+    case REG_IQ_ADDR:
+        /* Push RX buffer address into ring */
+        if (s->rx_ring_count < RX_RING_SIZE) {
+            s->rx_ring[s->rx_ring_tail] = val;
+            s->rx_ring_tail = (s->rx_ring_tail + 1) % RX_RING_SIZE;
+            s->rx_ring_count++;
+        }
+        qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        break;
+    case REG_EQ_ADDR:
+        s->eq_addr = val;
+        break;
+    case REG_EQFRM_LEN:
+        hisi_femac_do_tx(s, val);
+        break;
+    case REG_RX_COE_CTRL:
+        s->rx_coe_ctrl = val;
+        break;
+
+    /* MDIO */
+    case REG_MDIO_RWCTRL:
+        hisi_femac_mdio_access(s, val);
+        break;
+
+    /* GLB */
+    case REG_GLB_HOSTMAC_L32:
+        s->hostmac_l32 = val;
+        break;
+    case REG_GLB_HOSTMAC_H16:
+        s->hostmac_h16 = val;
+        break;
+    case REG_GLB_SOFT_RESET:
+        s->soft_reset = val;
+        break;
+    case REG_GLB_FWCTRL:
+        s->fwctrl = val;
+        break;
+    case REG_GLB_MACTCTRL:
+        s->mactctrl = val;
+        break;
+    case REG_GLB_IRQ_ENA:
+        s->irq_ena = val;
+        hisi_femac_update_irq(s);
+        break;
+    case REG_GLB_IRQ_RAW:
+        /* W1C: clear bits written as 1 */
+        s->irq_raw &= ~val;
+        hisi_femac_update_irq(s);
+        break;
+    default:
+        if (offset >= REG_MAC_FILTER_BASE &&
+            offset < REG_MAC_FILTER_BASE + 16 * 4) {
+            s->mac_filter[(offset - REG_MAC_FILTER_BASE) / 4] = val;
+            break;
+        }
+        qemu_log_mask(LOG_UNIMP,
+                      "hisi-femac: write to unimplemented reg 0x%03" HWADDR_PRIx
+                      " = 0x%" PRIx64 "\n", offset, val);
+        break;
+    }
+}
+
+static const MemoryRegionOps hisi_femac_ops = {
+    .read = hisi_femac_read,
+    .write = hisi_femac_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl.min_access_size = 4,
+    .impl.max_access_size = 4,
+};
+
+static NetClientInfo hisi_femac_net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = hisi_femac_can_receive,
+    .receive = hisi_femac_receive,
+};
+
+static void hisi_femac_init(Object *obj)
+{
+    HisiFemacState *s = HISI_FEMAC(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
+    memory_region_init_io(&s->iomem, obj, &hisi_femac_ops, s,
+                          "hisi-femac", 0x2000);
+    sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->irq);
+}
+
+static void hisi_femac_realize(DeviceState *dev, Error **errp)
+{
+    HisiFemacState *s = HISI_FEMAC(dev);
+
+    s->nic = qemu_new_nic(&hisi_femac_net_info, &s->conf,
+                           object_get_typename(OBJECT(dev)),
+                           dev->id, &dev->mem_reentrancy_guard, s);
+    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
+}
+
+static void hisi_femac_reset(DeviceState *dev)
+{
+    HisiFemacState *s = HISI_FEMAC(dev);
+
+    s->mac_portsel = 0;
+    s->mac_portset = 0;
+    s->mac_set = 0;
+    s->rx_coalesce_set = 0;
+    s->qlen_set = 0;
+    s->fc_level = 0;
+    s->rx_coe_ctrl = 0;
+    s->eq_addr = 0;
+    s->rx_ring_head = 0;
+    s->rx_ring_tail = 0;
+    s->rx_ring_count = 0;
+    s->iqfrm_des = 0;
+    s->mdio_rwctrl = MDIO_RW_FINISH; /* idle = ready */
+    s->mdio_ro_data = 0;
+    s->hostmac_l32 = 0;
+    s->hostmac_h16 = 0;
+    s->soft_reset = 0;
+    s->fwctrl = 0;
+    s->mactctrl = 0;
+    s->irq_ena = 0;
+    s->irq_raw = 0;
+    memset(s->mac_filter, 0, sizeof(s->mac_filter));
+
+    /* PHY defaults: 100M FD, autoneg, link up, autoneg complete */
+    s->phy_bmcr = 0x3100;  /* 100Mbps, full duplex, autoneg enable */
+    s->phy_bmsr = 0x786d;  /* link up, autoneg complete, 100TX-FD capable */
+    s->phy_anar = 0x01e1;  /* 100TX-FD/HD, 10TX-FD/HD */
+    s->phy_anlpar = 0x45e1; /* partner: 100TX-FD */
+}
+
+static const Property hisi_femac_properties[] = {
+    DEFINE_NIC_PROPERTIES(HisiFemacState, conf),
+};
+
+static void hisi_femac_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->realize = hisi_femac_realize;
+    device_class_set_legacy_reset(dc, hisi_femac_reset);
+    device_class_set_props(dc, hisi_femac_properties);
+    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
+}
+
+static const TypeInfo hisi_femac_info = {
+    .name          = TYPE_HISI_FEMAC,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(HisiFemacState),
+    .instance_init = hisi_femac_init,
+    .class_init    = hisi_femac_class_init,
+};
+
+static void hisi_femac_register_types(void)
+{
+    type_register_static(&hisi_femac_info);
+}
+
+type_init(hisi_femac_register_types)

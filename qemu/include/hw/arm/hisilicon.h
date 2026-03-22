@@ -117,4 +117,11 @@
 /* ARM generic timer frequency */
 #define EV300_TIMER_FREQ        50000000  /* 50 MHz */
 
+/* FEMAC (Fast Ethernet MAC) */
+#define CV300_FEMAC_BASE        0x10050000
+#define CV300_FEMAC_IRQ         12
+
+#define EV300_FEMAC_BASE        0x10040000
+#define EV300_FEMAC_IRQ         33
+
 #endif /* HW_ARM_HISILICON_H */
