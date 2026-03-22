@@ -37,6 +37,7 @@ cp qemu/include/hw/arm/hisilicon.h  "$QEMU_DIR/include/hw/arm/"
 cp qemu/hw/misc/hisi-sysctl.c       "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-crg.c          "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-fmc.c          "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/hisi-himci.c        "$QEMU_DIR/hw/misc/"
 cp qemu/hw/net/hisi-femac.c         "$QEMU_DIR/hw/net/"
 
 # ── 3. Patch build system ──────────────────────────────────────────────
@@ -58,6 +59,7 @@ config HISILICON
     select PL022
     select PL080
     select UNIMP
+    select SDHCI
     select HISI_MISC
     select HISI_FEMAC
 KCONFIG
@@ -89,7 +91,7 @@ fi
 
 # hw/misc/meson.build
 if ! grep -q hisi-sysctl "$QEMU_DIR/hw/misc/meson.build"; then
-    echo "system_ss.add(when: 'CONFIG_HISI_MISC', if_true: files('hisi-sysctl.c', 'hisi-crg.c', 'hisi-fmc.c'))" \
+    echo "system_ss.add(when: 'CONFIG_HISI_MISC', if_true: files('hisi-sysctl.c', 'hisi-crg.c', 'hisi-fmc.c', 'hisi-himci.c'))" \
         >> "$QEMU_DIR/hw/misc/meson.build"
     echo "  patched hw/misc/meson.build"
 else

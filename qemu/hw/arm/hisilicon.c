@@ -27,6 +27,7 @@
 #include "hw/arm/machines-qom.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
+#include "hw/sd/sdhci.h"
 #include "net/net.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
@@ -140,6 +141,19 @@ static void hi3516cv300_init(MachineState *machine)
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, CV300_FEMAC_BASE);
         sysbus_connect_irq(busdev, 0, pic[CV300_FEMAC_IRQ]);
+    }
+
+    /* SD/MMC (himciv200) */
+    {
+        static const hwaddr mmc_bases[] = {
+            CV300_MMC0_BASE, CV300_MMC1_BASE, CV300_MMC2_BASE,
+        };
+        for (int i = 0; i < ARRAY_SIZE(mmc_bases); i++) {
+            DeviceState *mmc = qdev_new("hisi-himci");
+            SysBusDevice *busdev = SYS_BUS_DEVICE(mmc);
+            sysbus_realize_and_unref(busdev, &error_fatal);
+            sysbus_mmio_map(busdev, 0, mmc_bases[i]);
+        }
     }
 
     /* Boot */
@@ -299,6 +313,20 @@ static void hi3516ev300_init(MachineState *machine)
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, EV300_FEMAC_BASE);
         sysbus_connect_irq(busdev, 0, pic[EV300_FEMAC_IRQ]);
+    }
+
+    /* SDHCI */
+    {
+        static const hwaddr sdhci_bases[] = {
+            EV300_SDHCI0_BASE, EV300_SDHCI1_BASE,
+        };
+        for (int i = 0; i < ARRAY_SIZE(sdhci_bases); i++) {
+            DeviceState *sdhci = qdev_new(TYPE_SYSBUS_SDHCI);
+            qdev_prop_set_uint8(sdhci, "sd-spec-version", 3);
+            SysBusDevice *busdev = SYS_BUS_DEVICE(sdhci);
+            sysbus_realize_and_unref(busdev, &error_fatal);
+            sysbus_mmio_map(busdev, 0, sdhci_bases[i]);
+        }
     }
 
     /* Boot */

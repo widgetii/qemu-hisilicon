@@ -123,6 +123,15 @@
 /* ARM generic timer frequency */
 #define EV300_TIMER_FREQ        50000000  /* 50 MHz */
 
+/* SD/MMC (himciv200 DW MMC) */
+#define CV300_MMC0_BASE         0x100c0000  /* SD0 */
+#define CV300_MMC1_BASE         0x100d0000  /* SD1 */
+#define CV300_MMC2_BASE         0x100e0000  /* eMMC */
+
+/* SDHCI */
+#define EV300_SDHCI0_BASE       0x10010000  /* eMMC/SD0 */
+#define EV300_SDHCI1_BASE       0x10020000  /* SDIO1 */
+
 /* FEMAC (Fast Ethernet MAC) */
 #define CV300_FEMAC_BASE        0x10050000
 #define CV300_FEMAC_IRQ         12
