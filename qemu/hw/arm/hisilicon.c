@@ -44,6 +44,35 @@ static void hi3516cv300_init(MachineState *machine)
     qemu_irq pic[32];
     int n;
 
+    /* Trap page at address 0 (see EV300 comment) */
+    {
+        MemoryRegion *trap = g_new(MemoryRegion, 1);
+        memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
+                               0x1000, &error_fatal);
+        memory_region_add_subregion(sysmem, 0, trap);
+        uint32_t insn[2] = { cpu_to_le32(0xe3a00000),
+                             cpu_to_le32(0xe12fff1e) };
+        address_space_write_rom(&address_space_memory, 0,
+                                MEMTXATTRS_UNSPECIFIED, insn, 8);
+    }
+
+    /* SRAM (used by U-Boot SPL for early stack / global data) */
+    {
+        MemoryRegion *sram = g_new(MemoryRegion, 1);
+        memory_region_init_ram(sram, NULL, "hisilicon.sram",
+                               CV300_SRAM_SIZE, &error_fatal);
+        memory_region_add_subregion(sysmem, CV300_SRAM_BASE, sram);
+    }
+
+    /* FMC (Flash Memory Controller) */
+    {
+        DeviceState *fmc = qdev_new("hisi-fmc");
+        SysBusDevice *fmcbus = SYS_BUS_DEVICE(fmc);
+        sysbus_realize_and_unref(fmcbus, &error_fatal);
+        sysbus_mmio_map(fmcbus, 0, CV300_FMC_CTRL_BASE);
+        sysbus_mmio_map(fmcbus, 1, CV300_FMC_MEM_BASE);
+    }
+
     /* RAM */
     memory_region_add_subregion(sysmem, CV300_RAM_BASE, machine->ram);
 
@@ -143,6 +172,38 @@ static void hi3516ev300_init(MachineState *machine)
     SysBusDevice *gicbus;
     qemu_irq pic[EV300_GIC_NUM_SPI];
     int n;
+
+    /* Trap page at address 0 — U-Boot driver model may call through NULL
+     * function pointers for absent hardware.  Place "mov r0, #0; bx lr"
+     * so those calls harmlessly return 0 instead of executing garbage. */
+    {
+        MemoryRegion *trap = g_new(MemoryRegion, 1);
+        memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
+                               0x1000, &error_fatal);
+        memory_region_add_subregion(sysmem, 0, trap);
+        /* ARM: mov r0, #0 (0xe3a00000); bx lr (0xe12fff1e) */
+        uint32_t insn[2] = { cpu_to_le32(0xe3a00000),
+                             cpu_to_le32(0xe12fff1e) };
+        address_space_write_rom(&address_space_memory, 0,
+                                MEMTXATTRS_UNSPECIFIED, insn, 8);
+    }
+
+    /* SRAM (used by U-Boot SPL for early stack / global data) */
+    {
+        MemoryRegion *sram = g_new(MemoryRegion, 1);
+        memory_region_init_ram(sram, NULL, "hisilicon.sram",
+                               EV300_SRAM_SIZE, &error_fatal);
+        memory_region_add_subregion(sysmem, EV300_SRAM_BASE, sram);
+    }
+
+    /* FMC (Flash Memory Controller) */
+    {
+        DeviceState *fmc = qdev_new("hisi-fmc");
+        SysBusDevice *fmcbus = SYS_BUS_DEVICE(fmc);
+        sysbus_realize_and_unref(fmcbus, &error_fatal);
+        sysbus_mmio_map(fmcbus, 0, EV300_FMC_CTRL_BASE);
+        sysbus_mmio_map(fmcbus, 1, EV300_FMC_MEM_BASE);
+    }
 
     /* RAM */
     memory_region_add_subregion(sysmem, EV300_RAM_BASE, machine->ram);

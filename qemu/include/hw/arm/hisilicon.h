@@ -16,6 +16,9 @@
 
 /* ── CV300 (ARM926EJ-S, ARMv5) ─────────────────────────────────────── */
 
+#define CV300_SRAM_BASE         0x04010000
+#define CV300_SRAM_SIZE         (64 * KiB)
+
 #define CV300_RAM_BASE          0x80000000
 #define CV300_RAM_SIZE_DEFAULT  (64 * MiB)
 
@@ -62,6 +65,9 @@
 #define CV300_DMA_IRQ           14
 
 /* ── EV300 (Cortex-A7, ARMv7-A) ───────────────────────────────────── */
+
+#define EV300_SRAM_BASE         0x04010000
+#define EV300_SRAM_SIZE         (64 * KiB)
 
 #define EV300_RAM_BASE          0x40000000
 #define EV300_RAM_SIZE_DEFAULT  (64 * MiB)
