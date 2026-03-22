@@ -141,6 +141,11 @@ static const HisiSoCConfig hi3516ev300_soc = {
 
     .num_i2c            = 3,
     .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 },
+
+    .vedu_base          = 0x11410000,
+    .jpge_base          = 0x11420000,
+    .vedu_irq           = 47,
+    .jpge_irq           = 48,
 };
 
 /*
@@ -194,6 +199,11 @@ static const HisiSoCConfig hi3516ev200_soc = {
 
     .num_i2c            = 3,
     .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 },
+
+    .vedu_base          = 0x11410000,
+    .jpge_base          = 0x11420000,
+    .vedu_irq           = 47,
+    .jpge_irq           = 48,
 };
 
 /*
@@ -249,6 +259,11 @@ static const HisiSoCConfig hi3518ev300_soc = {
 
     .num_i2c            = 3,
     .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 },
+
+    .vedu_base          = 0x11410000,
+    .jpge_base          = 0x11420000,
+    .vedu_irq           = 47,
+    .jpge_irq           = 48,
 };
 
 /*
@@ -302,6 +317,11 @@ static const HisiSoCConfig hi3516dv200_soc = {
 
     .num_i2c            = 3,
     .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 },
+
+    .vedu_base          = 0x11410000,
+    .jpge_base          = 0x11420000,
+    .vedu_irq           = 47,
+    .jpge_irq           = 48,
 };
 
 /*
@@ -342,6 +362,10 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .sdhci_irqs         = { 30, 31 },                       \
     .num_i2c            = 3,                                \
     .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 }, \
+    .vedu_base          = 0x11410000,                       \
+    .jpge_base          = 0x11420000,                       \
+    .vedu_irq           = 47,                              \
+    .jpge_irq           = 48,                              \
     .num_regbanks       = 6,                                \
     .regbanks           = {                                 \
         { "hisi-misc",       0x12028000, 0x8000  },         \
@@ -633,6 +657,17 @@ static void hisilicon_common_init(MachineState *machine,
         i2c_devs[n] = qdev_new("hisi-i2c");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(i2c_devs[n]), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(i2c_devs[n]), 0, c->i2c_bases[n]);
+    }
+
+    /* VEDU + JPGE */
+    if (c->vedu_base) {
+        DeviceState *vedu = qdev_new("hisi-vedu");
+        SysBusDevice *busdev = SYS_BUS_DEVICE(vedu);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->vedu_base);
+        sysbus_mmio_map(busdev, 1, c->jpge_base);
+        sysbus_connect_irq(busdev, 0, pic[c->vedu_irq]);
+        sysbus_connect_irq(busdev, 1, pic[c->jpge_irq]);
     }
 
     /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */

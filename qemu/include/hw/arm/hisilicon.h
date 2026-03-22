@@ -103,6 +103,12 @@ typedef struct HisiSoCConfig {
     int             num_i2c;
     hwaddr          i2c_bases[HISI_MAX_I2C];
 
+    /* VEDU (Video Encoder) + JPGE */
+    hwaddr          vedu_base;      /* 0 = no VEDU */
+    hwaddr          jpge_base;
+    int             vedu_irq;
+    int             jpge_irq;
+
     /* Generic RAM-backed register banks (pin mux, DDR PHY, PWM, etc.) */
     int             num_regbanks;
     HisiRegbankEntry regbanks[HISI_MAX_REGBANKS];
