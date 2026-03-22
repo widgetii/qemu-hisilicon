@@ -39,6 +39,9 @@
 #define CV300_TIMER23_BASE      0x12001000
 #define CV300_TIMER23_IRQ       4
 
+/* Timer frequency (bus clock) */
+#define CV300_TIMER_FREQ        24000000  /* 24 MHz */
+
 /* System controller */
 #define CV300_SYSCTL_BASE       0x12020000
 

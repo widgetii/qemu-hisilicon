@@ -108,9 +108,21 @@ static void hi3516cv300_init(MachineState *machine)
     pl011_create(CV300_UART1_BASE, pic[CV300_UART1_IRQ], serial_hd(1));
     pl011_create(CV300_UART2_BASE, pic[CV300_UART2_IRQ], serial_hd(2));
 
-    /* Timers */
-    sysbus_create_simple("sp804", CV300_TIMER01_BASE, pic[CV300_TIMER01_IRQ]);
-    sysbus_create_simple("sp804", CV300_TIMER23_BASE, pic[CV300_TIMER23_IRQ]);
+    /* Timers (SP804 @ 24 MHz bus clock — kernel reads from DT/CRG) */
+    {
+        DeviceState *t0 = qdev_new("sp804");
+        DeviceState *t1 = qdev_new("sp804");
+        qdev_prop_set_uint32(t0, "freq0", CV300_TIMER_FREQ);
+        qdev_prop_set_uint32(t0, "freq1", CV300_TIMER_FREQ);
+        qdev_prop_set_uint32(t1, "freq0", CV300_TIMER_FREQ);
+        qdev_prop_set_uint32(t1, "freq1", CV300_TIMER_FREQ);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(t0), &error_fatal);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(t1), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(t0), 0, CV300_TIMER01_BASE);
+        sysbus_mmio_map(SYS_BUS_DEVICE(t1), 0, CV300_TIMER23_BASE);
+        sysbus_connect_irq(SYS_BUS_DEVICE(t0), 0, pic[CV300_TIMER01_IRQ]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(t1), 0, pic[CV300_TIMER23_IRQ]);
+    }
 
     /* SPI */
     sysbus_create_simple("pl022", CV300_SPI0_BASE, pic[CV300_SPI0_IRQ]);
