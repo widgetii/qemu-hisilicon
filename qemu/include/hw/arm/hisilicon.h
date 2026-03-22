@@ -23,6 +23,7 @@
 #define HISI_MAX_SPIS     2
 #define HISI_MAX_HIMCI    3
 #define HISI_MAX_SDHCI    2
+#define HISI_MAX_I2C      3
 #define HISI_MAX_REGBANKS 8
 
 typedef struct HisiRegbankEntry {
@@ -97,6 +98,10 @@ typedef struct HisiSoCConfig {
     int             num_sdhci;
     hwaddr          sdhci_bases[HISI_MAX_SDHCI];
     int             sdhci_irqs[HISI_MAX_SDHCI];
+
+    /* I2C (HiBVT) */
+    int             num_i2c;
+    hwaddr          i2c_bases[HISI_MAX_I2C];
 
     /* Generic RAM-backed register banks (pin mux, DDR PHY, PWM, etc.) */
     int             num_regbanks;

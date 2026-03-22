@@ -18,6 +18,7 @@
 #include "qapi/error.h"
 #include "qemu/units.h"
 #include "qemu/log.h"
+#include "qemu/error-report.h"
 #include "cpu.h"
 #include "hw/sysbus.h"
 #include "hw/qdev-properties.h"
@@ -36,6 +37,7 @@
 #include "system/blockdev.h"
 #include "system/block-backend.h"
 #include "net/net.h"
+#include "hw/i2c/i2c.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
 
@@ -133,6 +135,9 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
+
+    .num_i2c            = 3,
+    .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 },
 };
 
 /*
@@ -183,6 +188,9 @@ static const HisiSoCConfig hi3516ev200_soc = {
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
+
+    .num_i2c            = 3,
+    .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 },
 };
 
 /*
@@ -235,6 +243,9 @@ static const HisiSoCConfig hi3518ev300_soc = {
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
+
+    .num_i2c            = 3,
+    .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 },
 };
 
 /*
@@ -285,6 +296,9 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
+
+    .num_i2c            = 3,
+    .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 },
 };
 
 /*
@@ -323,6 +337,8 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .num_sdhci          = 2,                                \
     .sdhci_bases        = { 0x10010000, 0x10020000 },       \
     .sdhci_irqs         = { 30, 31 },                       \
+    .num_i2c            = 3,                                \
+    .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000 }, \
     .num_regbanks       = 6,                                \
     .regbanks           = {                                 \
         { "hisi-misc",       0x12028000, 0x8000  },         \
@@ -364,6 +380,14 @@ static const HisiSoCConfig gk7605v100_soc = {
     .gpio_count         = 10,
     HISI_V4_COMMON_PERIPH,
 };
+
+/* ── Machine state with sensor property ────────────────────────────── */
+
+/* Extra state appended to MachineState for the sensor property */
+typedef struct {
+    MachineState parent_obj;
+    char *sensor;
+} HisiMachineState;
 
 /* ── Shared machine init ───────────────────────────────────────────── */
 
@@ -600,6 +624,14 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
+    /* I2C (HiBVT) */
+    DeviceState *i2c_devs[HISI_MAX_I2C] = { NULL };
+    for (n = 0; n < c->num_i2c; n++) {
+        i2c_devs[n] = qdev_new("hisi-i2c");
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(i2c_devs[n]), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(i2c_devs[n]), 0, c->i2c_bases[n]);
+    }
+
     /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */
     for (n = 0; n < c->num_regbanks; n++) {
         if (c->regbanks[n].base) {
@@ -611,106 +643,51 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
+    /* Sensor auto-attach via -machine sensor=imx335 */
+    {
+        HisiMachineState *hms = (HisiMachineState *)machine;
+        if (hms->sensor && c->num_i2c > 0 && i2c_devs[0]) {
+            if (!strcmp(hms->sensor, "imx335")) {
+                BusState *i2c_bus = qdev_get_child_bus(i2c_devs[0], "i2c");
+                DeviceState *sensor = qdev_new("hisi-imx335");
+                qdev_prop_set_uint8(sensor, "address", 0x1A);
+                qdev_realize_and_unref(sensor, i2c_bus, &error_fatal);
+            } else {
+                error_report("Unknown sensor '%s' (supported: imx335)",
+                             hms->sensor);
+                exit(1);
+            }
+        }
+    }
+
     /* Boot */
     hisilicon_binfo.ram_size = machine->ram_size;
     hisilicon_binfo.loader_start = c->ram_base;
     arm_load_kernel(cpu, machine, &hisilicon_binfo);
 }
 
+/* ── Sensor property accessors ─────────────────────────────────────── */
+
+static char *hisi_machine_get_sensor(Object *obj, Error **errp)
+{
+    HisiMachineState *s = (HisiMachineState *)obj;
+    return g_strdup(s->sensor);
+}
+
+static void hisi_machine_set_sensor(Object *obj, const char *value,
+                                     Error **errp)
+{
+    HisiMachineState *s = (HisiMachineState *)obj;
+    g_free(s->sensor);
+    s->sensor = g_strdup(value);
+}
+
 /* ── Per-machine wrappers ──────────────────────────────────────────── */
 
-static void hi3516cv300_init(MachineState *machine)
-{
-    hisilicon_common_init(machine, &hi3516cv300_soc);
-}
-
-static void hi3516cv300_class_init(MachineClass *mc)
-{
-    mc->desc = hi3516cv300_soc.desc;
-    mc->init = hi3516cv300_init;
-    mc->default_cpu_type = hi3516cv300_soc.cpu_type;
-    mc->default_ram_size = hi3516cv300_soc.ram_size_default;
-    mc->default_ram_id = "hisilicon.ram";
-    mc->block_default_type = IF_MTD;
-    mc->ignore_memory_transaction_failures = true;
-}
-
-DEFINE_MACHINE_ARM("hi3516cv300", hi3516cv300_class_init)
-
-static void hi3516ev300_init(MachineState *machine)
-{
-    hisilicon_common_init(machine, &hi3516ev300_soc);
-}
-
-static void hi3516ev300_class_init(MachineClass *mc)
-{
-    mc->desc = hi3516ev300_soc.desc;
-    mc->init = hi3516ev300_init;
-    mc->default_cpu_type = hi3516ev300_soc.cpu_type;
-    mc->default_ram_size = hi3516ev300_soc.ram_size_default;
-    mc->default_ram_id = "hisilicon.ram";
-    mc->block_default_type = IF_MTD;
-    mc->ignore_memory_transaction_failures = true;
-}
-
-DEFINE_MACHINE_ARM("hi3516ev300", hi3516ev300_class_init)
-
-static void hi3516ev200_init(MachineState *machine)
-{
-    hisilicon_common_init(machine, &hi3516ev200_soc);
-}
-
-static void hi3516ev200_class_init(MachineClass *mc)
-{
-    mc->desc = hi3516ev200_soc.desc;
-    mc->init = hi3516ev200_init;
-    mc->default_cpu_type = hi3516ev200_soc.cpu_type;
-    mc->default_ram_size = hi3516ev200_soc.ram_size_default;
-    mc->default_ram_id = "hisilicon.ram";
-    mc->block_default_type = IF_MTD;
-    mc->ignore_memory_transaction_failures = true;
-}
-
-DEFINE_MACHINE_ARM("hi3516ev200", hi3516ev200_class_init)
-
-static void hi3518ev300_init(MachineState *machine)
-{
-    hisilicon_common_init(machine, &hi3518ev300_soc);
-}
-
-static void hi3518ev300_class_init(MachineClass *mc)
-{
-    mc->desc = hi3518ev300_soc.desc;
-    mc->init = hi3518ev300_init;
-    mc->default_cpu_type = hi3518ev300_soc.cpu_type;
-    mc->default_ram_size = hi3518ev300_soc.ram_size_default;
-    mc->default_ram_id = "hisilicon.ram";
-    mc->block_default_type = IF_MTD;
-    mc->ignore_memory_transaction_failures = true;
-}
-
-DEFINE_MACHINE_ARM("hi3518ev300", hi3518ev300_class_init)
-
-static void hi3516dv200_init(MachineState *machine)
-{
-    hisilicon_common_init(machine, &hi3516dv200_soc);
-}
-
-static void hi3516dv200_class_init(MachineClass *mc)
-{
-    mc->desc = hi3516dv200_soc.desc;
-    mc->init = hi3516dv200_init;
-    mc->default_cpu_type = hi3516dv200_soc.cpu_type;
-    mc->default_ram_size = hi3516dv200_soc.ram_size_default;
-    mc->default_ram_id = "hisilicon.ram";
-    mc->block_default_type = IF_MTD;
-    mc->ignore_memory_transaction_failures = true;
-}
-
-DEFINE_MACHINE_ARM("hi3516dv200", hi3516dv200_class_init)
-
-/* Goke machines — identical hardware, different SoC ID branding */
-
+/*
+ * All HiSilicon machines use HisiMachineState (for the sensor property)
+ * and the ARM interface array (for arm/aarch64 dual-build).
+ */
 #define DEFINE_HISI_MACHINE(namestr, tag, config)                    \
     static void tag##_init(MachineState *machine)                    \
     {                                                                \
@@ -718,6 +695,7 @@ DEFINE_MACHINE_ARM("hi3516dv200", hi3516dv200_class_init)
     }                                                                \
     static void tag##_class_init(MachineClass *mc)                   \
     {                                                                \
+        ObjectClass *oc = OBJECT_CLASS(mc);                          \
         mc->desc = config.desc;                                      \
         mc->init = tag##_init;                                       \
         mc->default_cpu_type = config.cpu_type;                      \
@@ -725,9 +703,20 @@ DEFINE_MACHINE_ARM("hi3516dv200", hi3516dv200_class_init)
         mc->default_ram_id = "hisilicon.ram";                        \
         mc->block_default_type = IF_MTD;                             \
         mc->ignore_memory_transaction_failures = true;               \
+        object_class_property_add_str(oc, "sensor",                  \
+            hisi_machine_get_sensor, hisi_machine_set_sensor);       \
+        object_class_property_set_description(oc, "sensor",          \
+            "Image sensor to attach (e.g. imx335)");                 \
     }                                                                \
-    DEFINE_MACHINE_ARM(namestr, tag##_class_init)
+    DEFINE_MACHINE_EXTENDED(namestr, MACHINE, HisiMachineState,      \
+                            tag##_class_init, false,                  \
+                            arm_machine_interfaces)
 
+DEFINE_HISI_MACHINE("hi3516cv300", hi3516cv300, hi3516cv300_soc)
+DEFINE_HISI_MACHINE("hi3516ev300", hi3516ev300, hi3516ev300_soc)
+DEFINE_HISI_MACHINE("hi3516ev200", hi3516ev200, hi3516ev200_soc)
+DEFINE_HISI_MACHINE("hi3518ev300", hi3518ev300, hi3518ev300_soc)
+DEFINE_HISI_MACHINE("hi3516dv200", hi3516dv200, hi3516dv200_soc)
 DEFINE_HISI_MACHINE("gk7205v200", gk7205v200, gk7205v200_soc)
 DEFINE_HISI_MACHINE("gk7205v300", gk7205v300, gk7205v300_soc)
 DEFINE_HISI_MACHINE("gk7202v300", gk7202v300, gk7202v300_soc)

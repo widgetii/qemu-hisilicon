@@ -40,6 +40,8 @@ cp qemu/hw/misc/hisi-fmc.c          "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-himci.c        "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-regbank.c      "$QEMU_DIR/hw/misc/"
 cp qemu/hw/net/hisi-femac.c         "$QEMU_DIR/hw/net/"
+cp qemu/hw/i2c/hisi-i2c.c          "$QEMU_DIR/hw/i2c/"
+cp qemu/hw/i2c/hisi-imx335.c       "$QEMU_DIR/hw/i2c/"
 
 # ── 3. Patch build system ──────────────────────────────────────────────
 echo "Patching build system..."
@@ -63,6 +65,8 @@ config HISILICON
     select SDHCI
     select HISI_MISC
     select HISI_FEMAC
+    select I2C
+    select HISI_I2C
 KCONFIG
     echo "  patched hw/arm/Kconfig"
 else
@@ -118,6 +122,28 @@ if ! grep -q hisi-femac "$QEMU_DIR/hw/net/meson.build"; then
     echo "  patched hw/net/meson.build"
 else
     echo "  hw/net/meson.build already patched"
+fi
+
+# hw/i2c/Kconfig
+if ! grep -q HISI_I2C "$QEMU_DIR/hw/i2c/Kconfig"; then
+    cat >> "$QEMU_DIR/hw/i2c/Kconfig" <<'KCONFIG'
+
+config HISI_I2C
+    bool
+    select I2C
+KCONFIG
+    echo "  patched hw/i2c/Kconfig"
+else
+    echo "  hw/i2c/Kconfig already patched"
+fi
+
+# hw/i2c/meson.build
+if ! grep -q hisi-i2c "$QEMU_DIR/hw/i2c/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_HISI_I2C', if_true: files('hisi-i2c.c', 'hisi-imx335.c'))" \
+        >> "$QEMU_DIR/hw/i2c/meson.build"
+    echo "  patched hw/i2c/meson.build"
+else
+    echo "  hw/i2c/meson.build already patched"
 fi
 
 # ── 4. Patch QEMU SD card model to accept 1.8V ─────────────────────────
