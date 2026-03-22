@@ -102,4 +102,10 @@ typedef struct HisiSoCConfig {
 #define HISI_SOC_ID_18EV300     0x3518E300
 #define HISI_SOC_ID_DV200       0x3516D200
 
+/* Goke chips — die-identical V4 silicon with different SoC IDs */
+#define GOKE_SOC_ID_7205V200    0x72050200  /* = hi3516ev200 */
+#define GOKE_SOC_ID_7205V300    0x72050300  /* = hi3516ev300 */
+#define GOKE_SOC_ID_7202V300    0x72020300  /* = hi3518ev300 */
+#define GOKE_SOC_ID_7605V100    0x76050100  /* = hi3516dv200 */
+
 #endif /* HW_ARM_HISILICON_H */

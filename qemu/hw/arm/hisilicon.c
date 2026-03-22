@@ -286,6 +286,75 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .sdhci_irqs         = { 30, 31 },
 };
 
+/*
+ * Goke variants — die-identical V4 silicon, only SoC ID differs.
+ * Hardware addresses, IRQs, GPIO counts all match the HiSilicon original.
+ */
+
+/* Common V4 peripheral block — shared by all V4 & Goke configs */
+#define HISI_V4_COMMON_PERIPH                               \
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),   \
+    .ram_size_default   = 64 * MiB,                         \
+    .ram_base           = 0x40000000,                       \
+    .sram_base          = 0x04010000,                       \
+    .sram_size          = 64 * KiB,                         \
+    .use_gic            = true,                             \
+    .gic_dist_base      = 0x10301000,                       \
+    .gic_cpu_base       = 0x10302000,                       \
+    .gic_num_spi        = 128,                              \
+    .sysctl_base        = 0x12020000,                       \
+    .crg_base           = 0x12010000,                       \
+    .num_uarts          = 3,                                \
+    .uart_bases         = { 0x12040000, 0x12041000, 0x12042000 }, \
+    .uart_irqs          = { 7, 8, 9 },                     \
+    .num_timers         = 2,                                \
+    .timer_bases        = { 0x12000000, 0x12001000 },       \
+    .timer_irqs         = { 5, 6 },                        \
+    .num_spis           = 2,                                \
+    .spi_bases          = { 0x12070000, 0x12071000 },       \
+    .spi_irqs           = { 14, 15 },                      \
+    .fmc_ctrl_base      = 0x10000000,                       \
+    .fmc_mem_base       = 0x14000000,                       \
+    .gpio_base          = 0x120b0000,                       \
+    .gpio_irq_start     = 16,                              \
+    .femac_base         = 0x10040000,                       \
+    .femac_irq          = 33,                              \
+    .num_sdhci          = 2,                                \
+    .sdhci_bases        = { 0x10010000, 0x10020000 },       \
+    .sdhci_irqs         = { 30, 31 }
+
+static const HisiSoCConfig gk7205v200_soc = {
+    .name               = "gk7205v200",
+    .desc               = "Goke GK7205V200 (Cortex-A7, ~Hi3516EV200)",
+    .soc_id             = GOKE_SOC_ID_7205V200,
+    .gpio_count         = 8,
+    HISI_V4_COMMON_PERIPH,
+};
+
+static const HisiSoCConfig gk7205v300_soc = {
+    .name               = "gk7205v300",
+    .desc               = "Goke GK7205V300 (Cortex-A7, ~Hi3516EV300)",
+    .soc_id             = GOKE_SOC_ID_7205V300,
+    .gpio_count         = 10,
+    HISI_V4_COMMON_PERIPH,
+};
+
+static const HisiSoCConfig gk7202v300_soc = {
+    .name               = "gk7202v300",
+    .desc               = "Goke GK7202V300 (Cortex-A7, ~Hi3518EV300)",
+    .soc_id             = GOKE_SOC_ID_7202V300,
+    .gpio_count         = 8,
+    HISI_V4_COMMON_PERIPH,
+};
+
+static const HisiSoCConfig gk7605v100_soc = {
+    .name               = "gk7605v100",
+    .desc               = "Goke GK7605V100 (Cortex-A7, ~Hi3516DV200)",
+    .soc_id             = GOKE_SOC_ID_7605V100,
+    .gpio_count         = 10,
+    HISI_V4_COMMON_PERIPH,
+};
+
 /* ── Shared machine init ───────────────────────────────────────────── */
 
 /* PPI numbers — same for all GICv2 HiSilicon SoCs */
@@ -606,3 +675,27 @@ static void hi3516dv200_class_init(MachineClass *mc)
 }
 
 DEFINE_MACHINE_ARM("hi3516dv200", hi3516dv200_class_init)
+
+/* Goke machines — identical hardware, different SoC ID branding */
+
+#define DEFINE_HISI_MACHINE(namestr, tag, config)                    \
+    static void tag##_init(MachineState *machine)                    \
+    {                                                                \
+        hisilicon_common_init(machine, &config);                     \
+    }                                                                \
+    static void tag##_class_init(MachineClass *mc)                   \
+    {                                                                \
+        mc->desc = config.desc;                                      \
+        mc->init = tag##_init;                                       \
+        mc->default_cpu_type = config.cpu_type;                      \
+        mc->default_ram_size = config.ram_size_default;              \
+        mc->default_ram_id = "hisilicon.ram";                        \
+        mc->block_default_type = IF_MTD;                             \
+        mc->ignore_memory_transaction_failures = true;               \
+    }                                                                \
+    DEFINE_MACHINE_ARM(namestr, tag##_class_init)
+
+DEFINE_HISI_MACHINE("gk7205v200", gk7205v200, gk7205v200_soc)
+DEFINE_HISI_MACHINE("gk7205v300", gk7205v300, gk7205v300_soc)
+DEFINE_HISI_MACHINE("gk7202v300", gk7202v300, gk7202v300_soc)
+DEFINE_HISI_MACHINE("gk7605v100", gk7605v100, gk7605v100_soc)
