@@ -86,6 +86,9 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .femac_base         = 0x10050000,
     .femac_irq          = 12,
 
+    .num_i2c            = 2,
+    .i2c_bases          = { 0x12110000, 0x12112000 },
+
     .num_himci          = 3,
     .himci_bases        = { 0x100c0000, 0x100d0000, 0x100e0000 },
     .himci_irqs         = { 18, 27, 27 },
