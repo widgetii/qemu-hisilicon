@@ -1,0 +1,465 @@
+/*
+ * HiSilicon HISFC350 SPI Flash Controller emulation.
+ *
+ * Found on Hi3516CV100 / Hi3518EV100 (V1 generation) SoCs.
+ * RAM-backed SPI NOR flash (Winbond W25Q64, 8 MiB) with three
+ * access modes: register-mode (command + 64-byte data buffer),
+ * DMA-mode (bulk transfers), and bus-mode (memory-mapped reads).
+ *
+ * Copyright (c) 2026 OpenIPC.
+ * Written by Dmitry Ilyin
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "hw/sysbus.h"
+#include "hw/qdev-properties.h"
+#include "qemu/log.h"
+#include "system/dma.h"
+
+/* ── Register offsets ────────────────────────────────────────────────── */
+
+#define SFC_GLOBAL_CONFIG       0x0100
+#define SFC_TIMING              0x0110
+#define SFC_INT_RAW_STATUS      0x0120
+#define SFC_INT_STATUS          0x0124
+#define SFC_INT_MASK            0x0128
+#define SFC_INT_CLEAR           0x012C
+#define SFC_VERSION             0x01F8
+
+#define SFC_BUS_CONFIG1         0x0200
+#define SFC_BUS_CONFIG2         0x0204
+#define SFC_BUS_FLASH_SIZE      0x0210
+#define SFC_BUS_BASE_ADDR_CS0   0x0214
+#define SFC_BUS_BASE_ADDR_CS1   0x0218
+
+#define SFC_BUS_DMA_CTRL        0x0240
+#define SFC_BUS_DMA_MEM_SADDR   0x0244
+#define SFC_BUS_DMA_FLASH_SADDR 0x0248
+#define SFC_BUS_DMA_LEN         0x024C
+#define SFC_BUS_DMA_AHB_CTRL    0x0250
+
+#define SFC_CMD_CONFIG          0x0300
+#define SFC_CMD_INS             0x0308
+#define SFC_CMD_ADDR            0x030C
+#define SFC_CMD_DATABUF0        0x0400
+
+/* CMD_CONFIG bits */
+#define CMD_CONFIG_START        BIT(0)
+#define CMD_CONFIG_SEL_CS_SHIFT 1
+#define CMD_CONFIG_ADDR_EN      BIT(3)
+#define CMD_CONFIG_DATA_EN      BIT(7)
+#define CMD_CONFIG_RW_READ      BIT(8)
+#define CMD_CONFIG_DATA_CNT_SHIFT 9
+#define CMD_CONFIG_DATA_CNT_MASK  0x3F
+
+/* BUS_DMA_CTRL bits */
+#define DMA_CTRL_START          BIT(0)
+#define DMA_CTRL_RW_READ        BIT(1)
+#define DMA_CTRL_CS_SHIFT       4
+
+/* INT_RAW_STATUS bits */
+#define INT_DMA_DONE            BIT(1)
+
+/* SPI commands */
+#define SPI_CMD_WREN            0x06
+#define SPI_CMD_WRDI            0x04
+#define SPI_CMD_RDSR            0x05
+#define SPI_CMD_RDSR2           0x35
+#define SPI_CMD_WRSR            0x01
+#define SPI_CMD_RDID            0x9F
+#define SPI_CMD_READ            0x03
+#define SPI_CMD_FAST_READ       0x0B
+#define SPI_CMD_PP              0x02
+#define SPI_CMD_SE_4K           0x20
+#define SPI_CMD_SE_32K          0x52
+#define SPI_CMD_SE_64K          0xD8
+#define SPI_CMD_CE              0xC7
+#define SPI_CMD_EN4B            0xB7
+#define SPI_CMD_EX4B            0xE9
+
+/* SPI status register bits */
+#define SPI_SR_WEL              BIT(1)
+
+/* Flash: Winbond W25Q64 (8 MiB) */
+#define NOR_JEDEC_MFR           0xEF
+#define NOR_JEDEC_TYPE          0x40
+#define NOR_JEDEC_CAP           0x17
+#define NOR_FLASH_SIZE          (8 * 1024 * 1024)
+#define NOR_SECTOR_SIZE         (64 * 1024)
+#define NOR_PAGE_SIZE           256
+
+/* Controller identity */
+#define SFC350_VERSION_ID       0x350
+
+#define CTRL_REG_SIZE           0x500
+#define MEM_WINDOW_SIZE         (16 * 1024 * 1024)
+#define DATABUF_REGS            16
+#define DATABUF_BYTES           (DATABUF_REGS * 4)
+
+/* ── Device state ────────────────────────────────────────────────────── */
+
+#define TYPE_HISI_SFC350 "hisi-sfc350"
+OBJECT_DECLARE_SIMPLE_TYPE(HisiSfc350State, HISI_SFC350)
+
+struct HisiSfc350State {
+    SysBusDevice parent_obj;
+    MemoryRegion ctrl_iomem;
+    MemoryRegion mem_iomem;
+
+    /* Control registers */
+    uint32_t global_config;
+    uint32_t timing;
+    uint32_t int_raw_status;
+    uint32_t int_mask;
+    uint32_t bus_config1;
+    uint32_t bus_config2;
+    uint32_t bus_flash_size;
+    uint32_t bus_base_addr_cs0;
+    uint32_t bus_base_addr_cs1;
+    uint32_t bus_dma_ctrl;
+    uint32_t bus_dma_mem_saddr;
+    uint32_t bus_dma_flash_saddr;
+    uint32_t bus_dma_len;
+    uint32_t bus_dma_ahb_ctrl;
+    uint32_t cmd_config;
+    uint32_t cmd_ins;
+    uint32_t cmd_addr;
+    uint32_t cmd_databuf[DATABUF_REGS];
+
+    /* SPI flash state */
+    uint8_t  sr;
+    uint8_t *flash;
+    uint32_t flash_size;
+};
+
+/* ── Register-mode command execution ─────────────────────────────────── */
+
+static void hisi_sfc350_exec_cmd(HisiSfc350State *s)
+{
+    uint8_t opcode = s->cmd_ins & 0xFF;
+    uint32_t addr = s->cmd_addr;
+    bool data_en = s->cmd_config & CMD_CONFIG_DATA_EN;
+    bool rw_read = s->cmd_config & CMD_CONFIG_RW_READ;
+    uint32_t data_cnt = ((s->cmd_config >> CMD_CONFIG_DATA_CNT_SHIFT)
+                         & CMD_CONFIG_DATA_CNT_MASK) + 1;
+
+    if (data_cnt > DATABUF_BYTES) {
+        data_cnt = DATABUF_BYTES;
+    }
+
+    switch (opcode) {
+    case SPI_CMD_RDID:
+        s->cmd_databuf[0] = NOR_JEDEC_MFR | (NOR_JEDEC_TYPE << 8) |
+                            (NOR_JEDEC_CAP << 16);
+        s->cmd_databuf[1] = 0;
+        break;
+
+    case SPI_CMD_RDSR:
+        s->cmd_databuf[0] = s->sr;
+        break;
+
+    case SPI_CMD_RDSR2:
+        s->cmd_databuf[0] = 0;
+        break;
+
+    case SPI_CMD_WREN:
+        s->sr |= SPI_SR_WEL;
+        break;
+
+    case SPI_CMD_WRDI:
+        s->sr &= ~SPI_SR_WEL;
+        break;
+
+    case SPI_CMD_WRSR:
+        /* Accept write but only clear WEL */
+        s->sr &= ~SPI_SR_WEL;
+        break;
+
+    case SPI_CMD_READ:
+    case SPI_CMD_FAST_READ:
+        if (data_en && rw_read && addr < s->flash_size) {
+            uint32_t len = data_cnt;
+            if (addr + len > s->flash_size) {
+                len = s->flash_size - addr;
+            }
+            memcpy(s->cmd_databuf, &s->flash[addr], len);
+        }
+        break;
+
+    case SPI_CMD_PP:
+        if (data_en && (s->sr & SPI_SR_WEL) && addr < s->flash_size) {
+            uint32_t len = data_cnt;
+            if (addr + len > s->flash_size) {
+                len = s->flash_size - addr;
+            }
+            /* NOR page program: can only clear bits (AND with data) */
+            uint8_t *src = (uint8_t *)s->cmd_databuf;
+            for (uint32_t i = 0; i < len; i++) {
+                s->flash[addr + i] &= src[i];
+            }
+            s->sr &= ~SPI_SR_WEL;
+        }
+        break;
+
+    case SPI_CMD_SE_4K:
+        if ((s->sr & SPI_SR_WEL) && addr < s->flash_size) {
+            uint32_t base = addr & ~(4 * 1024 - 1);
+            uint32_t end = base + 4 * 1024;
+            if (end > s->flash_size) end = s->flash_size;
+            memset(&s->flash[base], 0xFF, end - base);
+            s->sr &= ~SPI_SR_WEL;
+        }
+        break;
+
+    case SPI_CMD_SE_32K:
+        if ((s->sr & SPI_SR_WEL) && addr < s->flash_size) {
+            uint32_t base = addr & ~(32 * 1024 - 1);
+            uint32_t end = base + 32 * 1024;
+            if (end > s->flash_size) end = s->flash_size;
+            memset(&s->flash[base], 0xFF, end - base);
+            s->sr &= ~SPI_SR_WEL;
+        }
+        break;
+
+    case SPI_CMD_SE_64K:
+        if ((s->sr & SPI_SR_WEL) && addr < s->flash_size) {
+            uint32_t base = addr & ~(NOR_SECTOR_SIZE - 1);
+            uint32_t end = base + NOR_SECTOR_SIZE;
+            if (end > s->flash_size) end = s->flash_size;
+            memset(&s->flash[base], 0xFF, end - base);
+            s->sr &= ~SPI_SR_WEL;
+        }
+        break;
+
+    case SPI_CMD_CE:
+        if (s->sr & SPI_SR_WEL) {
+            memset(s->flash, 0xFF, s->flash_size);
+            s->sr &= ~SPI_SR_WEL;
+        }
+        break;
+
+    case SPI_CMD_EN4B:
+    case SPI_CMD_EX4B:
+        /* Accept silently — we don't enforce address width */
+        break;
+
+    default:
+        qemu_log_mask(LOG_UNIMP, "hisi-sfc350: unhandled SPI command 0x%02x\n",
+                      opcode);
+        break;
+    }
+
+    /* Command completes instantly: clear START bit */
+    s->cmd_config &= ~CMD_CONFIG_START;
+}
+
+/* ── DMA execution ───────────────────────────────────────────────────── */
+
+static void hisi_sfc350_exec_dma(HisiSfc350State *s)
+{
+    bool is_read = s->bus_dma_ctrl & DMA_CTRL_RW_READ;
+    uint32_t flash_addr = s->bus_dma_flash_saddr;
+    uint32_t mem_addr = s->bus_dma_mem_saddr;
+    uint32_t len = (s->bus_dma_len & 0x0FFFFFFF) + 1;
+
+    if (flash_addr + len > s->flash_size) {
+        len = (flash_addr < s->flash_size) ? s->flash_size - flash_addr : 0;
+    }
+
+    if (len > 0) {
+        if (is_read) {
+            dma_memory_write(&address_space_memory, mem_addr,
+                             &s->flash[flash_addr], len,
+                             MEMTXATTRS_UNSPECIFIED);
+        } else {
+            uint8_t *buf = g_malloc(len);
+            dma_memory_read(&address_space_memory, mem_addr,
+                            buf, len, MEMTXATTRS_UNSPECIFIED);
+            /* NOR program: AND semantics */
+            for (uint32_t i = 0; i < len; i++) {
+                s->flash[flash_addr + i] &= buf[i];
+            }
+            g_free(buf);
+        }
+    }
+
+    /* DMA complete */
+    s->bus_dma_ctrl &= ~DMA_CTRL_START;
+    s->int_raw_status |= INT_DMA_DONE;
+}
+
+/* ── MMIO: control registers ─────────────────────────────────────────── */
+
+static uint64_t hisi_sfc350_ctrl_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+{
+    HisiSfc350State *s = HISI_SFC350(opaque);
+
+    switch (offset) {
+    case SFC_GLOBAL_CONFIG:     return s->global_config;
+    case SFC_TIMING:            return s->timing;
+    case SFC_INT_RAW_STATUS:    return s->int_raw_status;
+    case SFC_INT_STATUS:        return s->int_raw_status & s->int_mask;
+    case SFC_INT_MASK:          return s->int_mask;
+    case SFC_VERSION:           return SFC350_VERSION_ID;
+
+    case SFC_BUS_CONFIG1:       return s->bus_config1;
+    case SFC_BUS_CONFIG2:       return s->bus_config2;
+    case SFC_BUS_FLASH_SIZE:    return s->bus_flash_size;
+    case SFC_BUS_BASE_ADDR_CS0: return s->bus_base_addr_cs0;
+    case SFC_BUS_BASE_ADDR_CS1: return s->bus_base_addr_cs1;
+
+    case SFC_BUS_DMA_CTRL:      return s->bus_dma_ctrl;
+    case SFC_BUS_DMA_MEM_SADDR: return s->bus_dma_mem_saddr;
+    case SFC_BUS_DMA_FLASH_SADDR: return s->bus_dma_flash_saddr;
+    case SFC_BUS_DMA_LEN:       return s->bus_dma_len;
+    case SFC_BUS_DMA_AHB_CTRL:  return s->bus_dma_ahb_ctrl;
+
+    case SFC_CMD_CONFIG:        return s->cmd_config;
+    case SFC_CMD_INS:           return s->cmd_ins;
+    case SFC_CMD_ADDR:          return s->cmd_addr;
+
+    default:
+        if (offset >= SFC_CMD_DATABUF0 &&
+            offset < SFC_CMD_DATABUF0 + DATABUF_REGS * 4) {
+            return s->cmd_databuf[(offset - SFC_CMD_DATABUF0) / 4];
+        }
+        return 0;
+    }
+}
+
+static void hisi_sfc350_ctrl_write(void *opaque, hwaddr offset,
+                                    uint64_t val, unsigned size)
+{
+    HisiSfc350State *s = HISI_SFC350(opaque);
+
+    switch (offset) {
+    case SFC_GLOBAL_CONFIG:     s->global_config = val; break;
+    case SFC_TIMING:            s->timing = val; break;
+    case SFC_INT_MASK:          s->int_mask = val; break;
+    case SFC_INT_CLEAR:
+        s->int_raw_status &= ~val;
+        break;
+
+    case SFC_BUS_CONFIG1:       s->bus_config1 = val; break;
+    case SFC_BUS_CONFIG2:       s->bus_config2 = val; break;
+    case SFC_BUS_FLASH_SIZE:    s->bus_flash_size = val; break;
+    case SFC_BUS_BASE_ADDR_CS0: s->bus_base_addr_cs0 = val; break;
+    case SFC_BUS_BASE_ADDR_CS1: s->bus_base_addr_cs1 = val; break;
+
+    case SFC_BUS_DMA_MEM_SADDR:   s->bus_dma_mem_saddr = val; break;
+    case SFC_BUS_DMA_FLASH_SADDR: s->bus_dma_flash_saddr = val; break;
+    case SFC_BUS_DMA_LEN:         s->bus_dma_len = val; break;
+    case SFC_BUS_DMA_AHB_CTRL:    s->bus_dma_ahb_ctrl = val; break;
+
+    case SFC_BUS_DMA_CTRL:
+        s->bus_dma_ctrl = val;
+        if (val & DMA_CTRL_START) {
+            hisi_sfc350_exec_dma(s);
+        }
+        break;
+
+    case SFC_CMD_INS:   s->cmd_ins = val; break;
+    case SFC_CMD_ADDR:  s->cmd_addr = val; break;
+
+    case SFC_CMD_CONFIG:
+        s->cmd_config = val;
+        if (val & CMD_CONFIG_START) {
+            hisi_sfc350_exec_cmd(s);
+        }
+        break;
+
+    default:
+        if (offset >= SFC_CMD_DATABUF0 &&
+            offset < SFC_CMD_DATABUF0 + DATABUF_REGS * 4) {
+            s->cmd_databuf[(offset - SFC_CMD_DATABUF0) / 4] = val;
+            break;
+        }
+        break;
+    }
+}
+
+static const MemoryRegionOps hisi_sfc350_ctrl_ops = {
+    .read = hisi_sfc350_ctrl_read,
+    .write = hisi_sfc350_ctrl_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
+
+/* ── MMIO: memory window (bus-mode reads) ────────────────────────────── */
+
+static uint64_t hisi_sfc350_mem_read(void *opaque, hwaddr offset,
+                                      unsigned size)
+{
+    HisiSfc350State *s = HISI_SFC350(opaque);
+    uint32_t val = 0xFF;
+
+    if (offset < s->flash_size) {
+        memcpy(&val, &s->flash[offset], size > 4 ? 4 : size);
+    }
+    return val;
+}
+
+static void hisi_sfc350_mem_write(void *opaque, hwaddr offset,
+                                   uint64_t val, unsigned size)
+{
+    /* Bus-mode writes not supported (use register or DMA mode) */
+}
+
+static const MemoryRegionOps hisi_sfc350_mem_ops = {
+    .read = hisi_sfc350_mem_read,
+    .write = hisi_sfc350_mem_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+};
+
+/* ── Device lifecycle ────────────────────────────────────────────────── */
+
+static void hisi_sfc350_init(Object *obj)
+{
+    HisiSfc350State *s = HISI_SFC350(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
+    memory_region_init_io(&s->ctrl_iomem, obj, &hisi_sfc350_ctrl_ops, s,
+                          "hisi-sfc350-ctrl", CTRL_REG_SIZE);
+    sysbus_init_mmio(sbd, &s->ctrl_iomem);
+
+    memory_region_init_io(&s->mem_iomem, obj, &hisi_sfc350_mem_ops, s,
+                          "hisi-sfc350-mem", MEM_WINDOW_SIZE);
+    sysbus_init_mmio(sbd, &s->mem_iomem);
+}
+
+static void hisi_sfc350_realize(DeviceState *dev, Error **errp)
+{
+    HisiSfc350State *s = HISI_SFC350(dev);
+
+    s->flash_size = NOR_FLASH_SIZE;
+    s->flash = g_malloc(s->flash_size);
+    memset(s->flash, 0xFF, s->flash_size);
+}
+
+static void hisi_sfc350_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    dc->realize = hisi_sfc350_realize;
+}
+
+static const TypeInfo hisi_sfc350_info = {
+    .name          = TYPE_HISI_SFC350,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(HisiSfc350State),
+    .instance_init = hisi_sfc350_init,
+    .class_init    = hisi_sfc350_class_init,
+};
+
+static void hisi_sfc350_register_types(void)
+{
+    type_register_static(&hisi_sfc350_info);
+}
+
+type_init(hisi_sfc350_register_types)

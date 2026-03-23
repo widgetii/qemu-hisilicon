@@ -72,9 +72,10 @@ typedef struct HisiSoCConfig {
     hwaddr          spi_bases[HISI_MAX_SPIS];
     int             spi_irqs[HISI_MAX_SPIS];
 
-    /* Flash Memory Controller (HiFMC) */
-    hwaddr          fmc_ctrl_base;  /* 0 = no FMC */
+    /* Flash Memory Controller (HiFMC or HISFC350) */
+    hwaddr          fmc_ctrl_base;  /* 0 = no flash controller */
     hwaddr          fmc_mem_base;
+    const char     *fmc_type;       /* NULL = "hisi-fmc", or "hisi-sfc350" */
 
     /* GPIO (PL061) */
     hwaddr          gpio_base;

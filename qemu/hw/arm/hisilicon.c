@@ -86,9 +86,9 @@ static const HisiSoCConfig hi3516cv100_soc = {
     /* No PL022 SPI controllers on V1 */
     .num_spis           = 0,
 
-    /* HISFC350 — not HiFMC V100; skip FMC creation */
-    .fmc_ctrl_base      = 0,
-    .fmc_mem_base       = 0,
+    .fmc_ctrl_base      = 0x10010000,
+    .fmc_mem_base       = 0x58000000,
+    .fmc_type           = "hisi-sfc350",
 
     .gpio_base          = 0x20140000,
     .gpio_count         = 12,
@@ -124,11 +124,10 @@ static const HisiSoCConfig hi3516cv100_soc = {
         { 0x14, (3 << 12) | 25 },           /* CRG5: refdiv=3, fbdiv=25 */
     },
 
-    /* NANDC + SFC350 stubs — U-Boot probes both before detecting flash type */
-    .num_regbanks       = 2,
+    /* NANDC stub — U-Boot probes NAND before SPI flash */
+    .num_regbanks       = 1,
     .regbanks           = {
         { "hisi-nandc",  0x10000000, 0x10000 },
-        { "hisi-sfc350", 0x10010000, 0x10000 },
     },
 };
 
@@ -850,9 +849,10 @@ static void hisilicon_common_init(MachineState *machine,
         memory_region_add_subregion(sysmem, c->sram_base, sram);
     }
 
-    /* FMC */
+    /* Flash controller (HiFMC V100 or HISFC350) */
     if (c->fmc_ctrl_base) {
-        DeviceState *fmc = qdev_new("hisi-fmc");
+        const char *fmc_type = c->fmc_type ? c->fmc_type : "hisi-fmc";
+        DeviceState *fmc = qdev_new(fmc_type);
         SysBusDevice *fmcbus = SYS_BUS_DEVICE(fmc);
         sysbus_realize_and_unref(fmcbus, &error_fatal);
         sysbus_mmio_map(fmcbus, 0, c->fmc_ctrl_base);
@@ -1107,16 +1107,6 @@ static void hisilicon_common_init(MachineState *machine,
             DeviceState *rb = qdev_new("hisi-regbank");
             qdev_prop_set_uint32(rb, "size", c->regbanks[n].size);
             qdev_prop_set_string(rb, "name", c->regbanks[n].name);
-
-            /*
-             * NANDC: offset 0x20 bit 0 = OP_DONE, must read 1.
-             * SFC350: CMD_CONFIG (0x300) bit 0 = START, auto-clears
-             *         when command completes — use autoclear feature.
-             */
-            if (!strcmp(c->regbanks[n].name, "hisi-sfc350")) {
-                qdev_prop_set_uint32(rb, "autoclear-offset", 0x300);
-                qdev_prop_set_uint32(rb, "autoclear-mask", 0x01);
-            }
 
             sysbus_realize_and_unref(SYS_BUS_DEVICE(rb), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(rb), 0, c->regbanks[n].base);
