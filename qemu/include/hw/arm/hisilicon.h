@@ -109,6 +109,11 @@ typedef struct HisiSoCConfig {
     int             vedu_irq;
     int             jpge_irq;
 
+    /* Watchdog (SP805 / cmsdk-apb-watchdog) */
+    hwaddr          wdt_base;       /* 0 = no watchdog */
+    int             wdt_irq;        /* -1 = no IRQ */
+    uint32_t        wdt_freq;       /* clock frequency in Hz */
+
     /* Generic RAM-backed register banks (pin mux, DDR PHY, PWM, etc.) */
     int             num_regbanks;
     HisiRegbankEntry regbanks[HISI_MAX_REGBANKS];

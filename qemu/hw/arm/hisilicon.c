@@ -38,6 +38,8 @@
 #include "system/block-backend.h"
 #include "net/net.h"
 #include "hw/i2c/i2c.h"
+#include "hw/clock.h"
+#include "hw/qdev-clock.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
 
@@ -92,6 +94,10 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .num_himci          = 3,
     .himci_bases        = { 0x100c0000, 0x100d0000, 0x100e0000 },
     .himci_irqs         = { 18, 27, 27 },
+
+    .wdt_base           = 0x12080000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
 };
 
 static const HisiSoCConfig hi3516ev300_soc = {
@@ -146,6 +152,10 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .jpge_base          = 0x11420000,
     .vedu_irq           = 47,
     .jpge_irq           = 48,
+
+    .wdt_base           = 0x12030000,
+    .wdt_irq            = 2,
+    .wdt_freq           = 3000000,
 };
 
 /*
@@ -204,6 +214,10 @@ static const HisiSoCConfig hi3516ev200_soc = {
     .jpge_base          = 0x11420000,
     .vedu_irq           = 47,
     .jpge_irq           = 48,
+
+    .wdt_base           = 0x12030000,
+    .wdt_irq            = 2,
+    .wdt_freq           = 3000000,
 };
 
 /*
@@ -264,6 +278,10 @@ static const HisiSoCConfig hi3518ev300_soc = {
     .jpge_base          = 0x11420000,
     .vedu_irq           = 47,
     .jpge_irq           = 48,
+
+    .wdt_base           = 0x12030000,
+    .wdt_irq            = 2,
+    .wdt_freq           = 3000000,
 };
 
 /*
@@ -322,6 +340,10 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .jpge_base          = 0x11420000,
     .vedu_irq           = 47,
     .jpge_irq           = 48,
+
+    .wdt_base           = 0x12030000,
+    .wdt_irq            = 2,
+    .wdt_freq           = 3000000,
 };
 
 /*
@@ -366,6 +388,9 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .jpge_base          = 0x11420000,                       \
     .vedu_irq           = 47,                              \
     .jpge_irq           = 48,                              \
+    .wdt_base           = 0x12030000,                       \
+    .wdt_irq            = 2,                                \
+    .wdt_freq           = 3000000,                          \
     .num_regbanks       = 6,                                \
     .regbanks           = {                                 \
         { "hisi-misc",       0x12028000, 0x8000  },         \
@@ -668,6 +693,20 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_mmio_map(busdev, 1, c->jpge_base);
         sysbus_connect_irq(busdev, 0, pic[c->vedu_irq]);
         sysbus_connect_irq(busdev, 1, pic[c->jpge_irq]);
+    }
+
+    /* Watchdog (SP805-compatible, reuse cmsdk-apb-watchdog) */
+    if (c->wdt_base) {
+        Clock *wdt_clk = clock_new(OBJECT(machine), "wdt-clk");
+        clock_set_hz(wdt_clk, c->wdt_freq);
+        DeviceState *wdt = qdev_new("cmsdk-apb-watchdog");
+        qdev_connect_clock_in(wdt, "WDOGCLK", wdt_clk);
+        SysBusDevice *busdev = SYS_BUS_DEVICE(wdt);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->wdt_base);
+        if (c->wdt_irq >= 0) {
+            sysbus_connect_irq(busdev, 0, pic[c->wdt_irq]);
+        }
     }
 
     /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */

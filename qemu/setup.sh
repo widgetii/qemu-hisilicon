@@ -68,6 +68,7 @@ config HISILICON
     select HISI_FEMAC
     select I2C
     select HISI_I2C
+    select CMSDK_APB_WATCHDOG
 KCONFIG
     echo "  patched hw/arm/Kconfig"
 else
