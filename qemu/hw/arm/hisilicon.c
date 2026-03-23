@@ -46,6 +46,89 @@
 /* ── SoC configuration tables ──────────────────────────────────────── */
 
 /*
+ * Hi3516CV100 (V1): ARM926EJ-S + PL190-compatible VIC, oldest generation.
+ * VIC at 0x10140000 (not 0x100D0000 like V2).  HISFC350 flash controller
+ * (not HiFMC V100) — set fmc_ctrl_base=0 to skip FMC creation.
+ * 12 GPIO banks (GPIO0-11).  Single himciv100 SD controller.
+ * UART0 and UART1 share IRQ 5.  No SPI (PL022) controllers.
+ * Kernel 3.0.8, MACHINE_START (no DT), computes bus clock from BPLL PLL.
+ */
+static const HisiSoCConfig hi3516cv100_soc = {
+    .name               = "hi3516cv100",
+    .desc               = "HiSilicon Hi3516CV100 (ARM926EJ-S)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
+    .soc_id             = HISI_SOC_ID_CV100,
+    .ram_size_default   = 64 * MiB,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = false,
+    .vic_base           = 0x10140000,
+
+    .sysctl_base        = 0x20050000,
+    .crg_base           = 0x20030000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000 },
+    .uart_irqs          = { 5, 5, 25 },    /* UART0 and UART1 share IRQ 5 */
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x20000000, 0x20010000 },
+    .timer_irqs         = { 3, 4 },
+    .timer_freq         = 50000000,     /* 50 MHz (AXI 100MHz / prescale 2) */
+
+    /* No PL022 SPI controllers on V1 */
+    .num_spis           = 0,
+
+    /* HISFC350 — not HiFMC V100; skip FMC creation */
+    .fmc_ctrl_base      = 0,
+    .fmc_mem_base       = 0,
+
+    .gpio_base          = 0x20140000,
+    .gpio_count         = 12,
+    .gpio_stride        = 0x10000,
+    .gpio_irq           = 31,           /* shared for all ports (VIC) */
+
+    .dma_base           = 0x100D0000,
+    .dma_irq            = 14,
+
+    .femac_base         = 0x10090000,
+    .femac_irq          = 12,
+
+    .num_himci          = 1,
+    .himci_bases        = { 0x10020000 },
+    .himci_irqs         = { 18 },
+
+    /* No I2C buses in V1 platform headers */
+    .num_i2c            = 0,
+
+    .wdt_base           = 0x20040000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    /*
+     * BPLL register defaults for 100 MHz AXI bus clock.
+     * Kernel computes: busclk = 24M * fbdiv / (2 * refdiv * pstdiv1 * pstdiv2)
+     * With refdiv=3, fbdiv=25, pstdiv1=1, pstdiv2=1: busclk = 100 MHz.
+     * Timer clock = busclk / prescale(2) = 50 MHz.
+     */
+    .num_crg_defaults   = 2,
+    .crg_defaults       = {
+        { 0x10, (1 << 24) | (1 << 27) },   /* CRG4: pstdiv1=1, pstdiv2=1 */
+        { 0x14, (3 << 12) | 25 },           /* CRG5: refdiv=3, fbdiv=25 */
+    },
+
+    /* NANDC + SFC350 stubs — U-Boot probes both before detecting flash type */
+    .num_regbanks       = 2,
+    .regbanks           = {
+        { "hisi-nandc",  0x10000000, 0x10000 },
+        { "hisi-sfc350", 0x10010000, 0x10000 },
+    },
+};
+
+/*
  * Hi3516CV200 (V2): ARM926EJ-S + PL190 VIC, 0x20xxxxxx peripheral space.
  * Also known as Hi3518EV200.  Uses hieth-sf in vendor kernel but FEMAC
  * in OpenIPC's 4.9+ kernel.  FMC memory window at 0x58000000 (not 0x14000000).
@@ -806,8 +889,25 @@ static void hisilicon_common_init(MachineState *machine,
             DeviceState *rb = qdev_new("hisi-regbank");
             qdev_prop_set_uint32(rb, "size", c->regbanks[n].size);
             qdev_prop_set_string(rb, "name", c->regbanks[n].name);
+
+            /*
+             * NANDC: offset 0x20 bit 0 = OP_DONE, must read 1.
+             * SFC350: CMD_CONFIG (0x300) bit 0 = START, auto-clears
+             *         when command completes — use autoclear feature.
+             */
+            if (!strcmp(c->regbanks[n].name, "hisi-sfc350")) {
+                qdev_prop_set_uint32(rb, "autoclear-offset", 0x300);
+                qdev_prop_set_uint32(rb, "autoclear-mask", 0x01);
+            }
+
             sysbus_realize_and_unref(SYS_BUS_DEVICE(rb), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(rb), 0, c->regbanks[n].base);
+
+            if (!strcmp(c->regbanks[n].name, "hisi-nandc")) {
+                address_space_stl(&address_space_memory,
+                                  c->regbanks[n].base + 0x20, 0x01,
+                                  MEMTXATTRS_UNSPECIFIED, NULL);
+            }
         }
     }
 
@@ -880,6 +980,7 @@ static void hisi_machine_set_sensor(Object *obj, const char *value,
                             tag##_class_init, false,                  \
                             arm_machine_interfaces)
 
+DEFINE_HISI_MACHINE("hi3516cv100", hi3516cv100, hi3516cv100_soc)
 DEFINE_HISI_MACHINE("hi3516cv200", hi3516cv200, hi3516cv200_soc)
 DEFINE_HISI_MACHINE("hi3516cv300", hi3516cv300, hi3516cv300_soc)
 DEFINE_HISI_MACHINE("hi3516ev300", hi3516ev300, hi3516ev300_soc)

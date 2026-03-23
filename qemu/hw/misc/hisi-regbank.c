@@ -6,6 +6,10 @@
  * (pin mux, DDR PHY cal, PWM, etc.) where returning 0 on read would
  * break the RMW pattern.
  *
+ * Optional auto-clear: if autoclear_offset is set, writes to that
+ * offset have autoclear_mask bits cleared immediately (simulates
+ * hardware "start" bits that self-clear when a command completes).
+ *
  * Copyright (c) 2026 OpenIPC.
  * Written by Dmitry Ilyin
  *
@@ -13,6 +17,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/sysbus.h"
 #include "hw/qdev-properties.h"
 #include "qemu/log.h"
@@ -26,6 +31,8 @@ struct HisiRegbankState {
     uint32_t *regs;
     uint32_t size;
     char *name;
+    uint32_t autoclear_offset;  /* register offset with auto-clear bits */
+    uint32_t autoclear_mask;    /* bits to clear on write (e.g. START bit) */
 };
 
 static uint64_t hisi_regbank_read(void *opaque, hwaddr offset, unsigned size)
@@ -35,10 +42,15 @@ static uint64_t hisi_regbank_read(void *opaque, hwaddr offset, unsigned size)
 }
 
 static void hisi_regbank_write(void *opaque, hwaddr offset,
-                               uint64_t val, unsigned size)
+                                uint64_t val, unsigned size)
 {
     HisiRegbankState *s = HISI_REGBANK(opaque);
     s->regs[offset / 4] = val;
+
+    /* Auto-clear "start" bits so poll loops see command-done immediately */
+    if (s->autoclear_mask && offset == s->autoclear_offset) {
+        s->regs[offset / 4] &= ~s->autoclear_mask;
+    }
 }
 
 static const MemoryRegionOps hisi_regbank_ops = {
@@ -65,23 +77,18 @@ static void hisi_regbank_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
 }
 
-static void hisi_regbank_reset(DeviceState *dev)
-{
-    HisiRegbankState *s = HISI_REGBANK(dev);
-    if (s->regs) {
-        memset(s->regs, 0, s->size);
-    }
-}
-
 static const Property hisi_regbank_properties[] = {
     DEFINE_PROP_UINT32("size", HisiRegbankState, size, 0),
     DEFINE_PROP_STRING("name", HisiRegbankState, name),
+    DEFINE_PROP_UINT32("autoclear-offset", HisiRegbankState,
+                       autoclear_offset, 0),
+    DEFINE_PROP_UINT32("autoclear-mask", HisiRegbankState,
+                       autoclear_mask, 0),
 };
 
 static void hisi_regbank_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    device_class_set_legacy_reset(dc, hisi_regbank_reset);
     device_class_set_props(dc, hisi_regbank_properties);
     dc->realize = hisi_regbank_realize;
 }

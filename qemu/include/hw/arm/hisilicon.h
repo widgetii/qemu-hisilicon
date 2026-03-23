@@ -136,6 +136,9 @@ typedef struct HisiSoCConfig {
 #define HISI_SOC_ID_18EV300     0x3518E300
 #define HISI_SOC_ID_DV200       0x3516D200
 
+/* V1 generation */
+#define HISI_SOC_ID_CV100       0x35180100
+
 /* V2 generation */
 #define HISI_SOC_ID_CV200       0x3518E200
 

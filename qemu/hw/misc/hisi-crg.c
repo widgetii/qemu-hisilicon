@@ -106,16 +106,9 @@ static void hisi_crg_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
-static void hisi_crg_reset(DeviceState *dev)
-{
-    HisiCrgState *s = HISI_CRG(dev);
-    memset(s->regs, 0, sizeof(s->regs));
-}
-
 static void hisi_crg_class_init(ObjectClass *klass, const void *data)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    device_class_set_legacy_reset(dc, hisi_crg_reset);
+    (void)klass;
 }
 
 static const TypeInfo hisi_crg_info = {
