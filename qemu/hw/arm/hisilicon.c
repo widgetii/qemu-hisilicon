@@ -303,6 +303,9 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .femac_base         = 0x10040000,
     .femac_irq          = 33,
 
+    .mipi_rx_base       = 0x11240000,
+    .mipi_rx_irq        = 45,
+
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
@@ -365,6 +368,9 @@ static const HisiSoCConfig hi3516ev200_soc = {
 
     .femac_base         = 0x10040000,
     .femac_irq          = 33,
+
+    .mipi_rx_base       = 0x11240000,
+    .mipi_rx_irq        = 45,
 
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
@@ -431,6 +437,9 @@ static const HisiSoCConfig hi3518ev300_soc = {
     .femac_base         = 0x10040000,
     .femac_irq          = 33,
 
+    .mipi_rx_base       = 0x11240000,
+    .mipi_rx_irq        = 45,
+
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
@@ -494,6 +503,9 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .femac_base         = 0x10040000,
     .femac_irq          = 33,
 
+    .mipi_rx_base       = 0x11240000,
+    .mipi_rx_irq        = 45,
+
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
@@ -545,6 +557,8 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .gpio_irq_start     = 16,                              \
     .femac_base         = 0x10040000,                       \
     .femac_irq          = 33,                              \
+    .mipi_rx_base       = 0x11240000,                      \
+    .mipi_rx_irq        = 45,                              \
     .num_sdhci          = 2,                                \
     .sdhci_bases        = { 0x10010000, 0x10020000 },       \
     .sdhci_irqs         = { 30, 31 },                       \
@@ -557,7 +571,7 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .wdt_base           = 0x12030000,                       \
     .wdt_irq            = 2,                                \
     .wdt_freq           = 3000000,                          \
-    .num_regbanks       = 16,                               \
+    .num_regbanks       = 15,                               \
     .regbanks           = {                                 \
         { "hisi-misc",       0x12028000, 0x8000  },         \
         { "hisi-ddr",        0x120d0000, 0x10000 },         \
@@ -570,7 +584,6 @@ static const HisiSoCConfig hi3516dv200_soc = {
         { "hisi-acodec",     0x100f0000, 0x10000 },         \
         { "hisi-vi-cap",     0x11000000, 0x200000 },        \
         { "hisi-vi-proc",    0x11200000, 0x40000 },         \
-        { "hisi-mipi-rx",    0x11240000, 0x10000 },         \
         { "hisi-vgs",        0x11300000, 0x10000 },         \
         { "hisi-ive",        0x11320000, 0x10000 },         \
         { "hisi-vpss",       0x11400000, 0x10000 },         \
@@ -867,6 +880,15 @@ static void hisilicon_common_init(MachineState *machine,
         i2c_devs[n] = qdev_new("hisi-i2c");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(i2c_devs[n]), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(i2c_devs[n]), 0, c->i2c_bases[n]);
+    }
+
+    /* MIPI RX */
+    if (c->mipi_rx_base) {
+        DeviceState *mipi = qdev_new("hisi-mipi-rx");
+        SysBusDevice *busdev = SYS_BUS_DEVICE(mipi);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->mipi_rx_base);
+        sysbus_connect_irq(busdev, 0, pic[c->mipi_rx_irq]);
     }
 
     /* VEDU + JPGE */

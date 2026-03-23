@@ -105,6 +105,10 @@ typedef struct HisiSoCConfig {
     int             num_i2c;
     hwaddr          i2c_bases[HISI_MAX_I2C];
 
+    /* MIPI RX (CSI-2 / LVDS receiver) */
+    hwaddr          mipi_rx_base;   /* 0 = no MIPI RX */
+    int             mipi_rx_irq;
+
     /* VEDU (Video Encoder) + JPGE */
     hwaddr          vedu_base;      /* 0 = no VEDU */
     hwaddr          jpge_base;
