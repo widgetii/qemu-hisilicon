@@ -24,7 +24,7 @@
 #define HISI_MAX_HIMCI    3
 #define HISI_MAX_SDHCI    2
 #define HISI_MAX_I2C      3
-#define HISI_MAX_REGBANKS 8
+#define HISI_MAX_REGBANKS 16
 #define HISI_MAX_CRG_DEFAULTS 8
 
 typedef struct HisiRegbankEntry {

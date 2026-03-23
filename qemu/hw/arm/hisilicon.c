@@ -7,6 +7,7 @@
  * Currently supported:
  *   hi3516cv300  (V3, ARM926EJ-S + PL190 VIC)
  *   hi3516ev300  (V4, Cortex-A7 + GICv2)
+ *   gk7605v100   (Goke rebrand of V4)
  *
  * Copyright (c) 2020-2021, 2026 OpenIPC.
  * Written by Dmitry Ilyin
@@ -556,7 +557,7 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .wdt_base           = 0x12030000,                       \
     .wdt_irq            = 2,                                \
     .wdt_freq           = 3000000,                          \
-    .num_regbanks       = 6,                                \
+    .num_regbanks       = 16,                               \
     .regbanks           = {                                 \
         { "hisi-misc",       0x12028000, 0x8000  },         \
         { "hisi-ddr",        0x120d0000, 0x10000 },         \
@@ -564,6 +565,16 @@ static const HisiSoCConfig hi3516dv200_soc = {
         { "hisi-iocfg-core", 0x120c0000, 0x10000 },         \
         { "hisi-iocfg-ahb",  0x100c0000, 0x10000 },         \
         { "hisi-pwm",        0x12080000, 0x10000 },         \
+        { "hisi-usb3",       0x10030000, 0x10000 },         \
+        { "hisi-aiao",       0x100e0000, 0x10000 },         \
+        { "hisi-acodec",     0x100f0000, 0x10000 },         \
+        { "hisi-vi-cap",     0x11000000, 0x200000 },        \
+        { "hisi-vi-proc",    0x11200000, 0x40000 },         \
+        { "hisi-mipi-rx",    0x11240000, 0x10000 },         \
+        { "hisi-vgs",        0x11300000, 0x10000 },         \
+        { "hisi-ive",        0x11320000, 0x10000 },         \
+        { "hisi-vpss",       0x11400000, 0x10000 },         \
+        { "hisi-rtc",        0x120e0000, 0x1000  },         \
     }
 
 static const HisiSoCConfig gk7205v200_soc = {
