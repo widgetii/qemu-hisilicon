@@ -109,6 +109,10 @@ typedef struct HisiSoCConfig {
     hwaddr          mipi_rx_base;   /* 0 = no MIPI RX */
     int             mipi_rx_irq;
 
+    /* RTC (SPI-bridge internal RTC) */
+    hwaddr          rtc_base;       /* 0 = no RTC */
+    int             rtc_irq;
+
     /* VEDU (Video Encoder) + JPGE */
     hwaddr          vedu_base;      /* 0 = no VEDU */
     hwaddr          jpge_base;

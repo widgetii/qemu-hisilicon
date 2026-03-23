@@ -306,6 +306,9 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .mipi_rx_base       = 0x11240000,
     .mipi_rx_irq        = 45,
 
+    .rtc_base           = 0x120e0000,
+    .rtc_irq            = 0,
+
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
@@ -371,6 +374,9 @@ static const HisiSoCConfig hi3516ev200_soc = {
 
     .mipi_rx_base       = 0x11240000,
     .mipi_rx_irq        = 45,
+
+    .rtc_base           = 0x120e0000,
+    .rtc_irq            = 0,
 
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
@@ -440,6 +446,9 @@ static const HisiSoCConfig hi3518ev300_soc = {
     .mipi_rx_base       = 0x11240000,
     .mipi_rx_irq        = 45,
 
+    .rtc_base           = 0x120e0000,
+    .rtc_irq            = 0,
+
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
@@ -506,6 +515,9 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .mipi_rx_base       = 0x11240000,
     .mipi_rx_irq        = 45,
 
+    .rtc_base           = 0x120e0000,
+    .rtc_irq            = 0,
+
     .num_sdhci          = 2,
     .sdhci_bases        = { 0x10010000, 0x10020000 },
     .sdhci_irqs         = { 30, 31 },
@@ -559,6 +571,8 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .femac_irq          = 33,                              \
     .mipi_rx_base       = 0x11240000,                      \
     .mipi_rx_irq        = 45,                              \
+    .rtc_base           = 0x120e0000,                      \
+    .rtc_irq            = 0,                               \
     .num_sdhci          = 2,                                \
     .sdhci_bases        = { 0x10010000, 0x10020000 },       \
     .sdhci_irqs         = { 30, 31 },                       \
@@ -571,7 +585,7 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .wdt_base           = 0x12030000,                       \
     .wdt_irq            = 2,                                \
     .wdt_freq           = 3000000,                          \
-    .num_regbanks       = 15,                               \
+    .num_regbanks       = 14,                               \
     .regbanks           = {                                 \
         { "hisi-misc",       0x12028000, 0x8000  },         \
         { "hisi-ddr",        0x120d0000, 0x10000 },         \
@@ -587,7 +601,6 @@ static const HisiSoCConfig hi3516dv200_soc = {
         { "hisi-vgs",        0x11300000, 0x10000 },         \
         { "hisi-ive",        0x11320000, 0x10000 },         \
         { "hisi-vpss",       0x11400000, 0x10000 },         \
-        { "hisi-rtc",        0x120e0000, 0x1000  },         \
     }
 
 static const HisiSoCConfig gk7205v200_soc = {
@@ -889,6 +902,15 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, c->mipi_rx_base);
         sysbus_connect_irq(busdev, 0, pic[c->mipi_rx_irq]);
+    }
+
+    /* RTC (SPI-bridge) */
+    if (c->rtc_base) {
+        DeviceState *rtc = qdev_new("hisi-rtc");
+        SysBusDevice *busdev = SYS_BUS_DEVICE(rtc);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->rtc_base);
+        sysbus_connect_irq(busdev, 0, pic[c->rtc_irq]);
     }
 
     /* VEDU + JPGE */
