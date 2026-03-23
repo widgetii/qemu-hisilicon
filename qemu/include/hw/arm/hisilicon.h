@@ -25,6 +25,7 @@
 #define HISI_MAX_SDHCI    2
 #define HISI_MAX_I2C      3
 #define HISI_MAX_REGBANKS 8
+#define HISI_MAX_CRG_DEFAULTS 8
 
 typedef struct HisiRegbankEntry {
     const char *name;
@@ -78,6 +79,7 @@ typedef struct HisiSoCConfig {
     /* GPIO (PL061) */
     hwaddr          gpio_base;
     int             gpio_count;
+    int             gpio_stride;    /* address step between ports (0x1000 or 0x10000) */
     int             gpio_irq;       /* VIC: shared IRQ for all ports */
     int             gpio_irq_start; /* GIC: first SPI, one per port */
 
@@ -114,6 +116,10 @@ typedef struct HisiSoCConfig {
     int             wdt_irq;        /* -1 = no IRQ */
     uint32_t        wdt_freq;       /* clock frequency in Hz */
 
+    /* CRG register defaults (mimics U-Boot clock init before kernel boot) */
+    int             num_crg_defaults;
+    struct { uint32_t offset; uint32_t value; } crg_defaults[HISI_MAX_CRG_DEFAULTS];
+
     /* Generic RAM-backed register banks (pin mux, DDR PHY, PWM, etc.) */
     int             num_regbanks;
     HisiRegbankEntry regbanks[HISI_MAX_REGBANKS];
@@ -129,6 +135,9 @@ typedef struct HisiSoCConfig {
 #define HISI_SOC_ID_EV300       0x3516E300
 #define HISI_SOC_ID_18EV300     0x3518E300
 #define HISI_SOC_ID_DV200       0x3516D200
+
+/* V2 generation */
+#define HISI_SOC_ID_CV200       0x3518E200
 
 /* Goke chips — die-identical V4 silicon with different SoC IDs */
 #define GOKE_SOC_ID_7205V200    0x72050200  /* = hi3516ev200 */

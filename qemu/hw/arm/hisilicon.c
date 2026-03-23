@@ -45,6 +45,82 @@
 
 /* ── SoC configuration tables ──────────────────────────────────────── */
 
+/*
+ * Hi3516CV200 (V2): ARM926EJ-S + PL190 VIC, 0x20xxxxxx peripheral space.
+ * Also known as Hi3518EV200.  Uses hieth-sf in vendor kernel but FEMAC
+ * in OpenIPC's 4.9+ kernel.  FMC memory window at 0x58000000 (not 0x14000000).
+ */
+static const HisiSoCConfig hi3516cv200_soc = {
+    .name               = "hi3516cv200",
+    .desc               = "HiSilicon Hi3516CV200 (ARM926EJ-S)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
+    .soc_id             = HISI_SOC_ID_CV200,
+    .ram_size_default   = 64 * MiB,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = false,
+    .vic_base           = 0x100D0000,
+
+    .sysctl_base        = 0x20050000,
+    .crg_base           = 0x20030000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000 },
+    .uart_irqs          = { 5, 30, 25 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x20000000, 0x20010000 },
+    .timer_irqs         = { 3, 4 },
+    .timer_freq         = 3000000,      /* 3 MHz (APB bus / 4) */
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x200C0000, 0x200E0000 },
+    .spi_irqs           = { 6, 7 },
+
+    .fmc_ctrl_base      = 0x10010000,
+    .fmc_mem_base       = 0x58000000,
+
+    .gpio_base          = 0x20140000,
+    .gpio_count         = 9,
+    .gpio_stride        = 0x10000,
+    .gpio_irq           = 31,           /* shared for all ports (VIC) */
+
+    .dma_base           = 0x10060000,
+    .dma_irq            = 14,
+
+    .femac_base         = 0x10090000,
+    .femac_irq          = 12,
+
+    .num_himci          = 2,
+    .himci_bases        = { 0x10020000, 0x10030000 },
+    .himci_irqs         = { 18, 8 },
+
+    .num_i2c            = 3,
+    .i2c_bases          = { 0x200D0000, 0x20240000, 0x20250000 },
+
+    .wdt_base           = 0x20040000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    /*
+     * CRG register defaults — mimic what U-Boot sets before booting Linux.
+     * The 4.9 kernel uses DT-based clocks; gate bits must be pre-enabled
+     * or the PL011 UART driver can't get its clock and the console is dead.
+     */
+    .num_crg_defaults   = 4,
+    .crg_defaults       = {
+        /* UART0/1/2 + SPI0/1 clk enable, UART mux=24MHz */
+        { 0xe4, (1 << 13) | (1 << 14) | (1 << 15) |
+                (1 << 16) | (1 << 17) | (1 << 19) },
+        { 0xc0, (1 << 1) },            /* FMC clk enable */
+        { 0xec, (1 << 1) },            /* ETH clk enable */
+        { 0xc4, (1 << 1) | (1 << 9) }, /* MMC0 + MMC1 clk enable */
+    },
+};
+
 static const HisiSoCConfig hi3516cv300_soc = {
     .name               = "hi3516cv300",
     .desc               = "HiSilicon Hi3516CV300 (ARM926EJ-S)",
@@ -80,6 +156,7 @@ static const HisiSoCConfig hi3516cv300_soc = {
 
     .gpio_base          = 0x12140000,
     .gpio_count         = 9,
+    .gpio_stride        = 0x1000,
     .gpio_irq           = 31,           /* shared for all ports (VIC) */
 
     .dma_base           = 0x10030000,
@@ -136,6 +213,7 @@ static const HisiSoCConfig hi3516ev300_soc = {
 
     .gpio_base          = 0x120b0000,
     .gpio_count         = 10,
+    .gpio_stride        = 0x1000,
     .gpio_irq_start     = 16,           /* per-port: SPI 16..25 (GIC) */
 
     .femac_base         = 0x10040000,
@@ -198,6 +276,7 @@ static const HisiSoCConfig hi3516ev200_soc = {
 
     .gpio_base          = 0x120b0000,
     .gpio_count         = 8,
+    .gpio_stride        = 0x1000,
     .gpio_irq_start     = 16,
 
     .femac_base         = 0x10040000,
@@ -262,6 +341,7 @@ static const HisiSoCConfig hi3518ev300_soc = {
 
     .gpio_base          = 0x120b0000,
     .gpio_count         = 8,
+    .gpio_stride        = 0x1000,
     .gpio_irq_start     = 16,
 
     .femac_base         = 0x10040000,
@@ -324,6 +404,7 @@ static const HisiSoCConfig hi3516dv200_soc = {
 
     .gpio_base          = 0x120b0000,
     .gpio_count         = 10,
+    .gpio_stride        = 0x1000,
     .gpio_irq_start     = 16,
 
     .femac_base         = 0x10040000,
@@ -376,6 +457,7 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .fmc_ctrl_base      = 0x10000000,                       \
     .fmc_mem_base       = 0x14000000,                       \
     .gpio_base          = 0x120b0000,                       \
+    .gpio_stride        = 0x1000,                           \
     .gpio_irq_start     = 16,                              \
     .femac_base         = 0x10040000,                       \
     .femac_irq          = 33,                              \
@@ -574,6 +656,14 @@ static void hisilicon_common_init(MachineState *machine,
         DeviceState *crg = qdev_new("hisi-crg");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(crg), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(crg), 0, c->crg_base);
+
+        /* Pre-enable clocks (mimics U-Boot init before kernel boot) */
+        for (n = 0; n < c->num_crg_defaults; n++) {
+            address_space_stl(&address_space_memory,
+                              c->crg_base + c->crg_defaults[n].offset,
+                              c->crg_defaults[n].value,
+                              MEMTXATTRS_UNSPECIFIED, NULL);
+        }
     }
 
     /* UARTs */
@@ -620,7 +710,8 @@ static void hisilicon_common_init(MachineState *machine,
         } else {
             irq = pic[c->gpio_irq];
         }
-        sysbus_create_simple("pl061", c->gpio_base + n * 0x1000, irq);
+        sysbus_create_simple("pl061",
+                             c->gpio_base + n * c->gpio_stride, irq);
     }
 
     /* FEMAC */
@@ -789,6 +880,7 @@ static void hisi_machine_set_sensor(Object *obj, const char *value,
                             tag##_class_init, false,                  \
                             arm_machine_interfaces)
 
+DEFINE_HISI_MACHINE("hi3516cv200", hi3516cv200, hi3516cv200_soc)
 DEFINE_HISI_MACHINE("hi3516cv300", hi3516cv300, hi3516cv300_soc)
 DEFINE_HISI_MACHINE("hi3516ev300", hi3516ev300, hi3516ev300_soc)
 DEFINE_HISI_MACHINE("hi3516ev200", hi3516ev200, hi3516ev200_soc)

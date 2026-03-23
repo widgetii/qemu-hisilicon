@@ -1,7 +1,8 @@
 /*
  * HiSilicon System Controller (SysCtrl) emulation.
  *
- * Provides SoC identification and system reset for CV300/EV300.
+ * Provides SoC identification, system reset, and general-purpose
+ * registers for all supported HiSilicon SoC generations (V2/V3/V4).
  *
  * Copyright (c) 2020-2021, 2026 OpenIPC.
  * Written by Dmitry Ilyin
@@ -19,10 +20,22 @@
 #define TYPE_HISI_SYSCTL "hisi-sysctl"
 OBJECT_DECLARE_SIMPLE_TYPE(HisiSysctlState, HISI_SYSCTL)
 
+/*
+ * Register space is 4K for V3/V4, but the media subsystem DTS on V2
+ * maps 64K (0x20050000 size 0x10000).  We use 4K for the actual
+ * register window and let ignore_memory_transaction_failures handle
+ * any accesses beyond.
+ */
+#define HISI_SYSCTL_MMIO_SIZE   0x1000
+
+/* Number of 32-bit general-purpose storage words */
+#define HISI_SYSCTL_NREGS       (HISI_SYSCTL_MMIO_SIZE / 4)
+
 struct HisiSysctlState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     uint32_t soc_id;
+    uint32_t regs[HISI_SYSCTL_NREGS];
 };
 
 static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
@@ -30,10 +43,12 @@ static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
     HisiSysctlState *s = HISI_SYSCTL(opaque);
 
     switch (offset) {
-    case 0x00: /* SCSYSID0 / SoC ID */
-        return s->soc_id;
+    case 0x00: /* SC_CTRL */
+        return s->regs[0];
     case 0x04: /* SC_SYSRES — system reset (write-only, read returns 0) */
         return 0;
+    case 0x8C: /* REG_SYSSTAT — boot mode (0 = SPI NOR boot) */
+        return s->regs[0x8C / 4];
     case 0xEE0: /* SCSYSID0 */
         return s->soc_id & 0xFF;
     case 0xEE4: /* SCSYSID1 */
@@ -43,8 +58,9 @@ static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
     case 0xEEC: /* SCSYSID3 */
         return (s->soc_id >> 24) & 0xFF;
     default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "hisi_sysctl_read: Bad offset 0x%x\n", (int)offset);
+        if (offset < HISI_SYSCTL_MMIO_SIZE) {
+            return s->regs[offset / 4];
+        }
         return 0;
     }
 }
@@ -52,13 +68,16 @@ static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
 static void hisi_sysctl_write(void *opaque, hwaddr offset,
                                uint64_t val, unsigned size)
 {
+    HisiSysctlState *s = HISI_SYSCTL(opaque);
+
     switch (offset) {
     case 0x04: /* SC_SYSRES — system reset */
         qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         break;
     default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "hisi_sysctl_write: Bad offset 0x%x\n", (int)offset);
+        if (offset < HISI_SYSCTL_MMIO_SIZE) {
+            s->regs[offset / 4] = (uint32_t)val;
+        }
         break;
     }
 }
@@ -76,7 +95,7 @@ static void hisi_sysctl_init(Object *obj)
     HisiSysctlState *s = HISI_SYSCTL(obj);
 
     memory_region_init_io(&s->iomem, obj, &hisi_sysctl_ops, s,
-                          TYPE_HISI_SYSCTL, 0x1000);
+                          TYPE_HISI_SYSCTL, HISI_SYSCTL_MMIO_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
