@@ -43,6 +43,9 @@
 #include "hw/qdev-clock.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
+#include <libfdt.h>
+#include "hw/loader.h"
+#include <zlib.h>  /* crc32() for uImage header fixup */
 
 /* ── SoC configuration tables ──────────────────────────────────────── */
 
@@ -643,6 +646,166 @@ typedef struct {
     char *sensor;
 } HisiMachineState;
 
+/* ── Appended DTB fixup ────────────────────────────────────────────── */
+
+/*
+ * Fixup appended DTB in the loaded kernel payload.
+ *
+ * Many OpenIPC uImages have a device tree appended with zero padding
+ * and no /chosen node.  The kernel's atags_to_fdt() tries to patch
+ * the DTB in-place with bootargs and initrd info; without padding it
+ * silently corrupts the DTB and boot fails.  Some DTBs also lack a
+ * /chosen { stdout-path } node needed for console output.
+ *
+ * This runs as a reset handler (after ROM blobs are loaded into RAM)
+ * so the kernel payload is already in guest memory.
+ */
+/*
+ * Read the kernel file, find the appended DTB, patch it (add /chosen
+ * with stdout-path, add padding for atags_to_fdt), and write a temp
+ * file with the patched kernel.  Returns the temp file path (caller
+ * frees), or NULL if no patching was needed.
+ */
+static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
+                                           hwaddr load_addr)
+{
+    gsize file_size;
+    gchar *buf;
+    (void)load_addr; /* reserved for future use */
+
+    if (!kernel_filename ||
+        !g_file_get_contents(kernel_filename, &buf, &file_size, NULL)) {
+        return NULL;
+    }
+
+    /* Skip uImage header if present */
+    size_t hdr_off = 0;
+    if (file_size > 64 &&
+        (uint8_t)buf[0] == 0x27 && (uint8_t)buf[1] == 0x05 &&
+        (uint8_t)buf[2] == 0x19 && (uint8_t)buf[3] == 0x56) {
+        hdr_off = 64;
+    }
+
+    /* Scan payload for FDT magic (take the last match = appended DTB) */
+    size_t dtb_off = 0;
+    uint32_t dtb_size = 0;
+    for (size_t i = hdr_off + 256 * 1024; i + 8 < file_size; i += 4) {
+        if ((uint8_t)buf[i]   == 0xd0 && (uint8_t)buf[i+1] == 0x0d &&
+            (uint8_t)buf[i+2] == 0xfe && (uint8_t)buf[i+3] == 0xed) {
+            uint32_t sz = ((uint8_t)buf[i+4] << 24) |
+                          ((uint8_t)buf[i+5] << 16) |
+                          ((uint8_t)buf[i+6] << 8)  |
+                          (uint8_t)buf[i+7];
+            if (sz > 1024 && sz < 256 * 1024 && i + sz <= file_size) {
+                dtb_off = i;
+                dtb_size = sz;
+            }
+        }
+    }
+
+    if (!dtb_off) {
+        g_free(buf);
+        return NULL;
+    }
+
+    /* Patch the DTB */
+    uint32_t new_dtb_size = dtb_size + 4096;
+    void *dtb = g_malloc0(new_dtb_size);
+    memcpy(dtb, buf + dtb_off, dtb_size);
+
+    if (fdt_open_into(dtb, dtb, new_dtb_size) != 0) {
+        g_free(dtb);
+        g_free(buf);
+        return NULL;
+    }
+
+    /* Ensure /chosen with stdout-path exists */
+    if (fdt_path_offset(dtb, "/chosen") < 0) {
+        fdt_add_subnode(dtb, 0, "chosen");
+    }
+    int chosen = fdt_path_offset(dtb, "/chosen");
+    if (chosen >= 0 && !fdt_getprop(dtb, chosen, "stdout-path", NULL)) {
+        fdt_setprop_string(dtb, chosen, "stdout-path",
+                           "serial0:115200n8");
+    }
+
+    /* Pack then re-expand with padding for kernel's atags_to_fdt() */
+    fdt_pack(dtb);
+    uint32_t packed = fdt_totalsize(dtb);
+    fdt_open_into(dtb, dtb, packed + 4096);
+    uint32_t final_dtb_size = fdt_totalsize(dtb);
+
+    /*
+     * Build new uImage: original_header + kernel_before_dtb + patched_dtb.
+     * For raw (non-uImage) kernels, hdr_off=0 so the header is absent.
+     * We must preserve the uImage header so QEMU's load_uimage_as()
+     * recognizes the file format and uses the correct load address.
+     * The uImage data-size and CRC fields are updated to match.
+     */
+    size_t new_payload_size = (dtb_off - hdr_off) + final_dtb_size;
+    size_t new_file_size = hdr_off + new_payload_size;
+    gchar *new_buf = g_malloc(new_file_size);
+
+    /* Copy header (if any) */
+    if (hdr_off) {
+        memcpy(new_buf, buf, hdr_off);
+    }
+    /* Copy kernel before DTB */
+    memcpy(new_buf + hdr_off, buf + hdr_off, dtb_off - hdr_off);
+    /* Copy patched DTB */
+    memcpy(new_buf + dtb_off, dtb, final_dtb_size);
+
+    /* Update uImage header if present */
+    if (hdr_off == 64) {
+        /* data size at offset 12 (big-endian) */
+        uint32_t data_size = new_payload_size;
+        new_buf[12] = (data_size >> 24) & 0xff;
+        new_buf[13] = (data_size >> 16) & 0xff;
+        new_buf[14] = (data_size >> 8) & 0xff;
+        new_buf[15] = data_size & 0xff;
+        /* Zero header CRC for recalculation */
+        memset(new_buf + 4, 0, 4);
+        /* Recalculate data CRC at offset 24 */
+        uint32_t dcrc = crc32(0, (const uint8_t *)new_buf + hdr_off, data_size);
+        new_buf[24] = (dcrc >> 24) & 0xff;
+        new_buf[25] = (dcrc >> 16) & 0xff;
+        new_buf[26] = (dcrc >> 8) & 0xff;
+        new_buf[27] = dcrc & 0xff;
+        /* Recalculate header CRC */
+        uint32_t hcrc = crc32(0, (uint8_t *)new_buf, 64);
+        new_buf[4] = (hcrc >> 24) & 0xff;
+        new_buf[5] = (hcrc >> 16) & 0xff;
+        new_buf[6] = (hcrc >> 8) & 0xff;
+        new_buf[7] = hcrc & 0xff;
+    }
+
+    /* Write temp file */
+    GError *err = NULL;
+    char *tmppath = NULL;
+    int fd = g_file_open_tmp("hisi-kernel-XXXXXX", &tmppath, &err);
+    if (fd < 0) {
+        g_free(new_buf);
+        g_free(dtb);
+        g_free(buf);
+        return NULL;
+    }
+    if (write(fd, new_buf, new_file_size) != (ssize_t)new_file_size) {
+        close(fd);
+        unlink(tmppath);
+        g_free(tmppath);
+        g_free(new_buf);
+        g_free(dtb);
+        g_free(buf);
+        return NULL;
+    }
+    close(fd);
+
+    g_free(new_buf);
+    g_free(dtb);
+    g_free(buf);
+    return tmppath;
+}
+
 /* ── Shared machine init ───────────────────────────────────────────── */
 
 /* PPI numbers — same for all GICv2 HiSilicon SoCs */
@@ -983,10 +1146,31 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
+    /* Patch appended DTB before loading the kernel */
+    char *patched_kernel = NULL;
+    if (machine->kernel_filename) {
+        patched_kernel = hisilicon_patch_appended_dtb(
+            machine->kernel_filename, c->ram_base + 0x8000);
+        if (patched_kernel) {
+            machine->kernel_filename = patched_kernel;
+        }
+    }
+
     /* Boot */
     hisilicon_binfo.ram_size = machine->ram_size;
     hisilicon_binfo.loader_start = c->ram_base;
     arm_load_kernel(cpu, machine, &hisilicon_binfo);
+
+    /*
+     * Patch the appended DTB in the kernel file: add /chosen with
+     * stdout-path and padding for the kernel's atags_to_fdt().
+     * Creates a temp file that is used instead of the original.
+     * This must happen BEFORE arm_load_kernel() so the patched
+     * payload is what gets loaded into guest RAM.
+     *
+     * (Handled above by patching before arm_load_kernel.)
+     */
+
 }
 
 /* ── Sensor property accessors ─────────────────────────────────────── */
