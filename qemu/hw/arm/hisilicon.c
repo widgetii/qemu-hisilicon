@@ -1679,6 +1679,16 @@ static void hisilicon_common_init(MachineState *machine,
     /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */
     for (n = 0; n < c->num_regbanks; n++) {
         if (c->regbanks[n].base) {
+            /* IVE gets a proper functional device instead of regbank */
+            if (!strcmp(c->regbanks[n].name, "hisi-ive")) {
+                DeviceState *ive = qdev_new("hisi-ive");
+                SysBusDevice *busdev = SYS_BUS_DEVICE(ive);
+                sysbus_realize_and_unref(busdev, &error_fatal);
+                sysbus_mmio_map(busdev, 0, c->regbanks[n].base);
+                /* IVE IRQ: EV300=SPI51, CV500=SPI37 — extract from DTS */
+                continue;
+            }
+
             DeviceState *rb = qdev_new("hisi-regbank");
             qdev_prop_set_uint32(rb, "size", c->regbanks[n].size);
             qdev_prop_set_string(rb, "name", c->regbanks[n].name);
