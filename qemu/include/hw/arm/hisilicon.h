@@ -160,10 +160,15 @@ typedef struct HisiSoCConfig {
 /* V3A generation (Cortex-A7/A17 big.LITTLE + GIC, V3-era address map) */
 #define HISI_SOC_ID_19V101      0x35190101
 
-/* V5 generation (Cortex-A7 MP2 + GIC, new 0x11xxxxxx address map, 2025) */
-#define HISI_SOC_ID_CV608       0x3516C608
-#define HISI_SOC_ID_CV610       0x3516C610
-#define HISI_SOC_ID_CV613       0x3516C613
+/*
+ * V5 generation (Cortex-A7 MP2 + GIC, new 0x11xxxxxx address map, 2025)
+ * Same die, different feature tiers.  Model suffixes:
+ *   10B=CV610, 20S=CV613, 00S/20G/00G=unknown IDs (not yet in lab)
+ * Also HISI_OT: Hi3516DV500 (0x3516D500), Hi3519DV500 (0x3519D500)
+ */
+#define HISI_SOC_ID_CV608       0x3516C608  /* consumer, 0.2 TOPS, 3M */
+#define HISI_SOC_ID_CV610       0x3516C610  /* 10B: 0.5 TOPS, 5M */
+#define HISI_SOC_ID_CV613       0x3516C613  /* 20S: 1 TOPS, 4K */
 
 /* Goke chips — die-identical V4 silicon with different SoC IDs */
 #define GOKE_SOC_ID_7205V200    0x72050200  /* = hi3516ev200 */

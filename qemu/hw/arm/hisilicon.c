@@ -911,9 +911,19 @@ static const HisiSoCConfig gk7605v100_soc = {
 };
 
 /*
- * V5 family: Hi3516CV608 / CV610 / CV613 — same die, different feature tiers.
- * CV608: consumer (0.2 TOPS, 3M), CV610: professional (1 TOPS, 4K),
- * CV613: higher-end variant.  All share identical peripheral addresses.
+ * V5 family (2025): Hi3516CV608 / CV610 / CV613 — same die, different tiers.
+ * All share identical peripheral addresses; only SoC ID differs.
+ *
+ * Datasheet model suffixes → chip IDs (from Section 1.2.14):
+ *   10B  → Hi3516CV610  0x3516C610  0.5 TOPS, 5M,  DDR2, QFN
+ *   20S  → Hi3516CV613  0x3516C613  1 TOPS,   4K,  DDR3, QFN
+ *   00S  → unknown ID                1 TOPS,   4K,  DDR3, QFN
+ *   20G  → unknown ID                1 TOPS,   4K,  DDR3, QFN, GB35114
+ *   00G  → unknown ID                1 TOPS,   4K,  ext DDR3, BGA, GB35114
+ *   (separate chip) Hi3516CV608  0x3516C608  0.2 TOPS, 3M, DDR2, QFN
+ *
+ * ipctool also lists Hi3516DV500 (0x3516D500) and Hi3519DV500 (0x3519D500)
+ * as HISI_OT generation — likely same V5 address map, awaiting SDK/lab.
  */
 static const HisiSoCConfig hi3516cv608_soc = {
     .name               = "hi3516cv608",

@@ -26,6 +26,22 @@ to a full Linux userspace on all supported platforms.
 | `hi3516cv610` | **V5** | Cortex-A7 MP2 | GIC | **5.10** | yes |
 | `hi3516cv613` | V5 | Cortex-A7 MP2 | GIC | 5.10 | — |
 
+### V5 Model Suffix → Chip ID Mapping
+
+From datasheet Section 1.2.14 and lab identification:
+
+| Model | Chip | SoC ID | NPU | Max Res | DDR | Package |
+|-------|------|--------|-----|---------|-----|---------|
+| — | Hi3516CV608 | 0x3516C608 | 0.2 TOPS | 3M | DDR2 512Mb | QFN |
+| 10B | Hi3516CV610 | 0x3516C610 | 0.5 TOPS | 5M | DDR2 512Mb | QFN |
+| 20S | Hi3516CV613 | 0x3516C613 | 1 TOPS | 4K | DDR3 1Gb | QFN |
+| 00S | unknown | — | 1 TOPS | 4K | DDR3 1Gb | QFN |
+| 20G | unknown | — | 1 TOPS | 4K | DDR3 1Gb | QFN, GB35114 |
+| 00G | unknown | — | 1 TOPS | 4K | ext DDR3 4Gb | BGA, GB35114 |
+
+ipctool also lists Hi3516DV500 (`0x3516D500`) and Hi3519DV500 (`0x3519D500`)
+as `HISI_OT` generation — likely same V5 address map, awaiting SDK/lab confirmation.
+
 ## Peripheral Support Matrix
 
 | Peripheral | CV100 | CV200 | AV100 | CV300 | CV500 | 3519V101 | V4 (×8) | **V5 (×3)** |
