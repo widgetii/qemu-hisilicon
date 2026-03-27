@@ -151,6 +151,9 @@ typedef struct HisiSoCConfig {
 /* V2 generation */
 #define HISI_SOC_ID_CV200       0x3518E200
 
+/* V2A generation (Cortex-A7 + GIC, V1-era 0x20xxxxxx address map) */
+#define HISI_SOC_ID_AV100       0x3516A100
+
 /* V3.5 generation (Cortex-A7 + GIC, but V3-era address map) */
 #define HISI_SOC_ID_CV500       0x3516C500
 

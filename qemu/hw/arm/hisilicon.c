@@ -207,6 +207,95 @@ static const HisiSoCConfig hi3516cv200_soc = {
     },
 };
 
+/*
+ * Hi3516AV100: V2A generation — Cortex-A7 + GICv2 but with V1/V2-era
+ * 0x20xxxxxx peripheral addresses.  Uses HISFC350 flash controller
+ * (like CV100) and GMAC (not FEMAC) for Ethernet.
+ * No ARM arch timer — SP804 at 50 MHz is primary clocksource.
+ */
+static const HisiSoCConfig hi3516av100_soc = {
+    .name               = "hi3516av100",
+    .desc               = "HiSilicon Hi3516AV100 (Cortex-A7)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_AV100,
+    .ram_size_default   = 64 * MiB,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x20301000,       /* V1-era address space! */
+    .gic_cpu_base       = 0x20302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x20050000,
+    .crg_base           = 0x20030000,
+
+    .num_uarts          = 4,
+    .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000, 0x20230000 },
+    .uart_irqs          = { 8, 9, 10, 11 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x20000000, 0x20010000 },
+    .timer_irqs         = { 3, 4 },
+    .timer_freq         = 3000000,          /* 3 MHz — matches DT clocksource;
+                                             * clockevent 16.7x slow but avoids
+                                             * timer storm from clocksource speedup */
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x200C0000, 0x200E0000 },
+    .spi_irqs           = { 12, 13 },
+
+    .fmc_ctrl_base      = 0x10010000,
+    .fmc_mem_base       = 0x58000000,
+    .fmc_type           = "hisi-sfc350",    /* HISFC350, same as CV100 */
+
+    .gpio_base          = 0x20140000,
+    .gpio_count         = 15,               /* ports 0-14, skip port 15 at 0x20260000 */
+    .gpio_stride        = 0x10000,
+    .gpio_irq           = 47,               /* shared IRQ for all ports (GIC) */
+
+    /* No FEMAC — uses GMAC (higmac) which is not emulated */
+
+    .num_himci          = 2,
+    .himci_bases        = { 0x206E0000, 0x206F0000 },
+    .himci_irqs         = { 19, 20 },
+
+    .num_i2c            = 3,
+    .i2c_bases          = { 0x200D0000, 0x20240000, 0x20250000 },
+
+    .mipi_rx_base       = 0x20680000,
+    .mipi_rx_irq        = 34,
+
+    .rtc_base           = 0x20060000,
+    .rtc_irq            = 7,
+
+    .vedu_base          = 0x20640000,
+    .jpge_base          = 0x20660000,
+    .vedu_irq           = 43,
+    .jpge_irq           = 41,
+
+    .wdt_base           = 0x20040000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_regbanks       = 9,
+    .regbanks           = {
+        { "hisi-misc",       0x20120000, 0x10000 },
+        { "hisi-ddr",        0x20110000, 0x10000 },
+        { "hisi-pwm",        0x20130000, 0x10000 },
+        { "hisi-gmac",       0x10090000, 0x10000 },
+        { "hisi-nandc",      0x10000000, 0x1000  },
+        /* USB/SNAND left unmapped — regbanks store poll-bit writes
+         * causing infinite loops in EHCI handshake and SPI NAND OP */
+        { "hisi-regulator",  0x20270000, 0x1000  },
+        { "hisi-viu",        0x20580000, 0x40000 },
+        { "hisi-vpss",       0x20600000, 0x10000 },
+        { "hisi-aiao",       0x20650000, 0x10000 },
+    },
+};
+
 static const HisiSoCConfig hi3516cv300_soc = {
     .name               = "hi3516cv300",
     .desc               = "HiSilicon Hi3516CV300 (ARM926EJ-S)",
@@ -850,7 +939,8 @@ typedef struct {
  * frees), or NULL if no patching was needed.
  */
 static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
-                                           hwaddr load_addr)
+                                           hwaddr load_addr,
+                                           const HisiSoCConfig *c)
 {
     gsize file_size;
     gchar *buf;
@@ -910,6 +1000,47 @@ static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
     if (chosen >= 0 && !fdt_getprop(dtb, chosen, "stdout-path", NULL)) {
         fdt_setprop_string(dtb, chosen, "stdout-path",
                            "serial0:115200n8");
+    }
+
+    /*
+     * If timer_freq is set, patch fixed-clock "clk_apb" to match.
+     * Some SoCs (hi3516av100) have SP804 with split clocks (50 MHz + 3 MHz)
+     * that QEMU can't model — unify them to avoid timer storms.
+     */
+    if (c->timer_freq) {
+        int soc_node = fdt_path_offset(dtb, "/soc");
+        if (soc_node >= 0) {
+            int node;
+            fdt_for_each_subnode(node, dtb, soc_node) {
+                const char *compat = fdt_getprop(dtb, node, "compatible", NULL);
+                const char *name = fdt_get_name(dtb, node, NULL);
+                if (compat && name &&
+                    !strcmp(compat, "fixed-clock") &&
+                    !strcmp(name, "clk_apb")) {
+                    uint32_t freq = cpu_to_be32(c->timer_freq);
+                    fdt_setprop_inplace(dtb, node, "clock-frequency",
+                                        &freq, sizeof(freq));
+                }
+            }
+        }
+    }
+
+    /*
+     * Disable NAND controllers that we don't emulate — their drivers
+     * poll hardware status registers that cause hangs on regbank stubs.
+     */
+    {
+        const char *nand_paths[] = {
+            "/soc/spi_nand_controller",
+            "/soc/nand_controller",
+            NULL
+        };
+        for (int i = 0; nand_paths[i]; i++) {
+            int node = fdt_path_offset(dtb, nand_paths[i]);
+            if (node >= 0) {
+                fdt_setprop_string(dtb, node, "status", "disabled");
+            }
+        }
     }
 
     /* Pack then re-expand with padding for kernel's atags_to_fdt() */
@@ -1324,7 +1455,7 @@ static void hisilicon_common_init(MachineState *machine,
     char *patched_kernel = NULL;
     if (machine->kernel_filename) {
         patched_kernel = hisilicon_patch_appended_dtb(
-            machine->kernel_filename, c->ram_base + 0x8000);
+            machine->kernel_filename, c->ram_base + 0x8000, c);
         if (patched_kernel) {
             machine->kernel_filename = patched_kernel;
         }
@@ -1395,6 +1526,7 @@ static void hisi_machine_set_sensor(Object *obj, const char *value,
 
 DEFINE_HISI_MACHINE("hi3516cv100", hi3516cv100, hi3516cv100_soc)
 DEFINE_HISI_MACHINE("hi3516cv200", hi3516cv200, hi3516cv200_soc)
+DEFINE_HISI_MACHINE("hi3516av100", hi3516av100, hi3516av100_soc)
 DEFINE_HISI_MACHINE("hi3516cv300", hi3516cv300, hi3516cv300_soc)
 DEFINE_HISI_MACHINE("hi3516cv500", hi3516cv500, hi3516cv500_soc)
 DEFINE_HISI_MACHINE("hi3519v101", hi3519v101, hi3519v101_soc)
