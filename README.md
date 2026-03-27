@@ -4,7 +4,7 @@ QEMU machine definitions for HiSilicon IP camera SoCs (V1 through V5 generations
 targeting QEMU v10.2.0. Boots unmodified [OpenIPC](https://openipc.org/) firmware
 to a full Linux userspace on all supported platforms.
 
-## Supported Machines (15 total)
+## Supported Machines (17 total)
 
 | Machine | Generation | CPU | IRQ | Kernel | Boot tested |
 |---------|-----------|-----|-----|--------|-------------|
@@ -22,11 +22,13 @@ to a full Linux userspace on all supported platforms.
 | `gk7205v300` | V4/Goke | Cortex-A7 | GIC | — | — |
 | `gk7202v300` | V4/Goke | Cortex-A7 | GIC | — | — |
 | `gk7605v100` | V4/Goke | Cortex-A7 | GIC | — | — |
+| `hi3516cv608` | V5 | Cortex-A7 MP2 | GIC | 5.10 | — |
 | `hi3516cv610` | **V5** | Cortex-A7 MP2 | GIC | **5.10** | yes |
+| `hi3516cv613` | V5 | Cortex-A7 MP2 | GIC | 5.10 | — |
 
 ## Peripheral Support Matrix
 
-| Peripheral | CV100 | CV200 | AV100 | CV300 | CV500 | 3519V101 | V4 (×8) | **CV610** |
+| Peripheral | CV100 | CV200 | AV100 | CV300 | CV500 | 3519V101 | V4 (×8) | **V5 (×3)** |
 |---|---|---|---|---|---|---|---|---|
 | **Flash** | SFC350 | HiFMC | SFC350 | HiFMC | HiFMC | HiFMC | HiFMC | HiFMC |
 | **Ethernet** | FEMAC | FEMAC | — | FEMAC | FEMAC | — | FEMAC | FEMAC |
@@ -43,14 +45,14 @@ to a full Linux userspace on all supported platforms.
 | **Sensor I2C** | — | — | — | — | — | — | yes | — |
 | **NPU** | — | — | — | — | — | — | — | stub |
 
-Notes: `stub` = regbank stub only. AV100/3519V101 use GMAC (gigabit) which is
-not emulated — only FEMAC (100 Mbps) SoCs have networking.
+Notes: `stub` = regbank stub only. V5 (×3) = CV608/CV610/CV613 (same die, different feature
+tiers). AV100/3519V101 use GMAC (gigabit) — not emulated, boot without networking.
 
 ## Project Structure
 
 ```
 qemu/
-├── hw/arm/hisilicon.c           # Machine definitions (all 15 SoCs)
+├── hw/arm/hisilicon.c           # Machine definitions (all 17 SoCs)
 ├── hw/misc/hisi-sysctl.c        # SysCtrl (SoC ID, reset, general registers)
 ├── hw/misc/hisi-crg.c           # CRG clock/reset stub
 ├── hw/misc/hisi-fmc.c           # HiFMC V100 flash controller (CV200+)
