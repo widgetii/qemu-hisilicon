@@ -355,6 +355,98 @@ static const HisiSoCConfig hi3516cv500_soc = {
     },
 };
 
+/*
+ * Hi3519V101: V3A generation — Cortex-A7/A17 big.LITTLE + GICv2,
+ * V3-era peripheral addresses (0x121xxxxx UARTs/SPI/GPIO like CV300).
+ * Uses GMAC (not FEMAC) for Ethernet; GMAC not yet emulated.
+ */
+static const HisiSoCConfig hi3519v101_soc = {
+    .name               = "hi3519v101",
+    .desc               = "HiSilicon Hi3519V101 (Cortex-A7)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_19V101,
+    .ram_size_default   = 64 * MiB,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12020000,
+    .crg_base           = 0x12010000,
+
+    .num_uarts          = 5,
+    .uart_bases         = { 0x12100000, 0x12101000, 0x12102000,
+                            0x12103000, 0x12104000 },
+    .uart_irqs          = { 4, 5, 6, 7, 8 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x12000000, 0x12001000 },
+    .timer_irqs         = { 64, 66 },
+    .timer_freq         = 3000000,          /* 3 MHz */
+
+    .num_spis           = 4,
+    .spi_bases          = { 0x12120000, 0x12121000, 0x12122000, 0x12123000 },
+    .spi_irqs           = { 9, 10, 11, 12 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .gpio_base          = 0x12140000,
+    .gpio_count         = 17,               /* ports 0-14, phantom 15, port 16 */
+    .gpio_stride        = 0x1000,
+    .gpio_irq           = 43,               /* shared IRQ for all ports (GIC) */
+
+    /* No FEMAC — uses GMAC (higmac) which is not yet emulated */
+
+    .num_himci          = 3,
+    .himci_bases        = { 0x100c0000, 0x100d0000, 0x100e0000 },
+    .himci_irqs         = { 23, 24, 13 },
+
+    .num_i2c            = 4,
+    .i2c_bases          = { 0x12110000, 0x12111000, 0x12112000, 0x12113000 },
+
+    .mipi_rx_base       = 0x11300000,
+    .mipi_rx_irq        = 28,
+
+    .rtc_base           = 0x12090000,
+    .rtc_irq            = 1,
+
+    .vedu_base          = 0x11280000,
+    .jpge_base          = 0x11200000,
+    .vedu_irq           = 37,
+    .jpge_irq           = 38,
+
+    .wdt_base           = 0x12080000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_crg_defaults   = 1,
+    .crg_defaults       = {
+        /* APLL ctrl_reg2: fbdiv=792, refdiv=24 → 792 MHz (prevents div-by-zero) */
+        { 0x04, (24 << 12) | 792 },
+    },
+
+    .num_regbanks       = 11,
+    .regbanks           = {
+        { "hisi-misc",       0x12030000, 0x10000 },
+        { "hisi-ddr",        0x12060000, 0x10000 },
+        { "hisi-iocfg",      0x12160000, 0x10000 },
+        { "hisi-pwm",        0x12130000, 0x10000 },
+        { "hisi-usb-ehci",   0x10120000, 0x10000 },
+        { "hisi-usb-ohci",   0x10110000, 0x10000 },
+        { "hisi-gmac",       0x10050000, 0x10000 },
+        { "hisi-vi-cap",     0x11380000, 0x100000 },
+        { "hisi-vou",        0x11000000, 0x20000 },
+        { "hisi-vpss",       0x11180000, 0x10000 },
+        { "hisi-aiao",       0x11080000, 0x10000 },
+    },
+};
+
 static const HisiSoCConfig hi3516ev300_soc = {
     .name               = "hi3516ev300",
     .desc               = "HiSilicon Hi3516EV300 (Cortex-A7)",
@@ -1080,10 +1172,10 @@ static void hisilicon_common_init(MachineState *machine,
     /* GPIOs (PL061) */
     for (n = 0; n < c->gpio_count; n++) {
         qemu_irq irq;
-        if (c->use_gic) {
-            irq = pic[c->gpio_irq_start + n];
+        if (c->gpio_irq_start) {
+            irq = pic[c->gpio_irq_start + n]; /* per-port IRQs (GIC) */
         } else {
-            irq = pic[c->gpio_irq];
+            irq = pic[c->gpio_irq];           /* shared IRQ (VIC or GIC) */
         }
         sysbus_create_simple("pl061",
                              c->gpio_base + n * c->gpio_stride, irq);
@@ -1305,6 +1397,7 @@ DEFINE_HISI_MACHINE("hi3516cv100", hi3516cv100, hi3516cv100_soc)
 DEFINE_HISI_MACHINE("hi3516cv200", hi3516cv200, hi3516cv200_soc)
 DEFINE_HISI_MACHINE("hi3516cv300", hi3516cv300, hi3516cv300_soc)
 DEFINE_HISI_MACHINE("hi3516cv500", hi3516cv500, hi3516cv500_soc)
+DEFINE_HISI_MACHINE("hi3519v101", hi3519v101, hi3519v101_soc)
 DEFINE_HISI_MACHINE("hi3516ev300", hi3516ev300, hi3516ev300_soc)
 DEFINE_HISI_MACHINE("hi3516ev200", hi3516ev200, hi3516ev200_soc)
 DEFINE_HISI_MACHINE("hi3518ev300", hi3518ev300, hi3518ev300_soc)

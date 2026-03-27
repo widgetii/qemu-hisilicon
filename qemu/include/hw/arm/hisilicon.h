@@ -18,9 +18,9 @@
 #include "exec/hwaddr.h"
 
 /* Maximum peripheral counts */
-#define HISI_MAX_UARTS    3
+#define HISI_MAX_UARTS    5
 #define HISI_MAX_TIMERS   2
-#define HISI_MAX_SPIS     3
+#define HISI_MAX_SPIS     4
 #define HISI_MAX_HIMCI    3
 #define HISI_MAX_SDHCI    2
 #define HISI_MAX_I2C      8
@@ -153,6 +153,9 @@ typedef struct HisiSoCConfig {
 
 /* V3.5 generation (Cortex-A7 + GIC, but V3-era address map) */
 #define HISI_SOC_ID_CV500       0x3516C500
+
+/* V3A generation (Cortex-A7/A17 big.LITTLE + GIC, V3-era address map) */
+#define HISI_SOC_ID_19V101      0x35190101
 
 /* Goke chips — die-identical V4 silicon with different SoC IDs */
 #define GOKE_SOC_ID_7205V200    0x72050200  /* = hi3516ev200 */
