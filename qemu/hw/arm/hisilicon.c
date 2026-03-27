@@ -911,6 +911,90 @@ static const HisiSoCConfig gk7605v100_soc = {
 };
 
 /*
+ * V5 family: Hi3516CV608 / CV610 / CV613 — same die, different feature tiers.
+ * CV608: consumer (0.2 TOPS, 3M), CV610: professional (1 TOPS, 4K),
+ * CV613: higher-end variant.  All share identical peripheral addresses.
+ */
+static const HisiSoCConfig hi3516cv608_soc = {
+    .name               = "hi3516cv608",
+    .desc               = "HiSilicon Hi3516CV608 (Cortex-A7 MP2, ~CV610)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_CV608,
+    .ram_size_default   = 64 * MiB,
+
+    .ram_base           = 0x40000000,
+    .sram_base          = 0x04020000,
+    .sram_size          = 80 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x12401000,
+    .gic_cpu_base       = 0x12402000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x11020000,
+    .crg_base           = 0x11010000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x11040000, 0x11041000, 0x11042000 },
+    .uart_irqs          = { 10, 11, 12 },
+
+    .num_timers         = 0,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x11070000, 0x11071000 },
+    .spi_irqs           = { 19, 20 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x0F000000,
+
+    .gpio_base          = 0x11090000,
+    .gpio_count         = 11,
+    .gpio_stride        = 0x1000,
+    .gpio_irq_start     = 23,
+
+    .femac_base         = 0x10290000,
+    .femac_irq          = 44,
+
+    .num_sdhci          = 2,
+    .sdhci_bases        = { 0x10030000, 0x10040000 },
+    .sdhci_irqs         = { 42, 43 },
+
+    .num_i2c            = 3,
+    .i2c_bases          = { 0x11060000, 0x11061000, 0x11062000 },
+
+    .mipi_rx_base       = 0x173C0000,
+    .mipi_rx_irq        = 64,
+
+    .rtc_base           = 0x11110000,
+    .rtc_irq            = 37,
+
+    .vedu_base          = 0x17140000,
+    .jpge_base          = 0x171C0000,
+    .vedu_irq           = 69,
+    .jpge_irq           = 70,
+
+    .wdt_base           = 0x11030000,
+    .wdt_irq            = 3,
+    .wdt_freq           = 3000000,
+
+    .num_regbanks       = 12,
+    .regbanks           = {
+        { "hisi-misc",       0x11024000, 0x5000  },
+        { "hisi-ddr",        0x11140000, 0x20000 },
+        { "hisi-iocfg0",     0x10260000, 0x10000 },
+        { "hisi-iocfg1",     0x11130000, 0x10000 },
+        { "hisi-pwm",        0x11080000, 0x1000  },
+        { "hisi-usb2",       0x10300000, 0x10000 },
+        { "hisi-npu",        0x14000000, 0x800000 },
+        { "hisi-vi-cap",     0x17400000, 0x100000 },
+        { "hisi-vi-proc",    0x17800000, 0x40000 },
+        { "hisi-vpss",       0x17900000, 0x10000 },
+        { "hisi-vgs",        0x17240000, 0x10000 },
+        { "hisi-aiao",       0x17C00000, 0x50000 },
+    },
+};
+
+/*
  * Hi3516CV610: V5 generation (2025) — Dual Cortex-A7 MP2, GICv2.
  * Completely new address map (0x11xxxxxx peripherals, GIC @ 0x124xxxxx).
  * No SP804 timer — uses ARM arch timer exclusively.
@@ -954,6 +1038,85 @@ static const HisiSoCConfig hi3516cv610_soc = {
     .gpio_count         = 11,
     .gpio_stride        = 0x1000,
     .gpio_irq_start     = 23,           /* per-port: SPI 23..33 */
+
+    .femac_base         = 0x10290000,
+    .femac_irq          = 44,
+
+    .num_sdhci          = 2,
+    .sdhci_bases        = { 0x10030000, 0x10040000 },
+    .sdhci_irqs         = { 42, 43 },
+
+    .num_i2c            = 3,
+    .i2c_bases          = { 0x11060000, 0x11061000, 0x11062000 },
+
+    .mipi_rx_base       = 0x173C0000,
+    .mipi_rx_irq        = 64,
+
+    .rtc_base           = 0x11110000,
+    .rtc_irq            = 37,
+
+    .vedu_base          = 0x17140000,
+    .jpge_base          = 0x171C0000,
+    .vedu_irq           = 69,
+    .jpge_irq           = 70,
+
+    .wdt_base           = 0x11030000,
+    .wdt_irq            = 3,
+    .wdt_freq           = 3000000,
+
+    .num_regbanks       = 12,
+    .regbanks           = {
+        { "hisi-misc",       0x11024000, 0x5000  },
+        { "hisi-ddr",        0x11140000, 0x20000 },
+        { "hisi-iocfg0",     0x10260000, 0x10000 },
+        { "hisi-iocfg1",     0x11130000, 0x10000 },
+        { "hisi-pwm",        0x11080000, 0x1000  },
+        { "hisi-usb2",       0x10300000, 0x10000 },
+        { "hisi-npu",        0x14000000, 0x800000 },
+        { "hisi-vi-cap",     0x17400000, 0x100000 },
+        { "hisi-vi-proc",    0x17800000, 0x40000 },
+        { "hisi-vpss",       0x17900000, 0x10000 },
+        { "hisi-vgs",        0x17240000, 0x10000 },
+        { "hisi-aiao",       0x17C00000, 0x50000 },
+    },
+};
+
+static const HisiSoCConfig hi3516cv613_soc = {
+    .name               = "hi3516cv613",
+    .desc               = "HiSilicon Hi3516CV613 (Cortex-A7 MP2, ~CV610)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_CV613,
+    .ram_size_default   = 128 * MiB,
+
+    .ram_base           = 0x40000000,
+    .sram_base          = 0x04020000,
+    .sram_size          = 80 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x12401000,
+    .gic_cpu_base       = 0x12402000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x11020000,
+    .crg_base           = 0x11010000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x11040000, 0x11041000, 0x11042000 },
+    .uart_irqs          = { 10, 11, 12 },
+
+    .num_timers         = 0,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x11070000, 0x11071000 },
+    .spi_irqs           = { 19, 20 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x0F000000,
+
+    .gpio_base          = 0x11090000,
+    .gpio_count         = 11,
+    .gpio_stride        = 0x1000,
+    .gpio_irq_start     = 23,
 
     .femac_base         = 0x10290000,
     .femac_irq          = 44,
@@ -1625,4 +1788,6 @@ DEFINE_HISI_MACHINE("gk7205v200", gk7205v200, gk7205v200_soc)
 DEFINE_HISI_MACHINE("gk7205v300", gk7205v300, gk7205v300_soc)
 DEFINE_HISI_MACHINE("gk7202v300", gk7202v300, gk7202v300_soc)
 DEFINE_HISI_MACHINE("gk7605v100", gk7605v100, gk7605v100_soc)
+DEFINE_HISI_MACHINE("hi3516cv608", hi3516cv608, hi3516cv608_soc)
 DEFINE_HISI_MACHINE("hi3516cv610", hi3516cv610, hi3516cv610_soc)
+DEFINE_HISI_MACHINE("hi3516cv613", hi3516cv613, hi3516cv613_soc)

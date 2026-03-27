@@ -161,7 +161,9 @@ typedef struct HisiSoCConfig {
 #define HISI_SOC_ID_19V101      0x35190101
 
 /* V5 generation (Cortex-A7 MP2 + GIC, new 0x11xxxxxx address map, 2025) */
+#define HISI_SOC_ID_CV608       0x3516C608
 #define HISI_SOC_ID_CV610       0x3516C610
+#define HISI_SOC_ID_CV613       0x3516C613
 
 /* Goke chips — die-identical V4 silicon with different SoC IDs */
 #define GOKE_SOC_ID_7205V200    0x72050200  /* = hi3516ev200 */
