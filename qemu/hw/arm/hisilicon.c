@@ -263,6 +263,98 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .wdt_freq           = 3000000,
 };
 
+/*
+ * Hi3516CV500: "V3.5" generation — Cortex-A7 + GICv2 (like V4),
+ * but with a unique peripheral address map distinct from both V3 and V4.
+ * RAM at 0x80000000 (like V1-V3), himciv200 MMC (like V3), 40 KB SRAM.
+ */
+static const HisiSoCConfig hi3516cv500_soc = {
+    .name               = "hi3516cv500",
+    .desc               = "HiSilicon Hi3516CV500 (Cortex-A7)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_CV500,
+    .ram_size_default   = 64 * MiB,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 40 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12020000,
+    .crg_base           = 0x12010000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x120A0000, 0x120A1000, 0x120A2000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x12000000, 0x12001000 },
+    .timer_irqs         = { 1, 2 },
+
+    .num_spis           = 3,
+    .spi_bases          = { 0x120C0000, 0x120C1000, 0x120C2000 },
+    .spi_irqs           = { 68, 69, 70 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .gpio_base          = 0x120D0000,
+    .gpio_count         = 11,
+    .gpio_stride        = 0x1000,
+    .gpio_irq_start     = 16,           /* per-port: SPI 16..26 (GIC) */
+
+    .femac_base         = 0x10010000,
+    .femac_irq          = 32,
+
+    .num_himci          = 3,
+    .himci_bases        = { 0x10100000, 0x100F0000, 0x10020000 },
+    .himci_irqs         = { 64, 30, 31 },
+
+    .num_i2c            = 7,
+    .i2c_bases          = { 0x120B0000, 0x120B1000, 0x120B2000, 0x120B3000,
+                            0x120B5000, 0x120B6000, 0x120B7000 },
+
+    .mipi_rx_base       = 0x113A0000,
+    .mipi_rx_irq        = 57,
+
+    .rtc_base           = 0x12080000,
+    .rtc_irq            = 5,
+
+    .vedu_base          = 0x11500000,
+    .jpge_base          = 0x11220000,
+    .vedu_irq           = 40,
+    .jpge_irq           = 36,
+
+    .wdt_base           = 0x12051000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_crg_defaults   = 3,
+    .crg_defaults       = {
+        { 0x1B8, (1 << 18) },          /* UART clock: 24 MHz select */
+        { 0x144, 0x02 },               /* FMC clock enable */
+        { 0x16C, 0x02 },               /* ETH clock enable */
+    },
+
+    .num_regbanks       = 10,
+    .regbanks           = {
+        { "hisi-misc",       0x12030000, 0x8000  },
+        { "hisi-ddr",        0x12060000, 0x10000 },
+        { "hisi-iocfg",      0x12040000, 0x10000 },
+        { "hisi-iocfg2",     0x10FF0000, 0x10000 },
+        { "hisi-pwm",        0x12070000, 0x10000 },
+        { "hisi-usb3",       0x100E0000, 0x10000 },
+        { "hisi-vi-cap",     0x11300000, 0x100000 },
+        { "hisi-vi-proc",    0x11000000, 0x40000 },
+        { "hisi-vpss",       0x11040000, 0x10000 },
+        { "hisi-aiao",       0x113B0000, 0x20000 },
+    },
+};
+
 static const HisiSoCConfig hi3516ev300_soc = {
     .name               = "hi3516ev300",
     .desc               = "HiSilicon Hi3516EV300 (Cortex-A7)",
@@ -1212,6 +1304,7 @@ static void hisi_machine_set_sensor(Object *obj, const char *value,
 DEFINE_HISI_MACHINE("hi3516cv100", hi3516cv100, hi3516cv100_soc)
 DEFINE_HISI_MACHINE("hi3516cv200", hi3516cv200, hi3516cv200_soc)
 DEFINE_HISI_MACHINE("hi3516cv300", hi3516cv300, hi3516cv300_soc)
+DEFINE_HISI_MACHINE("hi3516cv500", hi3516cv500, hi3516cv500_soc)
 DEFINE_HISI_MACHINE("hi3516ev300", hi3516ev300, hi3516ev300_soc)
 DEFINE_HISI_MACHINE("hi3516ev200", hi3516ev200, hi3516ev200_soc)
 DEFINE_HISI_MACHINE("hi3518ev300", hi3518ev300, hi3518ev300_soc)

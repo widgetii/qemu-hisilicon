@@ -20,10 +20,10 @@
 /* Maximum peripheral counts */
 #define HISI_MAX_UARTS    3
 #define HISI_MAX_TIMERS   2
-#define HISI_MAX_SPIS     2
+#define HISI_MAX_SPIS     3
 #define HISI_MAX_HIMCI    3
 #define HISI_MAX_SDHCI    2
-#define HISI_MAX_I2C      3
+#define HISI_MAX_I2C      8
 #define HISI_MAX_REGBANKS 16
 #define HISI_MAX_CRG_DEFAULTS 8
 
@@ -150,6 +150,9 @@ typedef struct HisiSoCConfig {
 
 /* V2 generation */
 #define HISI_SOC_ID_CV200       0x3518E200
+
+/* V3.5 generation (Cortex-A7 + GIC, but V3-era address map) */
+#define HISI_SOC_ID_CV500       0x3516C500
 
 /* Goke chips — die-identical V4 silicon with different SoC IDs */
 #define GOKE_SOC_ID_7205V200    0x72050200  /* = hi3516ev200 */
