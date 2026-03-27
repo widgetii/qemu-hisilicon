@@ -1,0 +1,195 @@
+# HiSilicon IVE Register Map (Hi3516EV300)
+
+Register dump captured from live hardware during motion detection.
+Board: EV300 (`IVG85HG50PYA-S.dlab.doty.ru`), OpenIPC firmware.
+Method: `/dev/mem` mmap of 0x11320000 (64KB), polling during `HI_IVS_MD_Process()`.
+
+## Hardware Details
+
+| Property | Value |
+|----------|-------|
+| Base address (EV300) | 0x11320000 |
+| Base address (CV500) | 0x11230000 |
+| Region size | 0x10000 (64 KB) |
+| IRQ (EV300) | GIC SPI 51 |
+| IRQ (CV500) | GIC SPI 37 |
+| DT compatible | `hisilicon,hisi-ive` |
+| Kernel module | `hi3516ev200_ive.ko` (261 KB) |
+| Access width | 32-bit |
+
+## Register Map (from live capture, 554 changes over 5 seconds)
+
+### Control/Status Registers (0x0000-0x00FF)
+
+| Offset | Name | Bits | Description |
+|--------|------|------|-------------|
+| 0x0004 | CTRL | 32 | Control register (idle value: 0x06) |
+| 0x0008 | **SW_FIRE** | bit 0 | **Write 1 to start operation, auto-clears to 0** |
+| 0x0010 | OP_DESC | 32 | Operation descriptor (alternates between ops) |
+| 0x0014 | CMD_READY | 32 | Set to 0x03 before fire, cleared after completion |
+| 0x0018 | **CMD_DONE** | bit 0 | **Completion flag: 0=busy, 1=done** |
+| 0x001C | OP_PARAMS | 32 | Packed operation parameters (changes per op) |
+| 0x002C | CFG0 | 32 | Configuration (changes between DMA/SAD/CCL) |
+| 0x0030 | PERF_CNT0 | 32 | Performance counter (always incrementing) |
+| 0x0034 | STATIC_CFG | 32 | Static config (idle: 0x00313307) |
+| 0x0038 | PERF_CNT1 | 32 | Performance counter |
+| 0x003C | STATUS | 32 | Status (idle: 0x0000F000, active: varies) |
+| 0x0040 | FRAME_CNT | 32 | Frame counter (increments 0→1→2→0→1→2...) |
+| 0x0044 | TOTAL_OPS | 32 | Total operations counter (monotonic) |
+| 0x0048 | OP_ACTIVE | bit 0 | 1 when operation in progress, 0 when idle |
+| 0x0054 | IRQ_CFG | 32 | Interrupt config (idle: 0x00003F07) |
+| 0x005C | BLEND_WEIGHTS | 32 | Weighted add X/Y (e.g., 0x00400040 = 50%/50%) |
+| 0x0060 | IRQ_MASK | 32 | Interrupt mask (idle: 0xFFFFFFFF = all masked) |
+| 0x0064 | SAD_PARAMS | 32 | SAD threshold/mode packed value |
+| 0x0068-0x007C | PERF[0-5] | 32×6 | Performance/timing counters (always changing) |
+| 0x0080 | HW_ID | 32 | Hardware ID (0x11E1A300) |
+| 0x0084 | HW_VER0 | 32 | Version (0x01) |
+| 0x0088 | HW_VER1 | 32 | Version (0x01) |
+| 0x0090 | HW_CAP | 32 | Capability register (0x01AB5159) |
+
+### Command Parameter Registers (0x0100-0x01FF)
+
+Written before each fire; define the operation to execute.
+
+| Offset | Name | Bits | Description |
+|--------|------|------|-------------|
+| 0x0104 | **OP_TYPE** | 8 | **Operation type: 0=DMA, 1=SAD, 2=CCL** |
+| 0x0108 | DIMENSIONS | 32 | Packed width/height (e.g., 0x00170000, 0x002E0400) |
+| 0x010C | BLOCK_CFG | 32 | Block size / CCL config (e.g., 0xC8 for CCL) |
+| 0x0110 | **SRC1_ADDR** | 32 | Source image 1 physical address |
+| 0x0114 | **DST1_ADDR** | 32 | Destination buffer 1 physical address |
+| 0x0118 | SRC2_ADDR | 32 | Source image 2 (for SAD: reference frame) |
+| 0x011C | DST2_ADDR | 32 | Destination buffer 2 |
+| 0x0128 | STRIDES_0 | 32 | Packed src1_stride / dst1_stride |
+| 0x012C | STRIDES_1 | 32 | Packed src2_stride or dst_stride |
+| 0x0130 | STRIDES_2 | 32 | Additional stride |
+| 0x0134 | STRIDES_3 | 32 | Additional stride |
+| 0x0138 | THRESH_VAL | 32 | Threshold value (e.g., 0x0000FF00 for binary) |
+| 0x0160 | CCL_CFG0 | 32 | CCL area threshold (e.g., 0x00100000) |
+| 0x0164 | CCL_CFG1 | 32 | CCL mode (e.g., 0x04 = 4-connected) |
+
+### Interrupt Registers (0x0258-0x025C)
+
+| Offset | Name | Bits | Description |
+|--------|------|------|-------------|
+| 0x0258 | IRQ_STATIC | 32 | Static IRQ config (0x70000000) |
+| 0x025C | **IRQ_STATUS** | bit 24 | **Frame done interrupt: pulses 0x01000000** |
+
+### Result Registers (0x0300-0x0308)
+
+Written by hardware after operation completes.
+
+| Offset | Name | Bits | Description |
+|--------|------|------|-------------|
+| 0x0300 | RESULT0 | 32 | Output result word 0 (varies per op type) |
+| 0x0304 | RESULT1 | 32 | Output result word 1 |
+| 0x0308 | RESULT2 | 32 | Output result word 2 |
+
+### Extended Operation Registers (0x0400-0x0484)
+
+Used for SAD coefficients, CCL parameters, and filter masks.
+
+| Offset | Name | Bits | Description |
+|--------|------|------|-------------|
+| 0x0400 | EXT_PARAM0 | 32 | Extended parameter 0 |
+| 0x0404 | EXT_PARAM1 | 32 | Extended parameter 1 |
+| 0x040C | EXT_CTRL | 32 | Extended control (0x08 when active) |
+| 0x0414 | EXT_COEFF0 | 32 | Coefficient / threshold packed |
+| 0x0418 | EXT_COEFF1 | 32 | Additional coefficients |
+| 0x0484 | EXT_MODE | 32 | Mode / sub-operation config |
+
+## Operation Patterns (from captured sequences)
+
+### Pattern 1: DMA Copy (op_type=0)
+
+```
+1. Write 0x0104 = 0x00000000        (OP_TYPE = DMA)
+2. Write 0x0108 = 0x00170000        (dimensions)
+3. Write 0x0110 = src_phys_addr     (source)
+4. Write 0x0114 = dst_phys_addr     (destination)
+5. Write 0x011C = dst2_phys_addr    (destination 2, for planar)
+6. Write 0x0128 = strides packed
+7. Write 0x0160 = 0x00100000        (DMA config)
+8. Write 0x0164 = 0x00000004
+9. Write 0x0008 = 0x00000001        (SW_FIRE)
+   → HW clears 0x0008, sets 0x0018=1, pulses 0x025C
+```
+
+### Pattern 2: SAD (op_type=1)
+
+```
+1. Write 0x0104 = 0x00000001        (OP_TYPE = SAD)
+2. Write 0x0108 = 0x002E0400        (width=0x2E0=736, height=0x400? or packed)
+3. Write 0x010C = 0x000000C8        (threshold = 200)
+4. Write 0x0110 = src1_addr         (current frame)
+5. Write 0x0114 = dst_addr          (SAD output)
+6. Write 0x0118 = src2_addr         (reference frame)
+7. Write 0x0128 = strides
+8. Write 0x012C = strides
+9. Write 0x0138 = 0x0000FF00        (binary threshold output)
+10. Write 0x0008 = 0x00000001       (SW_FIRE)
+    → HW processes SAD, writes result to dst_addr
+```
+
+### Pattern 3: CCL (op_type=2)
+
+```
+1. Write 0x0104 = 0x00000002        (OP_TYPE = CCL)
+2. Write 0x0108 = 0x002E0400        (same dimensions as SAD output)
+3. Write 0x0110 = src_addr          (binary image from SAD)
+4. Write 0x0114 = dst_addr          (IVE_CCBLOB_S output)
+5. Write 0x040C = 0x00000008        (CCL enable)
+6. Write 0x0414 = coeff             (area threshold, connectivity)
+7. Write 0x0484 = mode              (CCL mode config)
+8. Write 0x0008 = 0x00000001        (SW_FIRE)
+   → HW runs CCL, writes IVE_CCBLOB_S to dst_addr
+```
+
+### Pattern 4: Weighted Add (for background model update)
+
+Observed between SAD and CCL — blends current frame into background model:
+```
+Write 0x005C = 0x00400040           (weight X=64/256, Y=64/256 → ~25% blend)
+```
+
+## MD Processing Cycle (one complete frame)
+
+Each motion detection frame triggers this sequence of IVE operations:
+
+1. **DMA** — copy video frame (YUV→grayscale) to IVE buffer
+2. **Weighted Add** — blend current into background model (25%/75%)
+3. **SAD** — compute 4×4 block differences between current and reference
+4. **Threshold** — binarize SAD output (part of SAD operation with `0x0138=0xFF00`)
+5. **CCL** — find connected components in binary mask → `IVE_CCBLOB_S`
+
+Operations 3+4 appear combined: the SAD hardware does threshold internally
+when `0x0138` is set (SAD_OUT_CTRL_THRESH mode from the SDK).
+
+## Cross-Reference with Sigmastar
+
+| HiSilicon Offset | Sigmastar Concept | Notes |
+|---|---|---|
+| 0x0008 | Bank0 reg00 (sw_fire) | Same concept, different offset |
+| 0x0018 | Bank0 reg13? (completion) | HiSi uses dedicated done flag |
+| 0x025C | Bank0 reg15 (irq_clr)? | HiSi uses bit 24 for frame_done |
+| 0x0104 | Bank1 reg04 (op_type) | Same concept at different base |
+| 0x0110-0x011C | Bank1 reg08-0F (addresses) | Same layout shifted |
+| 0x0128-0x0134 | Bank1 reg14-19 (strides) | Same concept |
+| 0x0138 | Bank1 reg28 (threshold) | Threshold value |
+
+**Key difference:** HiSilicon uses a flat register space (no separate bank bases),
+with command params starting at 0x0100 instead of Sigmastar's separate bank1 base.
+
+## Idle State Registers (power-on defaults)
+
+```
+[0x0004] = 0x00000006    CTRL
+[0x0034] = 0x00313307    STATIC_CFG (hardware version?)
+[0x0054] = 0x00003F07    IRQ_CFG
+[0x0060] = 0xFFFFFFFF    IRQ_MASK (all interrupts masked)
+[0x0080] = 0x11E1A300    HW_ID
+[0x0084] = 0x00000001    HW_VER0
+[0x0088] = 0x00000001    HW_VER1
+[0x0090] = 0x01AB5159    HW_CAP
+[0x0300] = 0x00100000    RESULT0 (default)
+```
