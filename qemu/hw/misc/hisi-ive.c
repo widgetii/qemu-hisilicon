@@ -16,7 +16,7 @@
 #include "hw/sysbus.h"
 #include "hw/irq.h"
 #include "qemu/log.h"
-#include "system/address-spaces.h"
+#include "system/dma.h"
 
 #define TYPE_HISI_IVE "hisi-ive"
 OBJECT_DECLARE_SIMPLE_TYPE(HisiIveState, HISI_IVE)
@@ -487,6 +487,17 @@ static void hisi_ive_init(Object *obj)
                           "hisi-ive", IVE_MMIO_SIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+
+    /* Set power-on defaults immediately (from live hardware capture) */
+    s->regs[IVE_CTRL / 4]     = 0x00000006;
+    s->regs[0x0034 / 4]       = 0x00313307;
+    s->regs[0x0054 / 4]       = 0x00003F07;
+    s->regs[IVE_IRQ_MASK / 4] = 0xFFFFFFFF;
+    s->regs[IVE_HW_ID / 4]    = 0x11E1A300;
+    s->regs[IVE_HW_VER0 / 4]  = 0x00000001;
+    s->regs[IVE_HW_VER1 / 4]  = 0x00000001;
+    s->regs[IVE_HW_CAP / 4]   = 0x01AB5159;
+    s->regs[0x0300 / 4]       = 0x00100000;
 }
 
 static void hisi_ive_class_init(ObjectClass *klass, const void *data)

@@ -599,6 +599,11 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .wdt_base           = 0x12030000,
     .wdt_irq            = 2,
     .wdt_freq           = 3000000,
+
+    .num_regbanks       = 1,
+    .regbanks           = {
+        { "hisi-ive",    0x11320000, 0x10000 },
+    },
 };
 
 /*
