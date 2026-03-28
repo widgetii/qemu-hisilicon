@@ -161,7 +161,11 @@ def main():
 
             # Calculate seek and duration
             fps = 30  # VIRAT/MEVA standard
-            if eval_mode == "abandoned" and source != "examples":
+            if not frames or frames[0] is None:
+                # No frame info — use full clip (first 30s)
+                ss = None
+                duration = 30
+            elif eval_mode == "abandoned" and source != "examples":
                 # Need pre-event context for background learning
                 event_start_sec = frames[0] / fps
                 event_end_sec = frames[1] / fps if len(frames) > 1 else event_start_sec + 10
