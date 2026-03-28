@@ -54,8 +54,8 @@
 #define OP_MAP      15
 #define OP_NCC      16
 
-#define W 16
-#define H 16
+#define W 64
+#define H 64
 #define SZ (W * H)
 
 static volatile uint32_t *ive;
@@ -79,7 +79,7 @@ static uint64_t v2p(void *va) {
     return (val & (1ULL<<63)) ? ((val & ((1ULL<<55)-1)) * 4096) : 0;
 }
 
-/* Buffers — 3 pages: src1, src2, dst (each 4KB, fits 16×16 easily) */
+/* Buffers — 3 pages: src1, src2, dst (each 4KB = 64×64 exactly) */
 static uint8_t *va_src1, *va_src2, *va_dst;
 static uint64_t pa_src1, pa_src2, pa_dst;
 
