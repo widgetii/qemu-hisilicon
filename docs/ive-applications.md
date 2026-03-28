@@ -233,7 +233,8 @@ Shinobi, or any system supporting ONVIF analytics events.
 - HiSilicon IVE API Reference (SDK documentation)
 - `docs/ive-registers.md` — hardware register map
 - `docs/nnie-vs-npu.md` — NNIE/NPU architecture comparison
-- `docs/meva-dataset-spec.md` — evaluation dataset and methodology
+- `docs/ive-eval-methodology.md` — evaluation pipeline, metrics, reproducing results
+- `docs/meva-dataset-spec.md` — dataset download and indexing spec
 - `qemu/hw/misc/hisi-ive.c` — QEMU IVE implementation (18 ops)
 - `qemu-boot/test-ive-video-mpi.c` — real board test (Y4M, full HW pipeline)
 - `qemu-boot/test-ive-ops.c` — operation test suite
