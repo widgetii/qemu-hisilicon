@@ -158,19 +158,38 @@ Frame → Sobel(vertical edges) → 16BitTo8Bit(S16→U8 abs) → Thresh → Dil
 7. CPU: filter by aspect ratio (2.0-6.0), minimum area, position (bottom 80%)
 
 IVE hardware time: **9.1 ms/frame** at 960×528 (110 fps capacity).
-Not full LPR/OCR — detects WHERE the plate region is. Useful as a pre-filter
-for cloud-based OCR or to trigger a high-res snapshot capture.
+Not full LPR/OCR — detects WHERE the plate region is.
 
-Tested on VIRAT parking lot surveillance (1080p, multiple vehicles). Detects
-plate-region candidates on vehicle fronts/rears. False positives from high-contrast
-cloud edges filtered by position constraint.
+**Evaluated on CCPD (Chinese City Parking Dataset, 100 images, IoU≥0.3):**
+
+| Parameters | P | R | F1 | FP/image |
+|------------|-------|-------|-------|---------|
+| diff=40, area=4 (baseline) | 0.007 | 0.260 | 0.014 | ~36 |
+| diff=60, area=16 (tuned) | 0.065 | 0.560 | 0.116 | ~8 |
+
+**Inherent limitation of edge-based detection:**
+Sobel + morphology + CCL detects *any* rectangular region with dense edges — bumpers,
+window frames, signs, text on buildings, and license plates all look identical in edge
+space. The aspect ratio filter reduces FP somewhat but cannot provide the selectivity
+needed for production use.
+
+When the algorithm does detect a plate (26-56% recall), the spatial accuracy is decent
+(median IoU 0.43-0.67). The problem is purely precision — too many false positives.
+
+To reach production-grade plate detection (>50% precision), needs either:
+- **Multi-scale + texture analysis**: Histogram of edge orientations within candidate
+  regions to distinguish plate characters from other dense-edge textures
+- **Neural network**: NNIE/NPU-based plate detector (e.g., YOLO) with IVE as
+  preprocessing (Sobel for edge enhancement before NN inference)
+- **Motion-gated**: Only run plate detection within motion-detected vehicle bounding
+  boxes (IVE SAD→CCL first, then Sobel on cropped region)
 
 **Metadata output:**
 ```json
 {"plateRegion": {"bbox": [x,y,w,h], "ratio": 3.2, "area": 25}}
 ```
-**Value:** Pre-filter for cloud-based LPR, trigger high-res snapshot.
-**Effort:** Implemented.
+**Value:** Research/prototype only. Not production-ready without NN assistance.
+**Effort:** Implemented. Production-grade: needs NNIE/NPU.
 
 ## Tier 3: Significant effort (complex algorithms or many new IVE ops)
 

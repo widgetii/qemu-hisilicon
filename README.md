@@ -325,8 +325,10 @@ Frame → Sobel(vertical) → 16BitTo8Bit(abs) → Thresh → Dilate → Erode �
                                                CPU: filter by aspect ratio 2.0-6.0
 ```
 
-Detects plate-shaped rectangular regions with dense edges. Not full OCR — finds
-WHERE the plate is as a pre-filter for cloud-based recognition.
+Detects plate-shaped rectangular regions with dense edges. Evaluated on CCPD
+dataset (100 images): P=0.065, R=0.560, F1=0.116. High recall when it hits
+(median IoU 0.67) but too many false positives from non-plate edge regions.
+Needs NN assistance for production use (see `docs/ive-applications.md`).
 
 ```bash
 ssh root@ev300-board 'killall majestic; /utils/ive-test/test-ive-video-mpi \
@@ -356,10 +358,11 @@ datasets. All processing on **real EV300 IVE silicon** at Majestic-equivalent re
 
 #### Event-level metrics
 
-| Algorithm | Precision | Recall | F1 | TP | FP | FN | Events |
-|-----------|-----------|--------|------|-----|-----|------|--------|
-| **Motion detection** | **0.998** | **1.000** | **0.999** | 3126 | 6 | 0 | 3132 |
-| **Abandoned object** | **0.361** | **0.673** | **0.470** | 35 | 62 | 17 | 131 |
+| Algorithm | Precision | Recall | F1 | Events | Dataset |
+|-----------|-----------|--------|------|--------|---------|
+| **Motion detection** | **0.998** | **1.000** | **0.999** | 3132 | MEVA+VIRAT |
+| **Abandoned object** | **0.361** | **0.673** | **0.470** | 131 | MEVA+VIRAT |
+| **Plate region** | **0.065** | **0.560** | **0.116** | 100 | CCPD |
 
 **Motion detection** is near-perfect: all motion events detected (vehicles, people
 walking, carrying objects) with only 6 false alarms across 3132 test events.
@@ -371,6 +374,10 @@ sad_thr 100-300, area_thr 4-16) confirmed this is an inherent limitation of
 background subtraction — the algorithm cannot distinguish "newly abandoned bag" from
 "car that was parked during reference learning." Production-grade precision requires
 owner-object tracking or semantic classification (see `docs/ive-applications.md`).
+
+**Plate region detection** has decent recall (56%) but very low precision (6.5%) —
+edge-based detection cannot distinguish plates from bumpers, signs, and window frames.
+Needs neural network assistance for production use.
 
 #### Dataset composition
 
