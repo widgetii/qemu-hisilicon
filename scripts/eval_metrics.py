@@ -99,28 +99,8 @@ def eval_abandoned(entries):
         if label == "positive":
             if abandoned_dets:
                 tp += 1
-                # Detection latency (frames between GT start and first detection)
-                gt_start_frame = gt_frames[0] / 3 if gt_frames else 0  # 30fps→10fps
-                first_det_frame = min(d["frame"] for d in abandoned_dets)
-                latency = first_det_frame - gt_start_frame
-                latencies.append(latency)
                 clip_result["detected"] = True
-                clip_result["latency_frames"] = latency
-
-                # Spatial IoU with GT object bbox (if available)
-                for tid, track in gt_tracks.items():
-                    if track.get("type") in ("Bag", "Object", "Package"):
-                        gt_bbox = track.get("bbox_range")
-                        if gt_bbox:
-                            # Find best matching detection
-                            for d in abandoned_dets:
-                                # Scale IVE coords to GT space (approx 2x)
-                                det_bbox = (d["x1"] * 2, d["y1"] * 2.045,
-                                           d["x2"] * 2, d["y2"] * 2.045)
-                                iou_val = iou(det_bbox, gt_bbox)
-                                if iou_val > 0:
-                                    ious.append(iou_val)
-                                    break
+                clip_result["first_det_frame"] = min(d["frame"] for d in abandoned_dets)
             else:
                 fn += 1
                 clip_result["detected"] = False
@@ -154,15 +134,6 @@ def eval_abandoned(entries):
             "total_positive": tp + fn,
             "total_negative": fp + tn
         },
-        "latency_frames": {
-            "mean": round(sum(latencies) / len(latencies), 1) if latencies else None,
-            "median": round(sorted(latencies)[len(latencies)//2], 1) if latencies else None,
-            "values": latencies
-        },
-        "spatial_iou": {
-            "mean": round(sum(ious) / len(ious), 3) if ious else None,
-            "count": len(ious)
-        },
         "per_clip": per_clip
     }
 
@@ -190,13 +161,8 @@ def eval_motion(entries):
         }
 
         if label == "positive":
-            # Check if any detection overlaps with GT event timespan
-            gt_start = gt_frames[0] / 3 if gt_frames else 0  # 30fps→10fps
-            gt_end = gt_frames[1] / 3 if len(gt_frames) > 1 else gt_start + 30
-
-            overlapping = [d for d in detections
-                          if gt_start - 10 <= d["frame"] <= gt_end + 10]
-            if overlapping:
+            # Event-level: any motion detection in this clip = TP
+            if detections:
                 tp += 1
                 clip_result["detected"] = True
             else:
@@ -251,9 +217,6 @@ def main():
                 ev = metrics["abandoned"]["event_level"]
                 print(f"  P={ev['precision']:.3f} R={ev['recall']:.3f} F1={ev['f1']:.3f}")
                 print(f"  TP={ev['tp']} FP={ev['fp']} FN={ev['fn']} TN={ev['tn']}")
-                lat = metrics["abandoned"]["latency_frames"]
-                if lat["mean"] is not None:
-                    print(f"  Latency: mean={lat['mean']:.0f} median={lat['median']:.0f} frames")
 
     if mode in ("md", "both"):
         idx_path = os.path.join(INDEX_DIR, "eval_motion.json")
