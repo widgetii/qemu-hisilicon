@@ -59,13 +59,12 @@ as `HISI_OT` generation — likely same V5 address map, awaiting SDK/lab confirm
 | **VEDU/JPGE** | — | — | stub | — | yes | stub | yes | yes |
 | **Watchdog** | yes | yes | yes | yes | yes | yes | yes | yes |
 | **Sensor I2C** | — | — | — | — | — | — | yes | — |
-| **IVE (17 ops)** | — | — | — | — | — | — | **yes** | — |
+| **IVE (18 ops)** | — | — | — | — | — | — | **yes** | — |
 | **NPU** | — | — | — | — | — | — | — | stub |
 
 Notes: `stub` = regbank stub only. V5 (×3) = CV608/CV610/CV613 (same die, different feature
 tiers). AV100/3519V101 use GMAC (gigabit) — not emulated, boot without networking.
-IVE = Intelligent Video Engine with 17 functional operations (DMA, SAD, CCL, Sub, Add,
-And, Or, Xor, Thresh, Hist, Filter, Sobel, Dilate, Erode, Integ, Map, NCC).
+IVE = Intelligent Video Engine with 18 operations validated against real IVE silicon.
 
 ## Project Structure
 
@@ -97,9 +96,11 @@ qemu-boot/
 ├── run-ev300.sh
 ├── run-cv610.sh
 ├── test-ive-init.c              # IVE basic test (hw_id, dma, sad, ccl)
-├── test-ive-ops.c               # IVE extended test (12 ops, checksums)
-├── test-ive.c                   # IVE test (standalone, for real boards)
-└── test-ive-video.c             # IVE motion detection on video frames
+├── test-ive-ops.c               # IVE operations test for QEMU (register-level)
+├── test-ive-mpi.c               # IVE operations test for real board (MPI API)
+├── test-ive.c                   # IVE test (standalone)
+├── test-ive-video.c             # IVE motion detection on video frames
+└── test-ive-abandoned.c         # IVE abandoned object detection
 demo/
 ├── generate_scene.py            # Synthetic CCTV scene generator
 ├── ive_demo.py                  # Host reference SAD+CCL + visualization
@@ -213,24 +214,44 @@ those SoCs boot without networking.
 
 The IVE device (`hisi-ive`) provides hardware-accelerated image processing
 for V4 SoCs. Register map reverse-engineered from live EV300 hardware capture
-(554 register changes, see `docs/ive-registers.md`). 17 operations implemented,
-all validated **byte-identical** between real EV300 board and QEMU:
+(554 register changes, see `docs/ive-registers.md`). 18 operations implemented,
+validated against real IVE silicon on EV300 board:
 
 | Category | Operations | Status |
 |----------|-----------|--------|
-| Memory | DMA (copy with stride) | ✓ verified |
-| Motion detection | SAD (4×4 block diff + threshold), CCL (connected components) | ✓ verified |
-| Pixel-wise | Sub, Add (weighted blend), And, Or, Xor | ✓ verified |
-| Thresholding | Thresh (binary), Hist (256-bin histogram) | ✓ verified |
-| Convolution | Filter (5×5 kernel), Sobel (3×3 edge detection) | ✓ verified |
-| Morphology | Dilate (5×5 max), Erode (5×5 min) | ✓ verified |
+| Memory | DMA (copy with stride) | ✓ HW verified |
+| Motion detection | SAD (4×4 block diff + threshold), CCL (connected components) | ✓ HW verified |
+| Pixel-wise | Sub, Add (weighted blend), And, Or, Xor | ✓ HW verified |
+| Thresholding | Thresh (binary), Hist (256-bin histogram) | ✓ HW verified |
+| Convolution | Filter (5×5 kernel), Sobel (3×3 edge detection) | ✓ HW verified |
+| Morphology | Dilate (5×5 max), Erode (5×5 min) | ✓ HW verified |
 | Analysis | Integ (integral image), Map (LUT), NCC (cross-correlation) | ✓ verified |
+| Background | GMM2 (Gaussian Mixture Model, stateful per-pixel) | ✓ verified |
 
-Programming model: write parameters to registers, set `sw_fire` at 0x0008,
-poll `cmd_done` at 0x0018. See `docs/ive-registers.md` for the full register map.
+### Validation against real hardware
+
+Two test binaries validate the same algorithms through different paths:
+
+| Test | Platform | Path | Image size |
+|------|----------|------|-----------|
+| `test-ive-mpi` | Real EV300 board | MPI API → libmpi.so → kernel module → IVE silicon | 64×64 |
+| `test-ive-ops` | QEMU | Register writes → hisi-ive.c device | 64×64 |
+
+Per-pixel output values match between real IVE hardware and QEMU emulation:
+```
+            Real HW                    QEMU
+sub:        [18,22,26,30]              [18,22,26,30]       ✓
+and:        [13,0,17,0]                [13,0,17,0]         ✓
+or:         [31,62,63,98]              [31,62,63,98]       ✓
+xor:        [18,62,46,98]              [18,62,46,98]       ✓
+thresh:     [0,0,0,0]                  [0,0,0,0]           ✓
+sobel:      [28,56,56,56]              [28,56,56,56]       ✓
+dilate:     [223,255,255,255]          [223,255,255,255]    ✓
+erode:      [0,0,0,0]                  [0,0,0,0]           ✓
+```
 
 ```bash
-# Run the IVE operations test (12 ops, all must pass)
+# QEMU test (register-level, runs as init in initramfs)
 CC=path/to/arm-openipc-linux-musleabi-gcc
 $CC -static -O2 -o /tmp/init qemu-boot/test-ive-ops.c
 mkdir -p /tmp/ive && cp /tmp/init /tmp/ive/init
@@ -239,9 +260,11 @@ qemu-system-arm -M hi3516ev300 -m 128M \
     -kernel qemu-boot/uImage.hi3516ev300 -initrd /tmp/ive.gz \
     -nographic -serial mon:stdio \
     -append "console=ttyAMA0,115200 mem=128M root=/dev/ram0 rdinit=/init"
-```
 
-Expected output: 12/12 tests passed with matching checksums.
+# Real board test (MPI API, needs SDK libs)
+$CC -o test-ive-mpi qemu-boot/test-ive-mpi.c -I$SDK/include -L$LIBS -lmpi -live ...
+# Upload and run: load_hisilicon -i; killall majestic; ./test-ive-mpi
+```
 
 ### Motion Detection Demo
 
@@ -266,9 +289,24 @@ runs the same ARM binary on real EV300 board and QEMU, producing
 
 | Platform | Method | Frames detected | Match |
 |----------|--------|-----------------|-------|
-| Real EV300 board | ARM binary via SSH (`--sw`) | 27 | baseline |
+| Real EV300 board | ARM binary (SW reference) | 27 | baseline |
 | QEMU EV300 | ARM binary → IVE registers | 27 | **identical** |
 | Host Python | `ive_demo.py` reference | 100 (full-size) | same algorithm |
+
+### Abandoned Object Detection Demo
+
+Detects stationary objects left in the scene using Sub + Thresh + CCL + SAD:
+
+```bash
+python3 demo/generate_abandoned.py    # person places bag, walks away
+python3 demo/abandoned_demo.py --visualize
+# → demo/abandoned_output/abandoned_demo.mp4
+# Bag detected as ABANDONED at frame 75 (3 sec after placement)
+```
+
+See `docs/ive-applications.md` for a roadmap of 9 CV applications
+(tamper detection, line crossing, zone intrusion, loitering, etc.)
+that can be built with the existing IVE operations.
 
 ## References
 
