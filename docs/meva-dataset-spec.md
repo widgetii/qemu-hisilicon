@@ -245,33 +245,71 @@ $DEST/
 
 ## Activity Types Relevant to Our Tests
 
-### For abandoned detection evaluation
+Sources: MEVA examples (64 clips), VIRAT train (64 clips), VIRAT validate (55 clips).
+MEVA uses `act3` keys (e.g. `Abandon_Package`), VIRAT uses `act2` (e.g. `vehicle_moving`).
 
-| Activity | Count in examples | Use |
-|----------|------------------|-----|
-| `Abandon_Package` | 1 | Primary TP |
-| `Set_Down_Object` | 3 | Potential TP (if person leaves) |
-| `Pick_Up_Object` | 2 | Negative (object removed) |
-| `Theft` | 1 | Negative (object taken) |
-| `Object_Transfer` | 4 | Negative (hand-to-hand) |
-| (no activity) | varies | True negative |
+### For abandoned detection evaluation (255 events, 89 clips)
 
-### For motion detection evaluation
+**Positives — object placed/appears and becomes static (106 events):**
 
-| Activity | Count in examples | Use |
-|----------|------------------|-----|
-| `Vehicle_Starting` | 4 | Moving vehicle |
-| `Vehicle_Stopping` | 4 | Decelerating vehicle |
-| `Vehicle_Reversing` | 4 | Moving vehicle |
-| `Vehicle_Turning_*` | 8 | Moving vehicle |
-| `Vehicle_UTurn` | 4 | Moving vehicle |
-| `Enter_Vehicle` | 4 | Person walking |
-| `Exit_Vehicle` | 4 | Person walking |
-| `Enter_Facility` | 4 | Person walking |
-| `Exit_Facility` | 4 | Person walking |
-| `Heavy_Carry` | 4 | Person + object motion |
-| `Riding` | 2 | Bicycle/vehicle |
-| (static clips) | varies | True negative |
+| Activity | Count | Sources | Use |
+|----------|-------|---------|-----|
+| `Unloading` | 76 | virat | Object removed from vehicle → placed down |
+| `SetDown` | 22 | virat | Object set down |
+| `Set_Down_Object` | 3 | examples | Object set down (person may leave) |
+| `Unload_Vehicle` | 3 | examples | Object unloaded |
+| `Abandon_Package` | 1 | examples | Primary — object abandoned |
+| `Drop` | 1 | virat | Object dropped |
+
+**Negatives — object removed/transferred (132 events):**
+
+| Activity | Count | Sources | Use |
+|----------|-------|---------|-----|
+| `Loading` | 76 | virat | Object loaded into vehicle → removed |
+| `PickUp` | 30 | virat | Object picked up |
+| `Object_Transfer` | 19 | virat+examples | Hand-to-hand transfer |
+| `Load_Vehicle` | 3 | examples | Object loaded into vehicle |
+| `Pick_Up_Object` | 3 | examples | Object picked up |
+| `Theft` | 1 | examples | Object stolen |
+
+**True negatives (17 clips):** motion-only clips with no object interaction.
+
+Statistical power: 106 positives → ±9% CI on recall at 95% confidence.
+
+### For motion detection evaluation (5049 events, 158 clips)
+
+**Positives — vehicle motion (3060 events):**
+
+| Activity | Count | Sources | Use |
+|----------|-------|---------|-----|
+| `vehicle_moving` | 1414 | virat | Vehicle in motion |
+| `vehicle_stopping` | 566 | virat | Vehicle decelerating |
+| `vehicle_starting` | 449 | virat | Vehicle accelerating |
+| `vehicle_turning_right` | 307 | virat | Vehicle turning |
+| `vehicle_turning_left` | 294 | virat | Vehicle turning |
+| `vehicle_u_turn` | 22 | virat | Vehicle U-turn |
+| `Vehicle_Starting` | 4 | examples | Vehicle starting |
+| `Vehicle_Stopping` | 4 | examples | Vehicle stopping |
+| `Vehicle_Reversing` | 4 | examples | Vehicle reversing |
+| `Vehicle_Turning_Left/Right` | 8 | examples | Vehicle turning |
+| `Vehicle_UTurn` | 4 | examples | Vehicle U-turn |
+
+**Positives — person motion (1983 events):**
+
+| Activity | Count | Sources | Use |
+|----------|-------|---------|-----|
+| `activity_walking` | 1495 | virat | Person walking |
+| `Entering` | 146 | virat | Person entering |
+| `Exiting` | 138 | virat | Person exiting |
+| `Transport_HeavyCarry` | 75 | virat | Person carrying object |
+| `Riding` | 46 | virat+examples | Bicycle/vehicle |
+| `activity_running` | 30 | virat | Person running |
+| `Object_Transfer` | 19 | virat+examples | Hand-to-hand (motion) |
+| `Enter/Exit_Vehicle` | 7 | examples | Person walking to/from vehicle |
+| `Enter/Exit_Facility` | 7 | examples | Person walking to/from building |
+| `Heavy_Carry` | 4 | examples | Person carrying heavy object |
+
+**True negatives (6 clips):** static-only clips (standing, sitting, talking).
 
 ## Implementation Notes
 
@@ -280,7 +318,13 @@ $DEST/
   of static background to learn reference)
 - The `drops-123-r13/` clips are 5 minutes long at 30fps = 9000 frames — plenty of
   background, but need to seek to event timestamps from annotations
-- `viratannotations.snapshot.23jul2025.zip` (175 MB) is new — may contain full
-  annotation coverage for all 3956 clips. Parse first to determine coverage
+- `viratannotations.snapshot.23jul2025.zip` contains 119 annotation triplets across
+  train (64) and validate (55) splits. Uses VIRAT vocabulary (`act2` keys) which
+  differs from MEVA examples (`act3` keys) — both are indexed
+- Only 1 explicit `Abandon_Package` event exists. Abandoned detection eval uses
+  `Unloading`/`SetDown`/`Drop` as positives (object becomes static) and
+  `Loading`/`PickUp`/`Theft` as negatives (object removed), totaling 238 labeled events
+- VIRAT clips reference external video files (VIRAT_S_*) not present in the S3 bucket;
+  only MEVA `examples/videos/` and `drops-123-r13/` have downloadable video
 - All evaluation should use the same IVE binary (`test-ive-video-mpi`) to ensure
   we measure real hardware performance, not a simulation
