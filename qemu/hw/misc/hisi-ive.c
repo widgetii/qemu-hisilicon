@@ -61,6 +61,17 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiIveState, HISI_IVE)
 #define IVE_IRQ_STATUS  0x025C
 #define IVE_IRQ_FRAME_DONE  (1 << 24)
 
+/* Additional command registers */
+#define IVE_BLEND_WTS   0x005C      /* weighted add X/Y (Q0.16 packed) */
+#define IVE_THRESH_LO   0x013C      /* threshold low value */
+#define IVE_THRESH_HI   0x0140      /* threshold high value */
+#define IVE_THRESH_MIN  0x0144      /* threshold output min */
+#define IVE_THRESH_MID  0x0148      /* threshold output mid */
+#define IVE_THRESH_MAX  0x014C      /* threshold output max */
+#define IVE_FILTER_MASK 0x0200      /* 25-byte filter mask (5×5 kernel) */
+#define IVE_MAP_LUT     0x0300      /* 256-byte LUT for map operation */
+#define IVE_NCC_OUTPUT  0x0180      /* NCC result output address */
+
 /* Extended op registers */
 #define IVE_EXT_CTRL    0x040C
 #define IVE_EXT_COEFF0  0x0414
@@ -71,6 +82,20 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiIveState, HISI_IVE)
 #define IVE_OP_DMA      0
 #define IVE_OP_SAD      1
 #define IVE_OP_CCL      2
+#define IVE_OP_SUB      3
+#define IVE_OP_ADD      4
+#define IVE_OP_AND      5
+#define IVE_OP_OR       6
+#define IVE_OP_XOR      7
+#define IVE_OP_THRESH   8
+#define IVE_OP_HIST     9
+#define IVE_OP_FILTER   10
+#define IVE_OP_SOBEL    11
+#define IVE_OP_DILATE   12
+#define IVE_OP_ERODE    13
+#define IVE_OP_INTEG    14
+#define IVE_OP_MAP      15
+#define IVE_OP_NCC      16
 
 /* CCL output structure matches hi_ive.h IVE_CCBLOB_S */
 #define IVE_MAX_REGION_NUM  254
@@ -367,6 +392,301 @@ static void ive_op_ccl(HisiIveState *s)
     g_free(parent);
 }
 
+/* ── Helper: read two frames from guest memory ────────────────── */
+
+static void ive_read_frames(HisiIveState *s, uint8_t **f1, uint8_t **f2,
+                            uint16_t *pw, uint16_t *ph)
+{
+    uint32_t dim = s->regs[IVE_DIMENSIONS / 4];
+    uint16_t w = dim & 0xFFF, h = (dim >> 16) & 0xFFF;
+    uint32_t src1 = s->regs[IVE_SRC1_ADDR / 4];
+    uint32_t src2 = s->regs[IVE_SRC2_ADDR / 4];
+    uint32_t strides0 = s->regs[IVE_STRIDES_0 / 4];
+    uint16_t s1 = (strides0 >> 16) ? (strides0 >> 16) : w;
+    uint16_t s2 = s->regs[IVE_STRIDES_1 / 4] >> 16;
+    if (!s2) s2 = w;
+    *pw = w; *ph = h;
+    *f1 = g_malloc(w * h);
+    if (f2) *f2 = g_malloc(w * h); else if (f2) *f2 = NULL;
+    for (uint16_t y = 0; y < h; y++) {
+        dma_memory_read(&address_space_memory, src1 + (uint64_t)y * s1,
+                        *f1 + y * w, w, MEMTXATTRS_UNSPECIFIED);
+        if (f2 && src2) {
+            dma_memory_read(&address_space_memory, src2 + (uint64_t)y * s2,
+                            *f2 + y * w, w, MEMTXATTRS_UNSPECIFIED);
+        }
+    }
+}
+
+static void ive_write_frame(HisiIveState *s, const uint8_t *data,
+                            uint16_t w, uint16_t h)
+{
+    uint32_t dst = s->regs[IVE_DST1_ADDR / 4];
+    uint32_t strides0 = s->regs[IVE_STRIDES_0 / 4];
+    uint16_t ds = (strides0 & 0xFFFF) ? (strides0 & 0xFFFF) : w;
+    for (uint16_t y = 0; y < h; y++) {
+        dma_memory_write(&address_space_memory, dst + (uint64_t)y * ds,
+                         data + y * w, w, MEMTXATTRS_UNSPECIFIED);
+    }
+}
+
+/* ── Phase 1: Pixel-wise operations ──────────────────────────── */
+
+static void ive_op_sub(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1, *f2;
+    ive_read_frames(s, &f1, &f2, &w, &h);
+    uint8_t *out = g_malloc(w * h);
+    for (int i = 0; i < w * h; i++) {
+        out[i] = (uint8_t)abs((int)f1[i] - (int)f2[i]);
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(f2); g_free(out);
+}
+
+static void ive_op_add(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1, *f2;
+    ive_read_frames(s, &f1, &f2, &w, &h);
+    uint32_t wts = s->regs[IVE_BLEND_WTS / 4];
+    uint16_t wx = wts & 0xFFFF, wy = wts >> 16;
+    if (!wx && !wy) { wx = 32768; wy = 32768; } /* default 50/50 */
+    uint8_t *out = g_malloc(w * h);
+    for (int i = 0; i < w * h; i++) {
+        int val = ((int)f1[i] * wx + (int)f2[i] * wy) >> 16;
+        out[i] = (val > 255) ? 255 : val;
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(f2); g_free(out);
+}
+
+static void ive_op_bitwise(HisiIveState *s, int op)
+{
+    uint16_t w, h;
+    uint8_t *f1, *f2;
+    ive_read_frames(s, &f1, &f2, &w, &h);
+    uint8_t *out = g_malloc(w * h);
+    for (int i = 0; i < w * h; i++) {
+        switch (op) {
+        case IVE_OP_AND: out[i] = f1[i] & f2[i]; break;
+        case IVE_OP_OR:  out[i] = f1[i] | f2[i]; break;
+        case IVE_OP_XOR: out[i] = f1[i] ^ f2[i]; break;
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(f2); g_free(out);
+}
+
+/* ── Phase 2: Threshold + Histogram ──────────────────────────── */
+
+static void ive_op_thresh(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    uint32_t thr_reg = s->regs[IVE_THRESH_VAL / 4];
+    uint8_t thr = (thr_reg >> 8) & 0xFF;
+    uint8_t minv = s->regs[IVE_THRESH_MIN / 4] & 0xFF;
+    uint8_t maxv = s->regs[IVE_THRESH_MAX / 4] & 0xFF;
+    if (!maxv) maxv = 255;
+    uint8_t *out = g_malloc(w * h);
+    for (int i = 0; i < w * h; i++) {
+        /* Default: binary threshold */
+        out[i] = (f1[i] > thr) ? maxv : minv;
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(out);
+}
+
+static void ive_op_hist(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    uint32_t hist[256] = {0};
+    for (int i = 0; i < w * h; i++) {
+        hist[f1[i]]++;
+    }
+    uint32_t dst = s->regs[IVE_DST1_ADDR / 4];
+    dma_memory_write(&address_space_memory, dst,
+                     hist, sizeof(hist), MEMTXATTRS_UNSPECIFIED);
+    g_free(f1);
+}
+
+/* ── Phase 3: Convolution + Morphology ───────────────────────── */
+
+static void ive_op_filter(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    /* Read 5×5 kernel from mask registers (packed as bytes) */
+    int8_t mask[25];
+    for (int i = 0; i < 25; i++) {
+        mask[i] = (int8_t)(s->regs[(IVE_FILTER_MASK + i) / 4] >>
+                           ((i % 4) * 8));
+    }
+    uint8_t *out = g_malloc(w * h);
+    for (uint16_t y = 0; y < h; y++) {
+        for (uint16_t x = 0; x < w; x++) {
+            int sum = 0;
+            for (int ky = -2; ky <= 2; ky++) {
+                for (int kx = -2; kx <= 2; kx++) {
+                    int sy = y + ky, sx = x + kx;
+                    if (sy < 0) sy = 0;
+                    if (sy >= h) sy = h - 1;
+                    if (sx < 0) sx = 0;
+                    if (sx >= w) sx = w - 1;
+                    sum += (int)f1[sy * w + sx] * mask[(ky+2)*5 + (kx+2)];
+                }
+            }
+            sum >>= 8; /* normalize */
+            out[y * w + x] = (sum < 0) ? 0 : (sum > 255) ? 255 : sum;
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(out);
+}
+
+static void ive_op_sobel(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    /* Sobel 3×3: Gx and Gy, output magnitude */
+    uint8_t *out = g_malloc(w * h);
+    for (uint16_t y = 0; y < h; y++) {
+        for (uint16_t x = 0; x < w; x++) {
+            if (y == 0 || y == h-1 || x == 0 || x == w-1) {
+                out[y * w + x] = 0;
+                continue;
+            }
+            int gx = -f1[(y-1)*w+x-1] + f1[(y-1)*w+x+1]
+                     -2*f1[y*w+x-1]   + 2*f1[y*w+x+1]
+                     -f1[(y+1)*w+x-1]  + f1[(y+1)*w+x+1];
+            int gy = -f1[(y-1)*w+x-1] - 2*f1[(y-1)*w+x] - f1[(y-1)*w+x+1]
+                     +f1[(y+1)*w+x-1]  + 2*f1[(y+1)*w+x] + f1[(y+1)*w+x+1];
+            int mag = (abs(gx) + abs(gy)) >> 1;
+            out[y * w + x] = (mag > 255) ? 255 : mag;
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(out);
+}
+
+static void ive_op_dilate(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    uint8_t *out = g_malloc(w * h);
+    for (uint16_t y = 0; y < h; y++) {
+        for (uint16_t x = 0; x < w; x++) {
+            uint8_t maxv = 0;
+            for (int ky = -2; ky <= 2; ky++) {
+                for (int kx = -2; kx <= 2; kx++) {
+                    int sy = y + ky, sx = x + kx;
+                    if (sy >= 0 && sy < h && sx >= 0 && sx < w) {
+                        uint8_t v = f1[sy * w + sx];
+                        if (v > maxv) maxv = v;
+                    }
+                }
+            }
+            out[y * w + x] = maxv;
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(out);
+}
+
+static void ive_op_erode(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    uint8_t *out = g_malloc(w * h);
+    for (uint16_t y = 0; y < h; y++) {
+        for (uint16_t x = 0; x < w; x++) {
+            uint8_t minv = 255;
+            for (int ky = -2; ky <= 2; ky++) {
+                for (int kx = -2; kx <= 2; kx++) {
+                    int sy = y + ky, sx = x + kx;
+                    if (sy >= 0 && sy < h && sx >= 0 && sx < w) {
+                        uint8_t v = f1[sy * w + sx];
+                        if (v < minv) minv = v;
+                    }
+                }
+            }
+            out[y * w + x] = minv;
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(out);
+}
+
+/* ── Phase 4: Analysis ───────────────────────────────────────── */
+
+static void ive_op_integ(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    uint32_t *out = g_malloc0(w * h * sizeof(uint32_t));
+    for (uint16_t y = 0; y < h; y++) {
+        for (uint16_t x = 0; x < w; x++) {
+            uint32_t val = f1[y * w + x];
+            if (x > 0) val += out[y * w + x - 1];
+            if (y > 0) val += out[(y-1) * w + x];
+            if (x > 0 && y > 0) val -= out[(y-1) * w + x - 1];
+            out[y * w + x] = val;
+        }
+    }
+    uint32_t dst = s->regs[IVE_DST1_ADDR / 4];
+    dma_memory_write(&address_space_memory, dst,
+                     out, w * h * sizeof(uint32_t), MEMTXATTRS_UNSPECIFIED);
+    g_free(f1); g_free(out);
+}
+
+static void ive_op_map(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    /* Read 256-byte LUT from src2 address */
+    uint8_t lut[256];
+    uint32_t lut_addr = s->regs[IVE_SRC2_ADDR / 4];
+    dma_memory_read(&address_space_memory, lut_addr,
+                    lut, sizeof(lut), MEMTXATTRS_UNSPECIFIED);
+    uint8_t *out = g_malloc(w * h);
+    for (int i = 0; i < w * h; i++) {
+        out[i] = lut[f1[i]];
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(out);
+}
+
+static void ive_op_ncc(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1, *f2;
+    ive_read_frames(s, &f1, &f2, &w, &h);
+    /* NCC: sum(a*b) / sqrt(sum(a*a) * sum(b*b)) scaled to Q1.15 */
+    int64_t sum_ab = 0, sum_aa = 0, sum_bb = 0;
+    for (int i = 0; i < w * h; i++) {
+        sum_ab += (int64_t)f1[i] * f2[i];
+        sum_aa += (int64_t)f1[i] * f1[i];
+        sum_bb += (int64_t)f2[i] * f2[i];
+    }
+    /* Write 3 u64 values: sum_ab, sum_aa, sum_bb to dst */
+    uint64_t result[3] = { sum_ab, sum_aa, sum_bb };
+    uint32_t dst = s->regs[IVE_DST1_ADDR / 4];
+    dma_memory_write(&address_space_memory, dst,
+                     result, sizeof(result), MEMTXATTRS_UNSPECIFIED);
+    g_free(f1); g_free(f2);
+}
+
 /* ── Fire handler ─────────────────────────────────────────────── */
 
 static void ive_fire(HisiIveState *s)
@@ -374,15 +694,23 @@ static void ive_fire(HisiIveState *s)
     uint8_t op_type = s->regs[IVE_OP_TYPE / 4] & 0xFF;
 
     switch (op_type) {
-    case IVE_OP_DMA:
-        ive_op_dma(s);
-        break;
-    case IVE_OP_SAD:
-        ive_op_sad(s);
-        break;
-    case IVE_OP_CCL:
-        ive_op_ccl(s);
-        break;
+    case IVE_OP_DMA:    ive_op_dma(s); break;
+    case IVE_OP_SAD:    ive_op_sad(s); break;
+    case IVE_OP_CCL:    ive_op_ccl(s); break;
+    case IVE_OP_SUB:    ive_op_sub(s); break;
+    case IVE_OP_ADD:    ive_op_add(s); break;
+    case IVE_OP_AND:
+    case IVE_OP_OR:
+    case IVE_OP_XOR:    ive_op_bitwise(s, op_type); break;
+    case IVE_OP_THRESH: ive_op_thresh(s); break;
+    case IVE_OP_HIST:   ive_op_hist(s); break;
+    case IVE_OP_FILTER: ive_op_filter(s); break;
+    case IVE_OP_SOBEL:  ive_op_sobel(s); break;
+    case IVE_OP_DILATE: ive_op_dilate(s); break;
+    case IVE_OP_ERODE:  ive_op_erode(s); break;
+    case IVE_OP_INTEG:  ive_op_integ(s); break;
+    case IVE_OP_MAP:    ive_op_map(s); break;
+    case IVE_OP_NCC:    ive_op_ncc(s); break;
     default:
         qemu_log_mask(LOG_UNIMP, "hisi-ive: unimplemented op_type %d\n",
                       op_type);
