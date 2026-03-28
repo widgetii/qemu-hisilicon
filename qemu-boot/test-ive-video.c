@@ -46,14 +46,18 @@
 
 static volatile uint32_t *ive;
 static int mem_fd;
+static int sw_mode; /* 1 = software-only (no IVE registers) */
 
 static void ive_w(uint32_t off, uint32_t val) { ive[off/4] = val; }
 static uint32_t ive_r(uint32_t off) { return ive[off/4]; }
 
 static void ive_fire(void) {
     ive_w(IVE_SW_FIRE, 1);
-    for (int i = 0; i < 100000 && !(ive_r(IVE_CMD_DONE) & 1); i++)
+    /* Poll CMD_DONE (works in QEMU); on real HW the operation completes
+     * before we can even poll, so timeout after 1ms is fine. */
+    for (int i = 0; i < 1000 && !(ive_r(IVE_CMD_DONE) & 1); i++)
         usleep(1);
+    usleep(100); /* extra settle time for real HW DMA */
 }
 
 static uint64_t v2p(void *va) {
@@ -74,8 +78,11 @@ static void *alloc_page(uint64_t *phys, size_t size) {
     return (*phys) ? p : NULL;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     int is_init = (getpid() == 1);
+    /* --sw flag forces software mode */
+    for (int a = 1; a < argc; a++)
+        if (!strcmp(argv[a], "--sw")) sw_mode = 1;
 
     if (is_init) {
         mkdir("/dev", 0755);
@@ -90,9 +97,10 @@ int main(void) {
     ive = mmap(NULL, 0x10000, PROT_READ|PROT_WRITE, MAP_SHARED, mem_fd, 0x11320000);
     if (ive == MAP_FAILED) { perror("mmap ive"); goto done; }
 
-    /* Open frames file */
-    FILE *fp = fopen("/frames.bin", "rb");
-    if (!fp) { perror("/frames.bin"); goto done; }
+    /* Open frames file — try /tmp first (real board), fallback to / (initramfs) */
+    FILE *fp = fopen("/tmp/frames.bin", "rb");
+    if (!fp) fp = fopen("/frames.bin", "rb");
+    if (!fp) { perror("frames.bin"); goto done; }
 
     fseek(fp, 0, SEEK_END);
     long file_size = ftell(fp);
@@ -107,18 +115,98 @@ int main(void) {
     void *va_blob = alloc_page(&pa_blob, BLOB_SZ);
 
     if (!va_cur || !va_prev || !va_sad || !va_blob) {
-        printf("ERROR: buffer allocation failed\n");
+        fprintf(stderr, "ERROR: buffer allocation failed\n");
+        fprintf(stderr, "  cur=%p/%llx prev=%p/%llx sad=%p/%llx blob=%p/%llx\n",
+            va_cur, (unsigned long long)pa_cur, va_prev, (unsigned long long)pa_prev,
+            va_sad, (unsigned long long)pa_sad, va_blob, (unsigned long long)pa_blob);
         goto done;
     }
+    fprintf(stderr, "Buffers OK: cur=0x%llx prev=0x%llx sad=0x%llx blob=0x%llx nframes=%d\n",
+        (unsigned long long)pa_cur, (unsigned long long)pa_prev,
+        (unsigned long long)pa_sad, (unsigned long long)pa_blob, nframes);
 
     uint8_t *cur = va_cur, *prev = va_prev;
     uint8_t *sad_out = va_sad, *blob = va_blob;
 
+    /* Check for --sw flag */
+    /* (when running as init, argc isn't available; check /proc/cmdline) */
+    {
+        int cfd = open("/proc/cmdline", O_RDONLY);
+        if (cfd >= 0) {
+            char cmdline[512] = {0};
+            read(cfd, cmdline, sizeof(cmdline)-1);
+            close(cfd);
+            if (strstr(cmdline, "ive_sw=1")) sw_mode = 1;
+        }
+        /* Also check argv for non-init usage */
+        if (!is_init) {
+            /* Simple: if IVE registers fail to map, use SW mode */
+            if (ive == MAP_FAILED || ive == NULL) sw_mode = 1;
+        }
+    }
+    if (sw_mode) fprintf(stderr, "Running in SOFTWARE mode (no IVE HW)\n");
+
     /* Read first frame as previous */
     if (fread(prev, 1, FRAME_SZ, fp) != FRAME_SZ) goto done;
+    fprintf(stderr, "Processing %d frames...\n", nframes);
 
     for (int i = 1; i < nframes; i++) {
         if (fread(cur, 1, FRAME_SZ, fp) != FRAME_SZ) break;
+        if (i <= 3) fprintf(stderr, "  frame %d: cur[0]=%d prev[0]=%d\n", i, cur[0], prev[0]);
+
+        if (sw_mode) {
+            /* Software SAD: 4×4 blocks */
+            memset(sad_out, 0, SAD_SZ);
+            for (int by = 0; by < BH; by++) {
+                for (int bx = 0; bx < BW; bx++) {
+                    int sad = 0;
+                    for (int dy = 0; dy < BLOCK; dy++)
+                        for (int dx = 0; dx < BLOCK; dx++) {
+                            int y = by*BLOCK+dy, x = bx*BLOCK+dx;
+                            sad += abs((int)cur[y*W+x] - (int)prev[y*W+x]);
+                        }
+                    sad_out[by*BW+bx] = (sad > 50) ? 255 : 0;
+                }
+            }
+            /* Software CCL: 4-connected union-find */
+            int16_t labels[BW*BH], parent[256];
+            memset(labels, 0, sizeof(labels));
+            for (int j = 0; j < 256; j++) parent[j] = j;
+            int nl = 1;
+            #define FIND(x) ({ int16_t _r=(x); while(parent[_r]!=_r) _r=parent[_r]; _r; })
+            #define UNION(a,b) do { int16_t _a=FIND(a),_b=FIND(b); if(_a!=_b) parent[_a]=_b; } while(0)
+            for (int y = 0; y < BH; y++)
+                for (int x = 0; x < BW; x++) {
+                    if (!sad_out[y*BW+x]) continue;
+                    int16_t left = (x>0) ? labels[y*BW+x-1] : 0;
+                    int16_t up = (y>0) ? labels[(y-1)*BW+x] : 0;
+                    if (left && up) { labels[y*BW+x]=left; UNION(left,up); }
+                    else if (left) labels[y*BW+x]=left;
+                    else if (up) labels[y*BW+x]=up;
+                    else if (nl<254) labels[y*BW+x]=nl++;
+                }
+            /* Compute bboxes */
+            uint32_t area[256]={0}; uint16_t bl[256],bt[256],br[256],bb[256];
+            for (int j=0;j<256;j++) { bl[j]=BW; bt[j]=BH; br[j]=0; bb[j]=0; }
+            for (int y=0;y<BH;y++) for (int x=0;x<BW;x++) {
+                int16_t l=labels[y*BW+x]; if(!l) continue; l=FIND(l);
+                area[l]++; if(x<bl[l])bl[l]=x; if(y<bt[l])bt[l]=y;
+                if(x>br[l])br[l]=x; if(y>bb[l])bb[l]=y;
+            }
+            #undef FIND
+            #undef UNION
+            int nreg = 0;
+            int printed = 0;
+            for (int j=1;j<nl;j++) {
+                if (area[j]>=4) {
+                    if (!printed) { printf("FRAME %d:", i); printed=1; }
+                    printf(" (%d,%d)-(%d,%d) area=%d",
+                        bl[j]*BLOCK, bt[j]*BLOCK, (br[j]+1)*BLOCK, (bb[j]+1)*BLOCK, area[j]);
+                    nreg++;
+                }
+            }
+            if (printed) printf("\n");
+        } else {
 
         /* SAD operation */
         ive_w(IVE_OP_TYPE, 1);
@@ -156,6 +244,8 @@ int main(void) {
             }
             printf("\n");
         }
+
+        } /* end else (IVE hardware path) */
 
         /* Swap: current becomes previous */
         uint8_t *tmp_v = prev; prev = cur; cur = tmp_v;
