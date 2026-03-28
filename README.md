@@ -98,12 +98,15 @@ qemu-boot/
 ├── test-ive-init.c              # IVE basic test (hw_id, dma, sad, ccl)
 ├── test-ive-ops.c               # IVE operations test for QEMU (register-level)
 ├── test-ive-mpi.c               # IVE operations test for real board (MPI API)
+├── test-ive-video-mpi.c         # IVE video processing for real board (MPI API, 352×288)
 ├── test-ive.c                   # IVE test (standalone)
-├── test-ive-video.c             # IVE motion detection on video frames
-└── test-ive-abandoned.c         # IVE abandoned object detection
+├── test-ive-video.c             # IVE motion detection on video frames (QEMU)
+└── test-ive-abandoned.c         # IVE abandoned object detection (QEMU)
 demo/
 ├── generate_scene.py            # Synthetic CCTV scene generator
+├── generate_abandoned.py        # Synthetic abandoned bag scene generator
 ├── ive_demo.py                  # Host reference SAD+CCL + visualization
+├── abandoned_demo.py            # Host reference abandoned object + visualization
 └── run_demo.sh                  # End-to-end demo orchestration
 docs/
 ├── ive-registers.md             # IVE register map (from live EV300 capture)
@@ -296,23 +299,39 @@ python3 demo/generate_scene.py && python3 demo/ive_demo.py --visualize
 #### Abandoned Object Detection
 
 Person enters, places bag, walks away. Bag flagged as abandoned after 30 frames.
+Pipeline: **Sub → Thresh → Erode → Dilate → region scan → stationary tracking**.
 
 ```bash
-# Visualization (host)
+# Synthetic 64×64 visualization (host)
 python3 demo/generate_abandoned.py && python3 demo/abandoned_demo.py --visualize
 # → demo/abandoned_output/abandoned_demo.mp4
 
-# Real IVE hardware (board)
-./test-ive-video-mpi /tmp/frames_ab.bin abandoned
-# → FRAME 86: ABANDONED (28,33)-(38,42) area=98 dur=30  ... 114 frames total
+# Real CCTV at CIF resolution (352×288) on real IVE hardware via NFS
+# Frames shared via NFS: host /mnt/noc → camera /utils/
+ssh root@ev300-board 'killall majestic; /utils/ive-test/test-ive-video-mpi \
+    /utils/ive-test/caviar_leftbag_352x288.bin abandoned'
+# → FRAME 267: ABANDONED (156,112)-(178,129) area=198 dur=30
+# → ... sustained 60+ frames through frame 329
 ```
 
-All frame dimensions are 64×64 (IVE hardware minimum per SDK spec).
+Tested on real CCTV footage from CAVIAR dataset at 352×288:
+
+| Video | Result | Detection start | Duration |
+|-------|--------|----------------|----------|
+| CAVIAR LeftBag | **Bag detected** | Frame 267 | 60+ frames |
+| CAVIAR LeftBag Chair | **Bag detected** | — | 80 ABANDONED frames |
+| C-MOR Warehouse | No false positives | — | — |
+
+Morphological cleanup (Erode+Dilate) removes MPEG compression noise that
+otherwise causes ~80% false foreground pixels in Sub output.
 
 ### Real CCTV Footage Testing
 
-The motion detection algorithm is validated on 8 real-world CCTV recordings
-from two sources:
+Both motion detection and abandoned object detection are validated on real CCTV
+footage at CIF resolution (352×288) using **real IVE hardware** on the EV300
+board via MPI API. Frames are shared over NFS (host `/mnt/noc` → camera `/utils/`).
+
+Motion detection tested on 8 recordings from two sources:
 
 ```bash
 bash demo/cctv_test/run_cctv_test.sh
