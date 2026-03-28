@@ -349,9 +349,11 @@ walking, carrying objects) with only 6 false alarms across 3132 test events.
 
 **Abandoned object detection** catches 67% of events (bags, packages, unloaded objects)
 but has false positives from stationary scene elements (parked cars, furniture) that
-differ from the learned reference background. This is an inherent limitation of
+differ from the learned reference background. Threshold sweep (diff_thr 30-60,
+sad_thr 100-300, area_thr 4-16) confirmed this is an inherent limitation of
 background subtraction — the algorithm cannot distinguish "newly abandoned bag" from
-"car that was parked during reference learning."
+"car that was parked during reference learning." Production-grade precision requires
+owner-object tracking or semantic classification (see `docs/ive-applications.md`).
 
 #### Dataset composition
 
