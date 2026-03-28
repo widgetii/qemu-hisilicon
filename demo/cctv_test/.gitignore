@@ -1,0 +1,6 @@
+# Generated frames (reproducible via run_cctv_test.sh)
+frames_*/
+cmor-*/
+caviar-*/
+output_*/
+*.bin
