@@ -109,10 +109,18 @@ static int ntracked, prev_ntracked;
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <input.y4m|frames.bin> [md|abandoned]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <input.y4m|frames.bin> [md|abandoned] [--diff-thr=N] [--sad-thr=N] [--area-thr=N]\n", argv[0]);
         return 1;
     }
     const char *mode = (argc > 2) ? argv[2] : "md";
+
+    /* Parse optional threshold overrides: --diff-thr=N --sad-thr=N --area-thr=N */
+    int opt_diff_thr = -1, opt_sad_thr = -1, opt_area_thr = -1;
+    for (int a = 3; a < argc; a++) {
+        if (strncmp(argv[a], "--diff-thr=", 11) == 0) opt_diff_thr = atoi(argv[a] + 11);
+        else if (strncmp(argv[a], "--sad-thr=", 10) == 0) opt_sad_thr = atoi(argv[a] + 10);
+        else if (strncmp(argv[a], "--area-thr=", 11) == 0) opt_area_thr = atoi(argv[a] + 11);
+    }
 
     FILE *fp = fopen(argv[1], "rb");
     if (!fp) { perror(argv[1]); return 1; }
@@ -142,12 +150,14 @@ int main(int argc, char **argv) {
 
     int frame_sz = W * H;
     int bw = W / BLOCK, bh = H / BLOCK;
-    int sad_thr = REF_SAD_THR;
-    int diff_thr = REF_DIFF_THR;
+    int sad_thr = (opt_sad_thr >= 0) ? opt_sad_thr : REF_SAD_THR;
+    int diff_thr = (opt_diff_thr >= 0) ? opt_diff_thr : REF_DIFF_THR;
+    int ccl_area_thr = (opt_area_thr >= 0) ? opt_area_thr : 4;
 
     fprintf(stderr, "Format: %s %dx%d (%dx%d blocks)\n",
             is_y4m ? "Y4M" : "raw", W, H, bw, bh);
-    fprintf(stderr, "mode=%s sad_thr=%d diff_thr=%d\n", mode, sad_thr, diff_thr);
+    fprintf(stderr, "mode=%s sad_thr=%d diff_thr=%d area_thr=%d\n",
+            mode, sad_thr, diff_thr, ccl_area_thr);
 
     /* CCL constraint: 64×64 to 720×640 */
     if (bw < 64 || bh < 64) {
@@ -268,7 +278,7 @@ int main(int argc, char **argv) {
                 /* CCL on SAD threshold output — fully in hardware */
                 IVE_CCL_CTRL_S ccl_ctrl = {
                     .enMode = IVE_CCL_MODE_4C,
-                    .u16InitAreaThr = 4,
+                    .u16InitAreaThr = ccl_area_thr,
                     .u16Step = 2
                 };
                 ret = HI_MPI_IVE_CCL(&handle, &img_sad, &blob_mem,
@@ -381,7 +391,7 @@ int main(int argc, char **argv) {
             if (ccl_ok) {
                 IVE_CCL_CTRL_S ccl_ctrl = {
                     .enMode = IVE_CCL_MODE_4C,
-                    .u16InitAreaThr = 4,
+                    .u16InitAreaThr = ccl_area_thr,
                     .u16Step = 2
                 };
                 ret = HI_MPI_IVE_CCL(&handle, &img_stat_fg, &blob_mem,
