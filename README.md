@@ -77,7 +77,7 @@ qemu/
 ├── hw/misc/hisi-sfc350.c        # HISFC350 flash controller (CV100, AV100)
 ├── hw/misc/hisi-himci.c         # DW MMC (himciv200) SD/MMC controller
 ├── hw/misc/hisi-regbank.c       # Generic RAM-backed register bank
-├── hw/misc/hisi-ive.c           # IVE: DMA, SAD, CCL for motion detection
+├── hw/misc/hisi-ive.c           # IVE: 18 ops (SAD, CCL, Sub, Thresh, Erode...)
 ├── hw/misc/hisi-vedu.c          # Video encoder stub (VEDU + JPGE)
 ├── hw/misc/hisi-mipi-rx.c       # MIPI RX controller stub
 ├── hw/misc/hisi-rtc.c           # SPI-bridge RTC device
@@ -269,9 +269,12 @@ $CC -o test-ive-mpi qemu-boot/test-ive-mpi.c -I$SDK/include -L$LIBS -lmpi -live 
 # Upload and run: load_hisilicon -i; killall majestic; ./test-ive-mpi
 ```
 
-### Motion Detection Demo
+### Full Hardware Pipeline
 
-Both demos run on three platforms using the **actual IVE hardware** path:
+The real board test (`test-ive-video-mpi`) uses a **full hardware pipeline** with
+zero CPU pixel loops. Reads Y4M (YUV4MPEG2 Cmono) or legacy raw .bin files.
+Resolution is parsed from the Y4M header — follows Majestic's approach:
+`MD_SIZE(x) = (x/2) & ~0xF` (half sensor resolution, 16-byte aligned).
 
 | Platform | Binary | IVE path | Notes |
 |----------|--------|----------|-------|
@@ -279,78 +282,71 @@ Both demos run on three platforms using the **actual IVE hardware** path:
 | QEMU | `test-ive-video` | Register writes → hisi-ive.c device | Emulation |
 | Host | `ive_demo.py` / `abandoned_demo.py` | Python reference + visualization | Demo video |
 
-#### Motion Detection
+#### Motion Detection: SAD → CCL (2 IVE ops)
 
-Person walks left→right, cat walks right→left in a synthetic CCTV room.
-
-```bash
-# Visualization (host)
-python3 demo/generate_scene.py && python3 demo/ive_demo.py --visualize
-# → demo/output/demo_output.mp4
-
-# Real IVE hardware (board — stop majestic first)
-./test-ive-video-mpi /tmp/frames_md.bin md
-# → FRAME 8: (0,12)-(12,36) area=17  ... 27 frames total
-
-# QEMU IVE emulation
-# (test-ive-video in initramfs → same frame numbers and bbox positions)
+```
+Frame (960×528) → SAD 4×4 blocks → threshold output (240×132) → CCL → blob regions
 ```
 
-#### Abandoned Object Detection
-
-Person enters, places bag, walks away. Bag flagged as abandoned after 30 frames.
-Pipeline: **Sub → Thresh → Erode → Dilate → region scan → stationary tracking**.
-
 ```bash
-# Synthetic 64×64 visualization (host)
-python3 demo/generate_abandoned.py && python3 demo/abandoned_demo.py --visualize
-# → demo/abandoned_output/abandoned_demo.mp4
+# Convert 1080p source to Majestic-equivalent resolution
+ffmpeg -y -i source.mp4 -vf "scale=960:528,format=gray" -r 10 \
+    -pix_fmt gray -f yuv4mpegpipe output.y4m
 
-# Real CCTV at CIF resolution (352×288) on real IVE hardware via NFS
-# Frames shared via NFS: host /mnt/noc → camera /utils/
+# Run on real IVE hardware
 ssh root@ev300-board 'killall majestic; /utils/ive-test/test-ive-video-mpi \
-    /utils/ive-test/caviar_leftbag_352x288.bin abandoned'
-# → FRAME 267: ABANDONED (156,112)-(178,129) area=198 dur=30
-# → ... sustained 60+ frames through frame 329
+    /utils/ive-test/meva-school-vehicles.y4m md'
+# → FRAME 210: (840,316)-(848,328) area=5  ... vehicle motion detected
 ```
 
-Tested on real CCTV footage from CAVIAR dataset at 352×288:
+#### Abandoned Object Detection: 9-step IVE pipeline
 
-| Video | Result | Detection start | Duration |
-|-------|--------|----------------|----------|
-| CAVIAR LeftBag | **Bag detected** | Frame 267 | 60+ frames |
-| CAVIAR LeftBag Chair | **Bag detected** | — | 80 ABANDONED frames |
-| C-MOR Warehouse | No false positives | — | — |
+```
+Frame → Sub(cur,ref) → Thresh → Erode → Dilate → SAD(mask,zero) → blockify
+     → SAD(cur,prev) → Thresh(invert) → AND(fg,stationary) → CCL → blob regions
+```
 
-Morphological cleanup (Erode+Dilate) removes MPEG compression noise that
-otherwise causes ~80% false foreground pixels in Sub output.
-
-### Real CCTV Footage Testing
-
-Both motion detection and abandoned object detection are validated on real CCTV
-footage at CIF resolution (352×288) using **real IVE hardware** on the EV300
-board via MPI API. Frames are shared over NFS (host `/mnt/noc` → camera `/utils/`).
-
-Motion detection tested on 8 recordings from two sources:
+CPU only reads the CCL blob struct (~3 KB) per frame — no pixel scanning.
+The `SAD(mask, zero_image)` trick reduces the full-frame binary mask (960×528)
+to block-level (240×132), staying within CCL's 64-720 pixel size constraint.
 
 ```bash
-bash demo/cctv_test/run_cctv_test.sh
-# Requires source videos in /mnt/data/video-sources/cctv-test/
+ssh root@ev300-board 'killall majestic; /utils/ive-test/test-ive-video-mpi \
+    /utils/ive-test/meva-abandon-package.y4m abandoned'
+# → FRAME 105: ABANDONED (804,212)-(848,256) area=82 dur=30
+# → ... sustained 70+ frames (package left at bus stop)
 ```
 
-| Source | Video | Resolution | Frames | Motion | Scene |
-|--------|-------|-----------|--------|--------|-------|
-| C-MOR | Computer room | 1920×1080 | 150 | 67 (45%) | Server room door |
-| C-MOR | Warehouse | 1920×1080 | 100 | 45 (45%) | Warehouse entrance |
-| C-MOR | Entrance | 1280×720 | 81 | 43 (53%) | Building lobby |
-| C-MOR | Outside | 1280×720 | 100 | 38 (38%) | Outdoor entry |
-| CAVIAR | LeftBag | 384×288 | 580 | 316 (54%) | Bag left on floor |
-| CAVIAR | LeftBag_AtChair | 384×288 | 450 | 212 (47%) | Bag left at chair |
-| CAVIAR | LeftBox | 384×288 | 350 | 239 (68%) | Box placed |
-| CAVIAR | Walk1 | 384×288 | 249 | 105 (42%) | Corridor walking |
+#### Benchmark: 960×528 on real EV300 IVE silicon
 
-C-MOR samples from [c-mor.com](https://www.c-mor.com/video-surveillance-demo/sample-recordings-of-the-video-surveillance-system-c-mor) (free surveillance system recordings).
-CAVIAR dataset from [University of Edinburgh](https://homepages.inf.ed.ac.uk/rbf/CAVIARDATA1/) (EC-funded research).
+| Component | Motion detection | Abandoned detection |
+|-----------|-----------------|-------------------|
+| **IVE hardware** | **2.4 ms/frame** | **6.7 ms/frame** |
+| CPU (blob parse) | 0.0 ms/frame | 0.1 ms/frame |
+| I/O (NFS read) | 40.8 ms/frame | 9.9 ms/frame |
+| **IVE capacity** | **416 fps** | **149 fps** |
+| Total (with NFS) | 23 fps | 60 fps |
+
+In a real camera, VPSS feeds frames via DMA (zero I/O overhead), so the IVE
+pipeline easily exceeds the 10 fps target. NFS is the bottleneck in the test setup.
+
+### Real CCTV Footage
+
+Tested on 1080p HD surveillance video from two sources, processed at Majestic-equivalent
+resolution (960×528 for 1080p, 640×352 for 720p) using **real IVE hardware** on the
+EV300 board via MPI API. Video shared as Y4M over NFS (host `/mnt/noc` → camera `/utils/`).
+
+| Source | Video | Native | Processing | Mode | Result |
+|--------|-------|--------|-----------|------|--------|
+| MEVA KF1 | Abandon package (bus) | 1920×1080 | 960×528 | abandoned | **Package detected** dur=70+ |
+| MEVA KF1 | School (vehicles) | 1920×1080 | 960×528 | md | Vehicle motion 40+ frames |
+| C-MOR | Computer room | 1920×1080 | 960×528 | md | Motion detected |
+| C-MOR | Warehouse | 1920×1080 | 960×528 | md | Motion detected |
+| C-MOR | Entrance | 1280×720 | 640×352 | md | Motion detected |
+| C-MOR | Outside | 1280×720 | 640×352 | md | Motion detected |
+
+MEVA dataset from [mevadata.org](https://mevadata.org/) (CC BY 4.0, IARPA-funded).
+C-MOR samples from [c-mor.com](https://www.c-mor.com/video-surveillance-demo/sample-recordings-of-the-video-surveillance-system-c-mor).
 
 See `docs/ive-applications.md` for a roadmap of 9 CV applications
 (tamper detection, line crossing, zone intrusion, loitering, etc.)
