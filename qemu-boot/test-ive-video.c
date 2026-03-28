@@ -36,7 +36,7 @@
 #define IVE_CCL_CFG0    0x0160
 
 #define W       64
-#define H       48
+#define H       64
 #define BLOCK   4
 #define BW      (W / BLOCK)
 #define BH      (H / BLOCK)

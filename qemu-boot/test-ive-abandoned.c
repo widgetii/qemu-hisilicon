@@ -38,7 +38,7 @@
 #define OP_SAD      1
 
 #define W 64
-#define H 48
+#define H 64
 #define SZ (W * H)
 #define BLOB_SZ 3056
 

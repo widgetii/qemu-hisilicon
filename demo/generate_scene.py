@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 W, H = 320, 240
-SMALL_W, SMALL_H = 64, 48
+SMALL_W, SMALL_H = 64, 64
 NFRAMES = 150
 
 def draw_background(img):

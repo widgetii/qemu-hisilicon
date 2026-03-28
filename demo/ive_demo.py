@@ -135,7 +135,7 @@ def main():
 
     if args.small:
         global W, H, BW, BH, SAD_THRESHOLD, CCL_AREA_THR
-        W, H = 64, 48
+        W, H = 64, 64
         BW, BH = W // BLOCK, H // BLOCK
         SAD_THRESHOLD = 50   # lower for small frames (less pixel diff)
         CCL_AREA_THR = 4     # smaller regions at lower resolution

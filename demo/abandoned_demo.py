@@ -19,7 +19,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from collections import defaultdict
 
-W, H = 64, 48
+W, H = 64, 64
 LEARN_FRAMES = 20          # frames to build reference background
 ABANDON_FRAMES = 30        # frames before declaring abandoned (~3 sec at 10fps)
 DIFF_THRESHOLD = 40        # pixel difference threshold for foreground
