@@ -59,12 +59,13 @@ as `HISI_OT` generation — likely same V5 address map, awaiting SDK/lab confirm
 | **VEDU/JPGE** | — | — | stub | — | yes | stub | yes | yes |
 | **Watchdog** | yes | yes | yes | yes | yes | yes | yes | yes |
 | **Sensor I2C** | — | — | — | — | — | — | yes | — |
-| **IVE (motion)** | — | — | — | — | — | — | **yes** | — |
+| **IVE (17 ops)** | — | — | — | — | — | — | **yes** | — |
 | **NPU** | — | — | — | — | — | — | — | stub |
 
 Notes: `stub` = regbank stub only. V5 (×3) = CV608/CV610/CV613 (same die, different feature
 tiers). AV100/3519V101 use GMAC (gigabit) — not emulated, boot without networking.
-IVE = Intelligent Video Engine with functional DMA, SAD, and CCL for motion detection.
+IVE = Intelligent Video Engine with 17 functional operations (DMA, SAD, CCL, Sub, Add,
+And, Or, Xor, Thresh, Hist, Filter, Sobel, Dilate, Erode, Integ, Map, NCC).
 
 ## Project Structure
 
@@ -95,7 +96,8 @@ qemu-boot/
 ├── run-3519v101.sh
 ├── run-ev300.sh
 ├── run-cv610.sh
-├── test-ive-init.c              # IVE hardware test (runs as init in QEMU)
+├── test-ive-init.c              # IVE basic test (hw_id, dma, sad, ccl)
+├── test-ive-ops.c               # IVE extended test (12 ops, checksums)
 ├── test-ive.c                   # IVE test (standalone, for real boards)
 └── test-ive-video.c             # IVE motion detection on video frames
 demo/
@@ -207,24 +209,30 @@ gateway `10.0.2.2`). PHY link-up takes a few seconds — DHCP may need a retry.
 Note: AV100 and 3519V101 use GMAC (gigabit) which is not yet emulated;
 those SoCs boot without networking.
 
-## IVE (Motion Detection)
+## IVE (Intelligent Video Engine)
 
-The IVE device (`hisi-ive`) provides hardware-accelerated motion detection
+The IVE device (`hisi-ive`) provides hardware-accelerated image processing
 for V4 SoCs. Register map reverse-engineered from live EV300 hardware capture
-(554 register changes during motion detection, see `docs/ive-registers.md`).
+(554 register changes, see `docs/ive-registers.md`). 17 operations implemented,
+all validated **byte-identical** between real EV300 board and QEMU:
 
-Three operations are implemented:
-- **DMA** — copy image data between guest memory buffers
-- **SAD** — 4×4 block Sum of Absolute Differences with binary threshold
-- **CCL** — Connected Component Labeling producing `IVE_CCBLOB_S` output
+| Category | Operations | Status |
+|----------|-----------|--------|
+| Memory | DMA (copy with stride) | ✓ verified |
+| Motion detection | SAD (4×4 block diff + threshold), CCL (connected components) | ✓ verified |
+| Pixel-wise | Sub, Add (weighted blend), And, Or, Xor | ✓ verified |
+| Thresholding | Thresh (binary), Hist (256-bin histogram) | ✓ verified |
+| Convolution | Filter (5×5 kernel), Sobel (3×3 edge detection) | ✓ verified |
+| Morphology | Dilate (5×5 max), Erode (5×5 min) | ✓ verified |
+| Analysis | Integ (integral image), Map (LUT), NCC (cross-correlation) | ✓ verified |
 
-Programming model: write command parameters to registers (op type, addresses,
-dimensions), set `sw_fire` bit at offset 0x0008, poll `cmd_done` at 0x0018.
+Programming model: write parameters to registers, set `sw_fire` at 0x0008,
+poll `cmd_done` at 0x0018. See `docs/ive-registers.md` for the full register map.
 
 ```bash
-# Run the IVE hardware test (builds a minimal initramfs)
+# Run the IVE operations test (12 ops, all must pass)
 CC=path/to/arm-openipc-linux-musleabi-gcc
-$CC -static -O2 -o /tmp/init qemu-boot/test-ive-init.c
+$CC -static -O2 -o /tmp/init qemu-boot/test-ive-ops.c
 mkdir -p /tmp/ive && cp /tmp/init /tmp/ive/init
 cd /tmp/ive && find . | cpio -oH newc | gzip > /tmp/ive.gz
 qemu-system-arm -M hi3516ev300 -m 128M \
@@ -233,7 +241,7 @@ qemu-system-arm -M hi3516ev300 -m 128M \
     -append "console=ttyAMA0,115200 mem=128M root=/dev/ram0 rdinit=/init"
 ```
 
-Expected output: 4/4 tests passed (hw_id, dma, sad, ccl).
+Expected output: 12/12 tests passed with matching checksums.
 
 ### Motion Detection Demo
 
