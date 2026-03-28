@@ -96,7 +96,12 @@ qemu-boot/
 ├── run-ev300.sh
 ├── run-cv610.sh
 ├── test-ive-init.c              # IVE hardware test (runs as init in QEMU)
-└── test-ive.c                   # IVE test (standalone, for real boards)
+├── test-ive.c                   # IVE test (standalone, for real boards)
+└── test-ive-video.c             # IVE motion detection on video frames
+demo/
+├── generate_scene.py            # Synthetic CCTV scene generator
+├── ive_demo.py                  # Host reference SAD+CCL + visualization
+└── run_demo.sh                  # End-to-end demo orchestration
 docs/
 ├── ive-registers.md             # IVE register map (from live EV300 capture)
 └── nnie-vs-npu.md               # NNIE vs SVP_NPU architecture comparison
@@ -229,6 +234,25 @@ qemu-system-arm -M hi3516ev300 -m 128M \
 ```
 
 Expected output: 4/4 tests passed (hw_id, dma, sad, ccl).
+
+### Motion Detection Demo
+
+A visual demo tracks moving objects in a synthetic CCTV scene using the same
+SAD+CCL algorithm on three platforms: host Python, QEMU IVE, and real EV300 board.
+
+```bash
+# Generate synthetic scene + run host reference + visualize
+python3 demo/generate_scene.py
+python3 demo/ive_demo.py --visualize
+# → demo/output/demo_output.mp4 (15 sec, bounding boxes on motion)
+
+# Full end-to-end (host + QEMU + comparison)
+bash demo/run_demo.sh
+```
+
+The demo generates a room scene with a "person" walking left→right and a "cat"
+moving right→left. Both host and QEMU detect the moving blobs and produce
+matching bounding box coordinates, validating the IVE hardware emulation.
 
 ## References
 
