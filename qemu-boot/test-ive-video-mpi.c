@@ -42,22 +42,21 @@ int __fgetc_unlocked(FILE *stream) { return fgetc(stream); }
 #include "mpi_sys.h"
 #include "mpi_ive.h"
 
-#define W       64
-#define H       64
+#define W       352
+#define H       288
 #define FRAME_SZ (W * H)
 #define BLOCK   4
 #define BW      (W / BLOCK)
 #define BH      (H / BLOCK)
 #define SAD_SZ  (BW * BH)
-#define BLOB_SZ 3056
 #define STRIDE  ((W + 15) & ~15)
 
 /* Abandon detection params */
-#define LEARN_FRAMES    20
-#define ABANDON_FRAMES  30
-#define DIFF_THR        40
-#define MOTION_THR      100
-#define AREA_THR        8
+#define LEARN_FRAMES    50      /* 5 sec at 10fps for stable background */
+#define ABANDON_FRAMES  30      /* 3 sec stationary = abandoned */
+#define DIFF_THR        60      /* must exceed MPEG noise (typical noise ~20-40 at CIF) */
+#define MOTION_THR      5000    /* SAD threshold for "still moving" at 352×288 */
+#define AREA_THR        50      /* min blob area in pixels at CIF resolution */
 
 static HI_S32 ive_wait(IVE_HANDLE h) {
     HI_BOOL fin = HI_FALSE;
@@ -104,54 +103,6 @@ typedef struct { int cx, cy, dur; } Blob;
 static Blob tracked[16], prev_tracked[16];
 static int ntracked, prev_ntracked;
 
-static void parse_ccl_and_track(uint8_t *blob_data, uint8_t *cur, uint8_t *prev,
-                                int frame_idx, const char *mode) {
-    uint8_t nreg = blob_data[5];
-    Blob new_tracked[16];
-    int new_n = 0;
-
-    for (int r = 0; r < nreg && r < 16; r++) {
-        uint8_t *p = blob_data + 8 + r * 12;
-        uint32_t area = p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24);
-        uint16_t left = p[4]|(p[5]<<8), top = p[6]|(p[7]<<8);
-        uint16_t right = p[8]|(p[9]<<8), bottom = p[10]|(p[11]<<8);
-
-        if (strcmp(mode, "md") == 0) {
-            /* Motion detection: scale block coords to pixels */
-            printf("FRAME %d: (%d,%d)-(%d,%d) area=%d\n", frame_idx,
-                   left * BLOCK, top * BLOCK, (right+1) * BLOCK, (bottom+1) * BLOCK, area);
-        } else {
-            /* Abandoned: check if stationary (low SAD with prev frame) */
-            int sad = 0;
-            if (prev) {
-                for (int y = top; y <= bottom && y < H; y++)
-                    for (int x = left; x <= right && x < W; x++)
-                        sad += abs((int)cur[y*W+x] - (int)prev[y*W+x]);
-            }
-            if (sad >= MOTION_THR) continue; /* moving → skip */
-
-            int cx = (left + right) / 2, cy = (top + bottom) / 2;
-            int dur = 1;
-            for (int t = 0; t < ntracked; t++) {
-                if (abs(tracked[t].cx - cx) + abs(tracked[t].cy - cy) <= 3) {
-                    dur = tracked[t].dur + 1; break;
-                }
-            }
-            if (new_n < 16) new_tracked[new_n++] = (Blob){cx, cy, dur};
-
-            if (dur >= ABANDON_FRAMES) {
-                printf("FRAME %d: ABANDONED (%d,%d)-(%d,%d) area=%d dur=%d\n",
-                       frame_idx, left, top, right, bottom, area, dur);
-            }
-        }
-    }
-
-    if (strcmp(mode, "abandoned") == 0) {
-        memcpy(tracked, new_tracked, sizeof(Blob) * new_n);
-        ntracked = new_n;
-    }
-}
-
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <frames.bin> [md|abandoned]\n", argv[0]);
@@ -170,7 +121,6 @@ int main(int argc, char **argv) {
 
     /* Allocate images */
     IVE_IMAGE_S img_cur, img_prev, img_ref, img_diff, img_bin, img_sad, img_sad16;
-    IVE_MEM_INFO_S blob_mem;
     alloc_img(&img_cur, W, H);
     alloc_img(&img_prev, W, H);
     alloc_img(&img_ref, W, H);
@@ -185,11 +135,6 @@ int main(int argc, char **argv) {
     HI_MPI_SYS_MmzAlloc(&img_sad16.au64PhyAddr[0],
         (HI_VOID **)&img_sad16.au64VirAddr[0], NULL, HI_NULL,
         img_sad16.au32Stride[0] * BH);
-    memset(&blob_mem, 0, sizeof(blob_mem));
-    blob_mem.u32Size = BLOB_SZ;
-    HI_MPI_SYS_MmzAlloc(&blob_mem.u64PhyAddr, (HI_VOID **)&blob_mem.u64VirAddr,
-                         NULL, HI_NULL, BLOB_SZ);
-
     uint8_t frame_data[FRAME_SZ], prev_data[FRAME_SZ], ref_data[FRAME_SZ];
     IVE_HANDLE handle;
 
@@ -229,16 +174,6 @@ int main(int argc, char **argv) {
             } else {
                 ive_wait(handle);
             }
-            if (i <= 3) {
-                /* Debug: check SAD threshold output */
-                uint8_t sad_dbg[64];
-                read_img(&img_sad, sad_dbg);
-                int nz = 0;
-                for (int j = 0; j < BW*BH && j < 64; j++) if (sad_dbg[j]) nz++;
-                fprintf(stderr, "frame %d: SAD ret=0x%x nonzero=%d/%d thr[0..3]=%d,%d,%d,%d\n",
-                    i, ret, nz, BW*BH, sad_dbg[0], sad_dbg[1], sad_dbg[2], sad_dbg[3]);
-            }
-
             /* Read SAD threshold output and find motion regions directly.
              * CCL requires min 64×64 but SAD output is BW×BH (16×16).
              * Scan non-zero blocks and compute bounding boxes manually. */
@@ -270,19 +205,6 @@ int main(int argc, char **argv) {
                                   &sub_ctrl, HI_TRUE);
             if (ret == HI_SUCCESS) ive_wait(handle);
 
-            /* Debug Sub output */
-            if (i == 50 || i == 80 || i == 100) {
-                uint8_t dbg[64];
-                read_img(&img_diff, dbg);
-                int nz = 0;
-                for (int j = 0; j < W*H; j++) {
-                    uint8_t *v = (uint8_t *)(HI_UL)img_diff.au64VirAddr[0];
-                    if (v[j]) nz++;
-                }
-                fprintf(stderr, "frame %d: Sub nonzero=%d diff[0..3]=%d,%d,%d,%d\n",
-                    i, nz, dbg[0], dbg[1], dbg[2], dbg[3]);
-            }
-
             IVE_THRESH_CTRL_S thr_ctrl = {
                 .enMode = IVE_THRESH_MODE_BINARY,
                 .u8LowThr = DIFF_THR, .u8MinVal = 0, .u8MaxVal = 255
@@ -291,17 +213,20 @@ int main(int argc, char **argv) {
                                      &thr_ctrl, HI_TRUE);
             if (ret == HI_SUCCESS) ive_wait(handle);
 
-            /* Debug Thresh output */
-            if (i == 50 || i == 80 || i == 100) {
-                uint8_t *v = (uint8_t *)(HI_UL)img_bin.au64VirAddr[0];
-                int nz = 0;
-                for (int j = 0; j < W*H; j++) if (v[j]) nz++;
-                fprintf(stderr, "frame %d: Thresh nonzero=%d\n", i, nz);
+            /* Morphological cleanup: erode removes noise, dilate restores objects */
+            {
+                IVE_ERODE_CTRL_S erode_ctrl;
+                memset(erode_ctrl.au8Mask, 255, 25);
+                ret = HI_MPI_IVE_Erode(&handle, &img_bin, &img_diff, &erode_ctrl, HI_TRUE);
+                if (ret == HI_SUCCESS) ive_wait(handle);
+
+                IVE_DILATE_CTRL_S dilate_ctrl;
+                memset(dilate_ctrl.au8Mask, 255, 25);
+                ret = HI_MPI_IVE_Dilate(&handle, &img_diff, &img_bin, &dilate_ctrl, HI_TRUE);
+                if (ret == HI_SUCCESS) ive_wait(handle);
             }
 
-            /* Read binary mask and find stationary foreground regions.
-             * CCL requires min 64×64, our images are 64×64 but Sub→Thresh
-             * output may still have issues. Scan directly for robustness. */
+            /* Read cleaned binary mask and find stationary foreground regions. */
             {
                 uint8_t bin_out[W * H];
                 read_img(&img_bin, bin_out);
@@ -329,7 +254,7 @@ int main(int argc, char **argv) {
                         /* Match against previous frame's tracked blobs */
                         int dur = 1;
                         for (int t = 0; t < prev_ntracked; t++) {
-                            if (abs(prev_tracked[t].cx - cx) + abs(prev_tracked[t].cy - cy) <= 5) {
+                            if (abs(prev_tracked[t].cx - cx) + abs(prev_tracked[t].cy - cy) <= 20) {
                                 dur = prev_tracked[t].dur + 1;
                                 break;
                             }
@@ -358,7 +283,6 @@ int main(int argc, char **argv) {
     }
 
     fclose(fp);
-    HI_MPI_SYS_MmzFree(blob_mem.u64PhyAddr, (HI_VOID *)(HI_UL)blob_mem.u64VirAddr);
     free_img(&img_cur); free_img(&img_prev); free_img(&img_ref);
     free_img(&img_diff); free_img(&img_bin); free_img(&img_sad);
     HI_MPI_SYS_Exit();
