@@ -72,6 +72,22 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiIveState, HISI_IVE)
 #define IVE_MAP_LUT     0x0300      /* 256-byte LUT for map operation */
 #define IVE_NCC_OUTPUT  0x0180      /* NCC result output address */
 
+/* GMM2 registers */
+#define IVE_GMM2_MODEL  0x0190      /* model buffer physical address */
+#define IVE_GMM2_FG     0x0194      /* foreground output address */
+#define IVE_GMM2_BG     0x0198      /* background output address */
+#define IVE_GMM2_FACTOR 0x019C      /* factor image address */
+#define IVE_GMM2_NMODEL 0x01A0      /* number of Gaussians per pixel (1-5) */
+#define IVE_GMM2_VARMAX 0x01A4      /* max variance (Q9.7) */
+#define IVE_GMM2_VARMIN 0x01A8      /* min variance (Q9.7) */
+#define IVE_GMM2_SNS    0x01AC      /* sensitivity factor */
+#define IVE_GMM2_FTHR   0x01B0      /* frequency threshold */
+#define IVE_GMM2_FINIT  0x01B4      /* frequency init value */
+#define IVE_GMM2_FADD   0x01B8      /* frequency add factor */
+#define IVE_GMM2_FREDU  0x01BC      /* frequency reduction factor */
+#define IVE_GMM2_LTHR   0x01C0      /* life threshold */
+#define IVE_GMM2_VRATE  0x01C4      /* variance update rate */
+
 /* Extended op registers */
 #define IVE_EXT_CTRL    0x040C
 #define IVE_EXT_COEFF0  0x0414
@@ -96,6 +112,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiIveState, HISI_IVE)
 #define IVE_OP_INTEG    14
 #define IVE_OP_MAP      15
 #define IVE_OP_NCC      16
+#define IVE_OP_GMM2     17
 
 /* CCL output structure matches hi_ive.h IVE_CCBLOB_S */
 #define IVE_MAX_REGION_NUM  254
@@ -687,6 +704,186 @@ static void ive_op_ncc(HisiIveState *s)
     g_free(f1); g_free(f2);
 }
 
+/* ── GMM2 (Gaussian Mixture Model, stateful background subtraction) ── */
+
+/*
+ * Per-pixel model: K Gaussians, each 8 bytes:
+ *   Byte 0:   mean (U8)
+ *   Byte 1-2: variance (U16, Q9.7)
+ *   Byte 3-4: frequency (U16)
+ *   Byte 5-6: life (U16)
+ *   Byte 7:   reserved
+ */
+#define GMM2_GAUSS_SIZE 8
+
+static void ive_op_gmm2(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *frame;
+    ive_read_frames(s, &frame, NULL, &w, &h);
+    int npix = w * h;
+
+    uint8_t K = s->regs[IVE_GMM2_NMODEL / 4] & 0xFF;
+    if (K < 1) K = 3;
+    if (K > 5) K = 5;
+
+    uint32_t model_addr  = s->regs[IVE_GMM2_MODEL / 4];
+    uint32_t fg_addr     = s->regs[IVE_GMM2_FG / 4];
+    uint32_t bg_addr     = s->regs[IVE_GMM2_BG / 4];
+    uint16_t var_max     = s->regs[IVE_GMM2_VARMAX / 4] & 0xFFFF;
+    uint16_t var_min     = s->regs[IVE_GMM2_VARMIN / 4] & 0xFFFF;
+    uint8_t  sns_factor  = s->regs[IVE_GMM2_SNS / 4] & 0xFF;
+    uint16_t freq_thr    = s->regs[IVE_GMM2_FTHR / 4] & 0xFFFF;
+    uint16_t freq_init   = s->regs[IVE_GMM2_FINIT / 4] & 0xFFFF;
+    uint16_t freq_add    = s->regs[IVE_GMM2_FADD / 4] & 0xFFFF;
+    uint16_t freq_redu   = s->regs[IVE_GMM2_FREDU / 4] & 0xFFFF;
+    uint16_t life_thr    = s->regs[IVE_GMM2_LTHR / 4] & 0xFFFF;
+    uint16_t var_rate    = s->regs[IVE_GMM2_VRATE / 4] & 0xFFFF;
+
+    /* Defaults from SDK sample */
+    if (!var_max)   var_max   = (16 * 16) << 7;  /* 32768 */
+    if (!var_min)   var_min   = (8 * 8) << 7;    /* 8192 */
+    if (!sns_factor) sns_factor = 8;
+    if (!freq_thr)  freq_thr  = 12000;
+    if (!freq_init) freq_init = 20000;
+    if (!freq_add)  freq_add  = 0xEF;
+    if (!freq_redu) freq_redu = 0xFF00;
+    if (!life_thr)  life_thr  = 5000;
+    if (!var_rate)  var_rate  = 1;
+
+    int model_size = K * GMM2_GAUSS_SIZE * npix;
+    uint8_t *model = g_malloc(model_size);
+    uint8_t *fg = g_malloc0(npix);
+    uint8_t *bg = g_malloc0(npix);
+
+    /* Read model from guest memory */
+    dma_memory_read(&address_space_memory, model_addr,
+                    model, model_size, MEMTXATTRS_UNSPECIFIED);
+
+    for (int p = 0; p < npix; p++) {
+        uint8_t pixel = frame[p];
+        uint8_t *pmodel = model + p * K * GMM2_GAUSS_SIZE;
+        int matched = 0;
+        int best_k = 0;
+        uint16_t best_freq = 0;
+
+        /* Try to match pixel against each Gaussian */
+        for (int k = 0; k < K; k++) {
+            uint8_t *g = pmodel + k * GMM2_GAUSS_SIZE;
+            uint8_t  mean = g[0];
+            uint16_t var  = g[1] | (g[2] << 8);
+            uint16_t freq = g[3] | (g[4] << 8);
+            uint16_t life = g[5] | (g[6] << 8);
+
+            if (freq == 0 && life == 0 && var == 0) {
+                continue; /* uninitialized slot */
+            }
+
+            /* Match criterion: |pixel - mean| < sns_factor * sqrt(var)
+             * Simplified: (pixel - mean)^2 < sns_factor^2 * var / 128 */
+            int diff = (int)pixel - (int)mean;
+            int diff2 = diff * diff;
+            int var_real = (var > 0) ? var : var_min;
+            int threshold = ((int)sns_factor * sns_factor * var_real) >> 7;
+
+            if (diff2 < threshold) {
+                /* Matched — update mean and variance */
+                int new_mean = mean + (diff > 0 ? var_rate : -var_rate);
+                if (new_mean < 0) new_mean = 0;
+                if (new_mean > 255) new_mean = 255;
+                g[0] = new_mean;
+
+                /* Update variance */
+                int new_var = var + var_rate * (diff2 - (var >> 7));
+                if (new_var < var_min) new_var = var_min;
+                if (new_var > var_max) new_var = var_max;
+                g[1] = new_var & 0xFF;
+                g[2] = (new_var >> 8) & 0xFF;
+
+                /* Increase frequency */
+                int new_freq = freq + freq_add;
+                if (new_freq > 65535) new_freq = 65535;
+                g[3] = new_freq & 0xFF;
+                g[4] = (new_freq >> 8) & 0xFF;
+
+                /* Reset life */
+                g[5] = life_thr & 0xFF;
+                g[6] = (life_thr >> 8) & 0xFF;
+
+                matched = 1;
+
+                /* Track best (highest freq) for background */
+                if (new_freq > best_freq) {
+                    best_freq = new_freq;
+                    best_k = k;
+                }
+                break; /* first match wins */
+            } else {
+                /* Not matched — reduce frequency */
+                int new_freq = (int)freq * freq_redu >> 16;
+                g[3] = new_freq & 0xFF;
+                g[4] = (new_freq >> 8) & 0xFF;
+
+                /* Decrease life */
+                if (life > 0) {
+                    life--;
+                    g[5] = life & 0xFF;
+                    g[6] = (life >> 8) & 0xFF;
+                }
+
+                if (freq > best_freq) {
+                    best_freq = freq;
+                    best_k = k;
+                }
+            }
+        }
+
+        if (!matched) {
+            /* No match — replace weakest Gaussian */
+            int weakest = 0;
+            uint16_t min_freq = 65535;
+            for (int k = 0; k < K; k++) {
+                uint8_t *g = pmodel + k * GMM2_GAUSS_SIZE;
+                uint16_t freq = g[3] | (g[4] << 8);
+                if (freq < min_freq) { min_freq = freq; weakest = k; }
+            }
+            uint8_t *g = pmodel + weakest * GMM2_GAUSS_SIZE;
+            g[0] = pixel;                           /* mean = current pixel */
+            g[1] = var_max & 0xFF;                  /* high initial variance */
+            g[2] = (var_max >> 8) & 0xFF;
+            g[3] = freq_init & 0xFF;                /* initial frequency */
+            g[4] = (freq_init >> 8) & 0xFF;
+            g[5] = life_thr & 0xFF;                 /* full life */
+            g[6] = (life_thr >> 8) & 0xFF;
+            g[7] = 0;
+
+            /* Foreground: pixel doesn't match any stable model */
+            fg[p] = 255;
+        } else {
+            /* Background: matched a model — check if model is stable */
+            uint8_t *g = pmodel + best_k * GMM2_GAUSS_SIZE;
+            uint16_t freq = g[3] | (g[4] << 8);
+            fg[p] = (freq >= freq_thr) ? 0 : 255;
+        }
+
+        /* Background image: mean of best-matching Gaussian */
+        bg[p] = pmodel[best_k * GMM2_GAUSS_SIZE]; /* mean */
+    }
+
+    /* Write outputs back to guest memory */
+    dma_memory_write(&address_space_memory, model_addr,
+                     model, model_size, MEMTXATTRS_UNSPECIFIED);
+    dma_memory_write(&address_space_memory, fg_addr,
+                     fg, npix, MEMTXATTRS_UNSPECIFIED);
+    dma_memory_write(&address_space_memory, bg_addr,
+                     bg, npix, MEMTXATTRS_UNSPECIFIED);
+
+    g_free(model);
+    g_free(fg);
+    g_free(bg);
+    g_free(frame);
+}
+
 /* ── Fire handler ─────────────────────────────────────────────── */
 
 static void ive_fire(HisiIveState *s)
@@ -711,6 +908,7 @@ static void ive_fire(HisiIveState *s)
     case IVE_OP_INTEG:  ive_op_integ(s); break;
     case IVE_OP_MAP:    ive_op_map(s); break;
     case IVE_OP_NCC:    ive_op_ncc(s); break;
+    case IVE_OP_GMM2:   ive_op_gmm2(s); break;
     default:
         qemu_log_mask(LOG_UNIMP, "hisi-ive: unimplemented op_type %d\n",
                       op_type);
