@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
-"""Overlay IVE detection bboxes on original 1080p video frames using PIL."""
-import re, sys, os, subprocess
-from PIL import Image, ImageDraw, ImageFont
+"""Overlay IVE detection bboxes on original video frames using PIL.
+
+Can auto-detect source video, resolution, and time offset from .meta.json
+files saved by eval_build_dataset.py.
+
+Usage:
+    # Auto mode: reads .meta.json next to the result file
+    python3 overlay_detections.py <detections.txt> <output.mp4>
+
+    # Manual mode: specify all parameters
+    python3 overlay_detections.py <detections.txt> <source.avi> <output.mp4> <proc_w> <proc_h> <time_offset>
+"""
+import json, re, sys, os, subprocess
+from PIL import Image, ImageDraw
+
+
+Y4M_DIR = "/mnt/data/datasets/meva/y4m"
+
 
 def parse_detections(path):
     dets = {}
@@ -15,19 +30,50 @@ def parse_detections(path):
             area = int(m.group(6))
             dur = int(m.group(7)) if m.group(7) else 0
             is_abandoned = "ABANDONED" in line
-            if frame not in dets:
-                dets[frame] = []
-            dets[frame].append((x1, y1, x2, y2, area, dur, is_abandoned))
+            dets.setdefault(frame, []).append((x1, y1, x2, y2, area, dur, is_abandoned))
     return dets
 
+
+def find_meta(det_file):
+    """Find .meta.json matching a detection result file.
+
+    Result files are like: results/CLIP.MODE.txt
+    Meta files are like:   y4m/CLIP.MODE.meta.json
+    """
+    base = os.path.basename(det_file)  # CLIP.MODE.txt
+    stem = base.rsplit(".", 1)[0]      # CLIP.MODE
+    meta_path = os.path.join(Y4M_DIR, stem + ".meta.json")
+    if os.path.exists(meta_path):
+        return json.load(open(meta_path))
+    return None
+
+
 def main():
-    if len(sys.argv) < 7:
-        print(f"Usage: {sys.argv[0]} <detections.txt> <source.avi> <output.mp4> <proc_w> <proc_h> <time_offset>")
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <detections.txt> <output.mp4>")
+        print(f"       {sys.argv[0]} <detections.txt> <source> <output.mp4> <proc_w> <proc_h> <time_offset>")
         sys.exit(1)
 
-    det_file, source, output = sys.argv[1], sys.argv[2], sys.argv[3]
-    proc_w, proc_h = int(sys.argv[4]), int(sys.argv[5])
-    time_offset = float(sys.argv[6])
+    det_file = sys.argv[1]
+
+    if len(sys.argv) >= 7:
+        # Manual mode
+        source = sys.argv[2]
+        output = sys.argv[3]
+        proc_w, proc_h = int(sys.argv[4]), int(sys.argv[5])
+        time_offset = float(sys.argv[6])
+    elif len(sys.argv) >= 3:
+        # Auto mode: read from .meta.json
+        output = sys.argv[2]
+        meta = find_meta(det_file)
+        if not meta:
+            print(f"No .meta.json found for {det_file}. Use manual mode.")
+            sys.exit(1)
+        source = meta["source_video"]
+        proc_w = meta["proc_w"]
+        proc_h = meta["proc_h"]
+        time_offset = meta["time_offset"]
+        print(f"Auto: source={os.path.basename(source)} {proc_w}x{proc_h} offset={time_offset}s")
 
     dets = parse_detections(det_file)
     max_frame = max(dets.keys()) if dets else 0
@@ -39,16 +85,12 @@ def main():
     os.makedirs(tmpdir, exist_ok=True)
 
     # Extract frames from original at 10fps
-    print(f"Extracting {nframes} frames from original at 10fps...")
+    print(f"Extracting {nframes} frames from original at 10fps (offset={time_offset}s)...")
     subprocess.run([
         "ffmpeg", "-y", "-ss", str(time_offset), "-i", source,
         "-t", str(duration), "-r", "10",
         "-q:v", "2", f"{tmpdir}/frame_%04d.png"
     ], capture_output=True, timeout=120)
-
-    orig_w, orig_h = 1920, 1080
-    sx = orig_w / proc_w
-    sy = orig_h / proc_h
 
     frames_drawn = 0
     for fi in range(1, nframes + 2):
@@ -61,8 +103,7 @@ def main():
         sy = orig_h / proc_h
         draw = ImageDraw.Draw(img)
 
-        # Frame number label
-        frame_idx = fi - 1  # 0-based
+        frame_idx = fi - 1
         label = f"Frame {frame_idx}"
 
         boxes = dets.get(frame_idx, [])
@@ -73,7 +114,6 @@ def main():
         elif boxes:
             label += f"  |  {len(boxes)} motion"
 
-        # Draw status bar
         draw.rectangle([0, 0, orig_w, 32], fill=(0, 0, 0, 180))
         draw.text((10, 6), label, fill=(0, 255, 0))
 
@@ -117,12 +157,12 @@ def main():
         "-pix_fmt", "yuv420p", output
     ], capture_output=True, timeout=120)
 
-    # Cleanup
     for f in os.listdir(tmpdir):
         os.remove(os.path.join(tmpdir, f))
 
     sz = os.path.getsize(output) / 1024 / 1024
     print(f"Output: {output} ({sz:.1f} MB)")
+
 
 if __name__ == "__main__":
     main()

@@ -183,6 +183,23 @@ def main():
 
             ok = convert_to_y4m(video_path, out_path, proc_w, proc_h, ss, duration)
             if ok and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                # Save extraction metadata for overlay scripts
+                meta = {
+                    "source_video": video_path,
+                    "clip": clip_name,
+                    "mode": eval_mode,
+                    "proc_w": proc_w, "proc_h": proc_h,
+                    "orig_w": orig_w, "orig_h": orig_h,
+                    "time_offset": ss if ss is not None else 0,
+                    "duration": duration,
+                    "gt_frames": frames,
+                    "label": entry.get("label"),
+                    "activity": entry.get("activity"),
+                }
+                meta_path = out_path.replace(".y4m", ".meta.json")
+                with open(meta_path, "w") as mf:
+                    json.dump(meta, mf, indent=2)
+
                 converted += 1
                 if converted <= 20 or converted % 50 == 0:
                     sz_mb = os.path.getsize(out_path) / 1024 / 1024
