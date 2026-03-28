@@ -75,21 +75,70 @@ orientations (simplified HOG). Classify by edge distribution:
 **Effort:** ~1 week
 
 ### Abandoned Object Detection
-**IVE ops:** SAD + CCL + Sub + Thresh + Integ + GMM2 (needs implementation)
-**Algorithm:** Build a background model with GMM2 (Gaussian Mixture Model).
-Compare current frame against background. Objects that:
-1. Are NOT part of the learned background
-2. Remain stationary for > N seconds (centroid doesn't move)
-3. Were not present in the original background
-...are flagged as abandoned.
+**IVE ops:** Sub + Thresh + Erode + Dilate + SAD + And + CCL (all implemented)
+**Algorithm (implemented, 9-step full-hardware pipeline):**
+```
+Sub(cur,ref) → Thresh → Erode → Dilate → SAD(mask,zero) → blockify
+→ SAD(cur,prev) → Thresh(invert) → AND(fg,stationary) → CCL → blob regions
+```
+
+1. Learn reference background from first 50 frames (average)
+2. Sub(current, reference) → foreground diff
+3. Thresh → binary foreground mask
+4. Erode → remove noise pixels
+5. Dilate → restore object shapes
+6. SAD(mask, zero_image) → reduce to block-level (bypasses CCL 720px width limit)
+7. SAD(current, previous) → detect inter-frame motion
+8. Invert motion mask → stationary blocks
+9. AND(foreground, stationary) → stationary foreground only
+10. CCL → blob regions with bboxes
+
+CPU only reads the CCL blob struct (~3 KB) per frame — zero pixel scanning.
+IVE hardware time: **6.7 ms/frame** at 960×528 (149 fps capacity).
+
+**Evaluated on MEVA + VIRAT Ground Truth (131 events):**
+- Recall = 0.67 (detects 2/3 of abandoned events)
+- Precision = 0.36 (many false positives)
+- F1 = 0.47
+
+**Inherent limitation of background subtraction:**
+The algorithm detects "anything that appeared and stayed" — it cannot distinguish
+an abandoned bag from a parked car, an opened door, a person sitting down, or
+furniture rearranged after the reference was learned. All of these produce a
+foreground region that is stationary, triggering a false ABANDONED alert.
+
+This is not a threshold tuning problem. Sweeping diff_thr (30-60), sad_thr (100-300),
+and area_thr (4-16) shifts the precision/recall tradeoff but cannot eliminate the
+fundamental ambiguity. On a 5-clip sweep:
+
+| diff | sad | area | P | R | F1 |
+|------|-----|------|-------|-------|-------|
+| 40 | 200 | 4 | 0.60 | 0.75 | 0.67 |
+| 50 | 200 | 4 | 0.75 | 0.75 | 0.75 |
+| 60 | 200 | 4 | 0.75 | 0.75 | 0.75 |
+| 40 | 200 | 16 | 0.67 | 0.50 | 0.57 |
+| 60 | 300 | 16 | 0.75 | 0.75 | 0.75 |
+
+To reach production-grade precision (>0.9), abandoned detection needs one of:
+- **Owner-object association**: Track the person who placed the object, detect
+  when they leave without retrieving it. Requires persistent object tracking
+  (KCF or similar) — Tier 3 complexity.
+- **Semantic classification**: Use NNIE/NPU to classify the foreground region
+  as "bag" vs "person" vs "vehicle". Requires neural network inference.
+- **Scene model update**: Adaptive background (GMM2) that learns parked cars
+  and furniture into the model over time, so only truly new objects trigger.
+  IVE has GMM2 but stateful per-pixel models are complex to implement.
+
+The current IVE-only pipeline is suitable for **alerting with human verification**
+(operator reviews flagged events) but not autonomous decision-making.
+
 **Metadata output:**
 ```json
 {"abandonedObject": {"bbox": [x,y,w,h], "duration": 45, "zone": "lobby"}}
 ```
 **Value:** Airport/train station security. Unattended luggage detection
 is a regulatory requirement in many countries.
-**New IVE ops needed:** GMM2, UpdateBgModel (complex — stateful across frames)
-**Effort:** ~2 weeks
+**Effort:** Implemented (basic pipeline). Production-grade: ~2-3 weeks (needs tracking).
 
 ### License Plate Region Detection
 **IVE ops:** Sobel + Dilate + Erode + CCL + Resize + Integ
@@ -148,7 +197,7 @@ and behavioral analytics. Required for most advanced CCTV features.
 | Zone intrusion | High (security) | ✓ | None | 1 day | **P0** |
 | Loitering | Medium (ATM/retail) | ✓ | None | 3 days | **P1** |
 | Object classification | Medium (false alarms) | Mostly | HOG helps | 1 week | **P1** |
-| Abandoned object | Medium (transport) | Partial | GMM2 | 2 weeks | **P2** |
+| Abandoned object | Medium (transport) | ✓ (basic) | Tracking for prod | Done+2w | **P2** |
 | Plate detection | Medium (parking) | Partial | Resize | 1 week | **P2** |
 | Optical flow | Low-Medium (traffic) | No | LK+ST | 2 weeks | **P3** |
 | KCF tracking | Medium (persistent IDs) | No | KCF×11 | 3 weeks | **P3** |
@@ -174,7 +223,7 @@ Shinobi, or any system supporting ONVIF analytics events.
 | Zone intrusion | ✓ | ✓ | ✓ | | | ✓ | | | | | | | | | | | |
 | Loitering | ✓ | ✓ | ✓ | | | | | | | | | | | | | | |
 | Object class. | | | | | | | ✓ | ✓ | ✓ | | | ✓ | | | | | |
-| Abandoned obj | ✓ | ✓ | ✓ | ✓ | | | ✓ | | | | | ✓ | | | ✓ | | |
+| Abandoned obj | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ | | | ✓ | ✓ | | | | | | |
 | Plate region | | | ✓ | | | | ✓ | | ✓ | ✓ | ✓ | | | | | | |
 | Optical flow | | | | | | | | | | | | | | | | ✓ | |
 | KCF tracking | ✓ | ✓ | ✓ | | | | | | | | | | | | | | ✓ |
@@ -184,6 +233,10 @@ Shinobi, or any system supporting ONVIF analytics events.
 - HiSilicon IVE API Reference (SDK documentation)
 - `docs/ive-registers.md` — hardware register map
 - `docs/nnie-vs-npu.md` — NNIE/NPU architecture comparison
-- `qemu/hw/misc/hisi-ive.c` — QEMU IVE implementation (17 ops)
+- `docs/meva-dataset-spec.md` — evaluation dataset and methodology
+- `qemu/hw/misc/hisi-ive.c` — QEMU IVE implementation (18 ops)
+- `qemu-boot/test-ive-video-mpi.c` — real board test (Y4M, full HW pipeline)
 - `qemu-boot/test-ive-ops.c` — operation test suite
 - Majestic motion detection: `~/git/majestic/src/hisi/mdetect.c`
+- MEVA dataset: [mevadata.org](https://mevadata.org/) (CC BY 4.0)
+- VIRAT Ground 2.0: [viratdata.org](https://viratdata.org/)
