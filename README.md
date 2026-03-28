@@ -250,20 +250,17 @@ python3 demo/ive_demo.py --visualize
 bash demo/run_demo.sh
 ```
 
-The demo generates a room scene with a "person" walking left→right and a "cat"
-moving right→left. The same ARM binary runs on both the real EV300 board
-(via SSH) and in QEMU, producing **byte-identical** bounding box output:
+The demo generates a room with furniture, a "person" walking left→right,
+and a "cat" walking right→left (facing left). The full-size 320×240 demo
+video shows red bounding boxes tracking both objects. A 64×48 version
+runs the same ARM binary on real EV300 board and QEMU, producing
+**byte-identical** bounding box coordinates:
 
-```
-FRAME 8: (0,12)-(12,36) area=17       ← person enters scene
-FRAME 13: (8,12)-(24,36) area=18 (52,36)-(64,44) area=5   ← cat appears
-FRAME 21: (28,12)-(44,44) area=24     ← person + cat overlap region
-FRAME 29: (48,12)-(64,36) area=18 (4,36)-(20,44) area=6   ← both tracked
-FRAME 34: (60,12)-(64,36) area=6      ← person exits
-```
-
-Verified: 27 frames with motion, all coordinates match across
-real hardware (EV300 board `--sw` mode) and QEMU IVE emulation.
+| Platform | Method | Frames detected | Match |
+|----------|--------|-----------------|-------|
+| Real EV300 board | ARM binary via SSH (`--sw`) | 27 | baseline |
+| QEMU EV300 | ARM binary → IVE registers | 27 | **identical** |
+| Host Python | `ive_demo.py` reference | 100 (full-size) | same algorithm |
 
 ## References
 
