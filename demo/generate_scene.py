@@ -51,17 +51,20 @@ def draw_person(img, x, y):
     draw.rectangle([cx+3, y+45, cx+12, y+60], fill=50)
 
 def draw_cat(img, x, y):
-    """Small cat blob (~20×15 pixels)."""
+    """Cat blob (~40×25 pixels, facing left, high contrast for detection)."""
     draw = ImageDraw.Draw(img)
     # Body
-    draw.ellipse([x, y+3, x+18, y+13], fill=70)
-    # Head
-    draw.ellipse([x+14, y, x+24, y+10], fill=65)
+    draw.ellipse([x+10, y+6, x+40, y+22], fill=45)
+    # Head (on the left side — cat faces left since it walks left)
+    draw.ellipse([x, y+2, x+16, y+18], fill=40)
     # Ears
-    draw.polygon([(x+16, y), (x+18, y-4), (x+20, y)], fill=65)
-    draw.polygon([(x+21, y), (x+23, y-4), (x+25, y)], fill=65)
-    # Tail
-    draw.arc([x-8, y-2, x+5, y+8], 180, 300, fill=70, width=2)
+    draw.polygon([(x+4, y+2), (x+6, y-4), (x+8, y+2)], fill=40)
+    draw.polygon([(x+9, y+2), (x+11, y-4), (x+13, y+2)], fill=40)
+    # Tail (right side, curving up)
+    draw.arc([x+32, y, x+52, y+14], 220, 360, fill=45, width=3)
+    # Legs
+    draw.rectangle([x+14, y+20, x+20, y+25], fill=42)
+    draw.rectangle([x+30, y+20, x+36, y+25], fill=42)
 
 def main():
     outdir = sys.argv[1] if len(sys.argv) > 1 else "demo/frames"
@@ -86,11 +89,12 @@ def main():
             if 0 <= px < W:
                 draw_person(frame, px, py)
 
-        # Cat walks right→left (enters at frame 30, exits at frame 120)
-        if 30 <= i <= 120:
-            cx = int(W + 10 - (i - 30) * (W + 30) / 90)
-            cy = 195  # on floor level
-            if 0 <= cx < W:
+        # Cat walks right→left (enters at frame 20, exits at frame 100)
+        # Faster movement (~4 px/frame) for reliable detection
+        if 20 <= i <= 100:
+            cx = int(W + 10 - (i - 20) * (W + 50) / 80)
+            cy = 185  # on floor level
+            if -10 <= cx < W:
                 draw_cat(frame, cx, cy)
 
         # Save as raw Y8
