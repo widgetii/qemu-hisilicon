@@ -2,6 +2,11 @@
 #
 # Boot OpenIPC on emulated Hi3516EV300
 #
+# NOTE: Linux 4.15+ kernels require vdso=0 on the command line (or
+# CONFIG_VDSO=n at build time). The 4.15 ARM VDSO signal return
+# trampoline uses instructions that this QEMU machine model does not
+# fully emulate, causing SIGILL on init. Real hardware is unaffected.
+#
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 QEMU="$REPO_ROOT/qemu-src/build/qemu-system-arm"
