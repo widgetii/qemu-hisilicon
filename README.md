@@ -251,8 +251,19 @@ bash demo/run_demo.sh
 ```
 
 The demo generates a room scene with a "person" walking left→right and a "cat"
-moving right→left. Both host and QEMU detect the moving blobs and produce
-matching bounding box coordinates, validating the IVE hardware emulation.
+moving right→left. The same ARM binary runs on both the real EV300 board
+(via SSH) and in QEMU, producing **byte-identical** bounding box output:
+
+```
+FRAME 8: (0,12)-(12,36) area=17       ← person enters scene
+FRAME 13: (8,12)-(24,36) area=18 (52,36)-(64,44) area=5   ← cat appears
+FRAME 21: (28,12)-(44,44) area=24     ← person + cat overlap region
+FRAME 29: (48,12)-(64,36) area=18 (4,36)-(20,44) area=6   ← both tracked
+FRAME 34: (60,12)-(64,36) area=6      ← person exits
+```
+
+Verified: 27 frames with motion, all coordinates match across
+real hardware (EV300 board `--sw` mode) and QEMU IVE emulation.
 
 ## References
 
