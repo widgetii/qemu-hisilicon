@@ -317,15 +317,32 @@ ssh root@ev300-board 'killall majestic; /utils/ive-test/test-ive-video-mpi \
 # → ... sustained 70+ frames (package left at bus stop)
 ```
 
+#### License Plate Region Detection: 6-step IVE pipeline
+
+```
+Frame → Sobel(vertical) → 16BitTo8Bit(abs) → Thresh → Dilate → Erode → CCL
+                                                                         ↓
+                                               CPU: filter by aspect ratio 2.0-6.0
+```
+
+Detects plate-shaped rectangular regions with dense edges. Not full OCR — finds
+WHERE the plate is as a pre-filter for cloud-based recognition.
+
+```bash
+ssh root@ev300-board 'killall majestic; /utils/ive-test/test-ive-video-mpi \
+    /utils/ive-test/parking.y4m lpr'
+# → FRAME 1: PLATE (452,500)-(516,520) area=32 ratio=3.2
+```
+
 #### Benchmark: 960×528 on real EV300 IVE silicon
 
-| Component | Motion detection | Abandoned detection |
-|-----------|-----------------|-------------------|
-| **IVE hardware** | **2.4 ms/frame** | **6.7 ms/frame** |
-| CPU (blob parse) | 0.0 ms/frame | 0.1 ms/frame |
-| I/O (NFS read) | 40.8 ms/frame | 9.9 ms/frame |
-| **IVE capacity** | **416 fps** | **149 fps** |
-| Total (with NFS) | 23 fps | 60 fps |
+| Component | Motion detection | Abandoned detection | Plate region |
+|-----------|-----------------|-------------------|--------------|
+| **IVE hardware** | **2.4 ms/frame** | **6.7 ms/frame** | **9.1 ms/frame** |
+| CPU (blob parse) | 0.0 ms/frame | 0.1 ms/frame | 0.2 ms/frame |
+| I/O (NFS read) | 40.8 ms/frame | 9.9 ms/frame | 33.3 ms/frame |
+| **IVE capacity** | **416 fps** | **149 fps** | **110 fps** |
+| Total (with NFS) | 23 fps | 60 fps | 24 fps |
 
 In a real camera, VPSS feeds frames via DMA (zero I/O overhead), so the IVE
 pipeline easily exceeds the 10 fps target. NFS is the bottleneck in the test setup.

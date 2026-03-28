@@ -141,22 +141,36 @@ is a regulatory requirement in many countries.
 **Effort:** Implemented (basic pipeline). Production-grade: ~2-3 weeks (needs tracking).
 
 ### License Plate Region Detection
-**IVE ops:** Sobel + Dilate + Erode + CCL + Resize + Integ
-**Algorithm:** Find rectangular regions with dense edges:
-1. Sobel → edge map
-2. Threshold → binary edges
-3. Dilate → close gaps between characters
-4. Erode → remove noise
-5. CCL → find connected blobs
-6. Filter by: aspect ratio (~3:1), edge density (> 50%), size range
-Not full LPR (needs OCR/NNIE) but detects WHERE the plate is.
+**IVE ops:** Sobel + 16BitTo8Bit + Thresh + Dilate + Erode + CCL (all implemented)
+**Algorithm (implemented, 6-step full-hardware pipeline):**
+```
+Frame → Sobel(vertical edges) → 16BitTo8Bit(S16→U8 abs) → Thresh → Dilate → Erode → CCL
+                                                                                      ↓
+                                                        CPU: filter by aspect ratio 2.0-6.0
+```
+
+1. Sobel (vertical kernel) → S16C1 horizontal edge response
+2. 16BitTo8Bit (S16→U8 absolute value) → edge magnitude
+3. Thresh → binary edge map
+4. Dilate (5×5) → close gaps between characters, merge into plate blob
+5. Erode (5×5) → remove noise, tighten boundaries
+6. CCL → blob regions with bounding boxes
+7. CPU: filter by aspect ratio (2.0-6.0), minimum area, position (bottom 80%)
+
+IVE hardware time: **9.1 ms/frame** at 960×528 (110 fps capacity).
+Not full LPR/OCR — detects WHERE the plate region is. Useful as a pre-filter
+for cloud-based OCR or to trigger a high-res snapshot capture.
+
+Tested on VIRAT parking lot surveillance (1080p, multiple vehicles). Detects
+plate-region candidates on vehicle fronts/rears. False positives from high-contrast
+cloud edges filtered by position constraint.
+
 **Metadata output:**
 ```json
-{"plateRegion": {"bbox": [x,y,w,h], "confidence": 0.8}}
+{"plateRegion": {"bbox": [x,y,w,h], "ratio": 3.2, "area": 25}}
 ```
 **Value:** Pre-filter for cloud-based LPR, trigger high-res snapshot.
-**New IVE ops needed:** Resize (for multi-scale detection)
-**Effort:** ~1 week
+**Effort:** Implemented.
 
 ## Tier 3: Significant effort (complex algorithms or many new IVE ops)
 
@@ -198,7 +212,7 @@ and behavioral analytics. Required for most advanced CCTV features.
 | Loitering | Medium (ATM/retail) | ✓ | None | 3 days | **P1** |
 | Object classification | Medium (false alarms) | Mostly | HOG helps | 1 week | **P1** |
 | Abandoned object | Medium (transport) | ✓ (basic) | Tracking for prod | Done+2w | **P2** |
-| Plate detection | Medium (parking) | Partial | Resize | 1 week | **P2** |
+| Plate detection | Medium (parking) | ✓ | None | Done | **P2** |
 | Optical flow | Low-Medium (traffic) | No | LK+ST | 2 weeks | **P3** |
 | KCF tracking | Medium (persistent IDs) | No | KCF×11 | 3 weeks | **P3** |
 
