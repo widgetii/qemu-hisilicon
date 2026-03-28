@@ -22,15 +22,16 @@ def parse_detections(path):
     dets = {}
     with open(path) as f:
         for line in f:
-            m = re.match(r'FRAME (\d+): (?:ABANDONED )?\((\d+),(\d+)\)-\((\d+),(\d+)\) area=(\d+)(?: dur=(\d+))?', line.strip())
+            m = re.match(r'FRAME (\d+): (?:ABANDONED |PLATE )?\((\d+),(\d+)\)-\((\d+),(\d+)\) area=(\d+)(?: (?:dur|ratio)=(\S+))?', line.strip())
             if not m:
                 continue
             frame = int(m.group(1))
             x1, y1, x2, y2 = int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
             area = int(m.group(6))
-            dur = int(m.group(7)) if m.group(7) else 0
+            dur = m.group(7) if m.group(7) else "0"
             is_abandoned = "ABANDONED" in line
-            dets.setdefault(frame, []).append((x1, y1, x2, y2, area, dur, is_abandoned))
+            is_plate = "PLATE" in line
+            dets.setdefault(frame, []).append((x1, y1, x2, y2, area, dur, is_abandoned, is_plate))
     return dets
 
 
@@ -107,17 +108,20 @@ def main():
         label = f"Frame {frame_idx}"
 
         boxes = dets.get(frame_idx, [])
-        abandoned_count = sum(1 for b in boxes if b[6] and b[5] >= 30)
+        abandoned_count = sum(1 for b in boxes if b[6] and b[5] and float(b[5]) >= 30)
+        plate_count = sum(1 for b in boxes if b[7])
 
         if abandoned_count:
             label += f"  |  {abandoned_count} ABANDONED"
+        elif plate_count:
+            label += f"  |  {plate_count} plate candidates"
         elif boxes:
             label += f"  |  {len(boxes)} motion"
 
         draw.rectangle([0, 0, orig_w, 32], fill=(0, 0, 0, 180))
         draw.text((10, 6), label, fill=(0, 255, 0))
 
-        for x1, y1, x2, y2, area, dur, is_ab in boxes:
+        for x1, y1, x2, y2, area, dur, is_ab, is_plate in boxes:
             if area < 4:
                 continue
             ox1 = int(x1 * sx)
@@ -133,10 +137,14 @@ def main():
                 cy = (oy1 + oy2) // 2
                 oy1, oy2 = cy - 10, cy + 10
 
-            if is_ab and dur >= 30:
+            if is_ab and dur and float(dur) >= 30:
                 color = (255, 0, 0)
                 width = 3
                 txt = f"ABANDONED dur={dur}"
+            elif is_plate:
+                color = (0, 255, 0)
+                width = 2
+                txt = f"PLATE r={dur}" if dur else f"PLATE a={area}"
             else:
                 color = (255, 255, 0)
                 width = 2

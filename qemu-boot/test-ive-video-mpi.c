@@ -109,7 +109,7 @@ static int ntracked, prev_ntracked;
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <input.y4m|frames.bin> [md|abandoned] [--diff-thr=N] [--sad-thr=N] [--area-thr=N]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <input.y4m|frames.bin> [md|abandoned|lpr] [--diff-thr=N] [--sad-thr=N] [--area-thr=N]\n", argv[0]);
         return 1;
     }
     const char *mode = (argc > 2) ? argv[2] : "md";
@@ -193,6 +193,21 @@ int main(int argc, char **argv) {
     HI_MPI_SYS_MmzAlloc(&img_sad16.au64PhyAddr[0],
         (HI_VOID **)&img_sad16.au64VirAddr[0], NULL, HI_NULL,
         img_sad16.au32Stride[0] * bh);
+
+    /* Sobel S16 output images for LPR */
+    IVE_IMAGE_S img_sobel_h, img_sobel_v, img_edge;
+    memset(&img_sobel_h, 0, sizeof(img_sobel_h));
+    img_sobel_h.enType = IVE_IMAGE_TYPE_S16C1;
+    img_sobel_h.u32Width = W; img_sobel_h.u32Height = H;
+    img_sobel_h.au32Stride[0] = ((W * 2) + 15) & ~15;
+    HI_MPI_SYS_MmzAlloc(&img_sobel_h.au64PhyAddr[0],
+        (HI_VOID **)&img_sobel_h.au64VirAddr[0], NULL, HI_NULL,
+        img_sobel_h.au32Stride[0] * H);
+    img_sobel_v = img_sobel_h;
+    HI_MPI_SYS_MmzAlloc(&img_sobel_v.au64PhyAddr[0],
+        (HI_VOID **)&img_sobel_v.au64VirAddr[0], NULL, HI_NULL,
+        img_sobel_v.au32Stride[0] * H);
+    alloc_img(&img_edge, W, H);  /* U8 edge magnitude after 16BitTo8Bit */
 
     /* Block-level images for abandoned: foreground blocks + motion blocks */
     IVE_IMAGE_S img_fg_blk, img_mot_blk, img_stat_fg;
@@ -305,7 +320,7 @@ int main(int argc, char **argv) {
                 t_cpu += usec_now() - t2;
             }
 
-        } else {
+        } else if (strcmp(mode, "abandoned") == 0) {
             /* === ABANDONED: full hardware pipeline ===
              * 1. Sub(cur, ref) → foreground diff
              * 2. Thresh → binary foreground mask
@@ -441,6 +456,111 @@ int main(int argc, char **argv) {
             memcpy(prev_tracked, tracked, sizeof(Blob) * ntracked);
             prev_ntracked = ntracked;
             ntracked = 0;
+            t_cpu += usec_now() - t2;
+
+        } else if (strcmp(mode, "lpr") == 0) {
+            /* === LICENSE PLATE REGION: Sobel → 16to8 → Thresh → Dilate → Erode → CCL === */
+
+            /* 1. Sobel (horizontal edges — character strokes are horizontal) */
+            IVE_SOBEL_CTRL_S sobel_ctrl = { .enOutCtrl = IVE_SOBEL_OUT_CTRL_VER };
+            HI_S8 sobel_mask[25] = {0,0,0,0,0, 0,-1,-2,-1,0, 0,0,0,0,0, 0,1,2,1,0, 0,0,0,0,0};
+            memcpy(sobel_ctrl.as8Mask, sobel_mask, 25);
+            ret = HI_MPI_IVE_Sobel(&handle, &img_cur, &img_sobel_h, &img_sobel_v,
+                                    &sobel_ctrl, HI_TRUE);
+            if (ret == HI_SUCCESS) ive_wait(handle);
+
+            /* 2. 16BitTo8Bit (S16→U8 absolute value = edge magnitude) */
+            IVE_16BIT_TO_8BIT_CTRL_S cvt_ctrl = {
+                .enMode = IVE_16BIT_TO_8BIT_MODE_S16_TO_U8_ABS,
+                .u16Denominator = 1, .u8Numerator = 1, .s8Bias = 0
+            };
+            ret = HI_MPI_IVE_16BitTo8Bit(&handle, &img_sobel_v, &img_edge,
+                                          &cvt_ctrl, HI_TRUE);
+            if (ret == HI_SUCCESS) ive_wait(handle);
+
+            /* 3. Thresh (binary edge map) */
+            IVE_THRESH_CTRL_S edge_thr = {
+                .enMode = IVE_THRESH_MODE_BINARY,
+                .u8LowThr = diff_thr, .u8MinVal = 0, .u8MaxVal = 255
+            };
+            ret = HI_MPI_IVE_Thresh(&handle, &img_edge, &img_bin,
+                                     &edge_thr, HI_TRUE);
+            if (ret == HI_SUCCESS) ive_wait(handle);
+
+            /* 4. Dilate (close gaps between characters → merge into plate blob) */
+            IVE_DILATE_CTRL_S dil_ctrl;
+            memset(dil_ctrl.au8Mask, 255, 25);
+            ret = HI_MPI_IVE_Dilate(&handle, &img_bin, &img_diff, &dil_ctrl, HI_TRUE);
+            if (ret == HI_SUCCESS) ive_wait(handle);
+
+            /* 5. Erode (remove noise, tighten boundaries) */
+            IVE_ERODE_CTRL_S ero_ctrl;
+            memset(ero_ctrl.au8Mask, 255, 25);
+            ret = HI_MPI_IVE_Erode(&handle, &img_diff, &img_bin, &ero_ctrl, HI_TRUE);
+            if (ret == HI_SUCCESS) ive_wait(handle);
+
+            /* 6. CCL on edge blobs (full frame if within 720px, else blockify) */
+            int ccl_on_full = (W >= 64 && H >= 64 && W <= 720 && H <= 640);
+            if (ccl_on_full) {
+                IVE_CCL_CTRL_S ccl_ctrl = {
+                    .enMode = IVE_CCL_MODE_4C,
+                    .u16InitAreaThr = ccl_area_thr,
+                    .u16Step = 2
+                };
+                ret = HI_MPI_IVE_CCL(&handle, &img_bin, &blob_mem,
+                                      &ccl_ctrl, HI_TRUE);
+                if (ret == HI_SUCCESS) ive_wait(handle);
+            } else {
+                /* Blockify via SAD(mask,zero) then CCL on block-level */
+                IVE_SAD_CTRL_S blk_sad = {
+                    .enMode = IVE_SAD_MODE_MB_4X4,
+                    .enOutCtrl = IVE_SAD_OUT_CTRL_THRESH,
+                    .u16Thr = 255 * 4, .u8MinVal = 0, .u8MaxVal = 255
+                };
+                ret = HI_MPI_IVE_SAD(&handle, &img_bin, &img_zero,
+                                      &img_sad16_b, &img_fg_blk, &blk_sad, HI_TRUE);
+                if (ret == HI_SUCCESS) ive_wait(handle);
+
+                if (ccl_ok) {
+                    IVE_CCL_CTRL_S ccl_ctrl = {
+                        .enMode = IVE_CCL_MODE_4C,
+                        .u16InitAreaThr = ccl_area_thr,
+                        .u16Step = 2
+                    };
+                    ret = HI_MPI_IVE_CCL(&handle, &img_fg_blk, &blob_mem,
+                                          &ccl_ctrl, HI_TRUE);
+                    if (ret == HI_SUCCESS) ive_wait(handle);
+                }
+            }
+
+            long long t2 = usec_now();
+            t_ive += t2 - t1;
+
+            /* 7. CPU: read blob struct, filter by plate aspect ratio */
+            HI_MPI_SYS_MmzFlushCache(blob_mem.u64PhyAddr,
+                (HI_VOID *)(HI_UL)blob_mem.u64VirAddr, blob_mem.u32Size);
+            IVE_CCBLOB_S *blob = (IVE_CCBLOB_S *)(HI_UL)blob_mem.u64VirAddr;
+
+            int scale = ccl_on_full ? 1 : BLOCK;
+            for (int r = 0; r < IVE_MAX_REGION_NUM; r++) {
+                if (blob->astRegion[r].u32Area == 0) continue;
+                int left = blob->astRegion[r].u16Left * scale;
+                int top = blob->astRegion[r].u16Top * scale;
+                int right = blob->astRegion[r].u16Right * scale + (ccl_on_full ? 0 : BLOCK);
+                int bottom = blob->astRegion[r].u16Bottom * scale + (ccl_on_full ? 0 : BLOCK);
+                int area = blob->astRegion[r].u32Area;
+                int rw = right - left;
+                int rh = bottom - top;
+                if (rh < 1) continue;
+                float ratio = (float)rw / rh;
+
+                /* Filter: plate-like aspect ratio 2.0-6.0, minimum size, bottom 80% of frame */
+                if (ratio >= 2.0f && ratio <= 6.0f && area >= 8 && top > H / 5) {
+                    printf("FRAME %d: PLATE (%d,%d)-(%d,%d) area=%d ratio=%.1f\n",
+                           i, left, top, right, bottom, area, ratio);
+                    detected_frames++;
+                }
+            }
             t_cpu += usec_now() - t2;
         }
 
