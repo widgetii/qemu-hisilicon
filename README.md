@@ -268,41 +268,46 @@ $CC -o test-ive-mpi qemu-boot/test-ive-mpi.c -I$SDK/include -L$LIBS -lmpi -live 
 
 ### Motion Detection Demo
 
-A visual demo tracks moving objects in a synthetic CCTV scene using the same
-SAD+CCL algorithm on three platforms: host Python, QEMU IVE, and real EV300 board.
+Both demos run on three platforms using the **actual IVE hardware** path:
+
+| Platform | Binary | IVE path | Notes |
+|----------|--------|----------|-------|
+| Real EV300 board | `test-ive-video-mpi` | MPI API → libmpi.so → kernel module → IVE silicon | Ground truth |
+| QEMU | `test-ive-video` | Register writes → hisi-ive.c device | Emulation |
+| Host | `ive_demo.py` / `abandoned_demo.py` | Python reference + visualization | Demo video |
+
+#### Motion Detection
+
+Person walks left→right, cat walks right→left in a synthetic CCTV room.
 
 ```bash
-# Generate synthetic scene + run host reference + visualize
-python3 demo/generate_scene.py
-python3 demo/ive_demo.py --visualize
-# → demo/output/demo_output.mp4 (15 sec, bounding boxes on motion)
+# Visualization (host)
+python3 demo/generate_scene.py && python3 demo/ive_demo.py --visualize
+# → demo/output/demo_output.mp4
 
-# Full end-to-end (host + QEMU + comparison)
-bash demo/run_demo.sh
+# Real IVE hardware (board — stop majestic first)
+./test-ive-video-mpi /tmp/frames_md.bin md
+# → FRAME 8: (0,12)-(12,36) area=17  ... 27 frames total
+
+# QEMU IVE emulation
+# (test-ive-video in initramfs → same frame numbers and bbox positions)
 ```
 
-The demo generates a room with furniture, a "person" walking left→right,
-and a "cat" walking right→left (facing left). The full-size 320×240 demo
-video shows red bounding boxes tracking both objects. A 64×48 version
-runs the same ARM binary on real EV300 board and QEMU, producing
-**byte-identical** bounding box coordinates:
+#### Abandoned Object Detection
 
-| Platform | Method | Frames detected | Match |
-|----------|--------|-----------------|-------|
-| Real EV300 board | ARM binary (SW reference) | 27 | baseline |
-| QEMU EV300 | ARM binary → IVE registers | 27 | **identical** |
-| Host Python | `ive_demo.py` reference | 100 (full-size) | same algorithm |
-
-### Abandoned Object Detection Demo
-
-Detects stationary objects left in the scene using Sub + Thresh + CCL + SAD:
+Person enters, places bag, walks away. Bag flagged as abandoned after 30 frames.
 
 ```bash
-python3 demo/generate_abandoned.py    # person places bag, walks away
-python3 demo/abandoned_demo.py --visualize
+# Visualization (host)
+python3 demo/generate_abandoned.py && python3 demo/abandoned_demo.py --visualize
 # → demo/abandoned_output/abandoned_demo.mp4
-# Bag detected as ABANDONED at frame 75 (3 sec after placement)
+
+# Real IVE hardware (board)
+./test-ive-video-mpi /tmp/frames_ab.bin abandoned
+# → FRAME 86: ABANDONED (28,33)-(38,42) area=98 dur=30  ... 114 frames total
 ```
+
+All frame dimensions are 64×64 (IVE hardware minimum per SDK spec).
 
 See `docs/ive-applications.md` for a roadmap of 9 CV applications
 (tamper detection, line crossing, zone intrusion, loitering, etc.)
