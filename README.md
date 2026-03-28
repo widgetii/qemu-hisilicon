@@ -309,6 +309,30 @@ python3 demo/generate_abandoned.py && python3 demo/abandoned_demo.py --visualize
 
 All frame dimensions are 64×64 (IVE hardware minimum per SDK spec).
 
+### Real CCTV Footage Testing
+
+The motion detection algorithm is validated on 8 real-world CCTV recordings
+from two sources:
+
+```bash
+bash demo/cctv_test/run_cctv_test.sh
+# Requires source videos in /mnt/data/video-sources/cctv-test/
+```
+
+| Source | Video | Resolution | Frames | Motion | Scene |
+|--------|-------|-----------|--------|--------|-------|
+| C-MOR | Computer room | 1920×1080 | 150 | 67 (45%) | Server room door |
+| C-MOR | Warehouse | 1920×1080 | 100 | 45 (45%) | Warehouse entrance |
+| C-MOR | Entrance | 1280×720 | 81 | 43 (53%) | Building lobby |
+| C-MOR | Outside | 1280×720 | 100 | 38 (38%) | Outdoor entry |
+| CAVIAR | LeftBag | 384×288 | 580 | 316 (54%) | Bag left on floor |
+| CAVIAR | LeftBag_AtChair | 384×288 | 450 | 212 (47%) | Bag left at chair |
+| CAVIAR | LeftBox | 384×288 | 350 | 239 (68%) | Box placed |
+| CAVIAR | Walk1 | 384×288 | 249 | 105 (42%) | Corridor walking |
+
+C-MOR samples from [c-mor.com](https://www.c-mor.com/video-surveillance-demo/sample-recordings-of-the-video-surveillance-system-c-mor) (free surveillance system recordings).
+CAVIAR dataset from [University of Edinburgh](https://homepages.inf.ed.ac.uk/rbf/CAVIARDATA1/) (EC-funded research).
+
 See `docs/ive-applications.md` for a roadmap of 9 CV applications
 (tamper detection, line crossing, zone intrusion, loitering, etc.)
 that can be built with the existing IVE operations.
