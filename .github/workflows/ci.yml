@@ -109,19 +109,15 @@ jobs:
             append: "console=ttyAMA0,115200 earlyprintk mem=96M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data) mmz_allocator=hisi mmz=anonymous,0,0x46000000,32M"
             nic: "-nic user"
 
-          - name: hi3516cv610
-            soc: hi3516cv610
-            machine: hi3516cv610
-            mem: 128M
-            kernel: kernel.hi3516cv610
-            rootfs: rootfs.squashfs.hi3516cv610
-            append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            nic: "-nic user"
-            dtb: cv610.dtb
-            fit: true
+          # hi3516cv610 (V5) excluded: no OpenIPC firmware release yet
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0
 
       - name: Download QEMU binary
         uses: actions/download-artifact@v4
@@ -139,28 +135,13 @@ jobs:
               -o "openipc.${{ matrix.soc }}-nor-lite.tgz"
           tar xzf "openipc.${{ matrix.soc }}-nor-lite.tgz"
 
-      - name: Extract FIT image
-        if: matrix.fit
-        run: |
-          sudo apt-get install -y --no-install-recommends u-boot-tools
-          cd qemu-boot
-          dumpimage -T flat_dt -p 0 -o cv610.dtb "firmware.bin.${{ matrix.soc }}"
-          dumpimage -T flat_dt -p 1 -o "kernel.${{ matrix.soc }}" "firmware.bin.${{ matrix.soc }}"
-          dd if="firmware.bin.${{ matrix.soc }}" of="rootfs.squashfs.${{ matrix.soc }}" bs=1 skip=$((0x2A0000))
-
       - name: Boot test
         timeout-minutes: 3
         run: |
-          DTB_ARG=""
-          if [ -n "${{ matrix.dtb }}" ]; then
-            DTB_ARG="-dtb qemu-boot/${{ matrix.dtb }}"
-          fi
-
           timeout 120 ./qemu-src/build/qemu-system-arm \
             -M ${{ matrix.machine }} -m ${{ matrix.mem }} \
             -kernel "qemu-boot/${{ matrix.kernel }}" \
             -initrd "qemu-boot/${{ matrix.rootfs }}" \
-            $DTB_ARG \
             -nographic -serial mon:stdio \
             -append '${{ matrix.append }}' \
             ${{ matrix.nic }} \
