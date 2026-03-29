@@ -57,6 +57,9 @@ extern int mp_ive_svp_alg_proc_init(void *a, void *b);
 extern void mp_ive_svp_alg_proc_exit(void);
 extern int ioctl(int fd, unsigned long request, ...);
 
+/* HI_MPI_IVE_Query — waits for IVE task completion and cleans up */
+extern int HI_MPI_IVE_Query(int handle, int *finished, int block);
+
 /* Find segment start by scanning for valid header */
 static int find_segment(const uint8_t *data, int file_size) {
     for (int off = 0x40; off < file_size - 80 && off < 0x200; off += 0x10) {
@@ -284,7 +287,13 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "  fwd+0x340 dst_tpl: type=%u stride=%u\n",
                         *(uint32_t *)(fwd + 0x340), *(uint32_t *)(fwd + 0x344));
                 ret = ioctl(ive_fd, 0xc9704638, fwd);
-                fprintf(stderr, "  ioctl ret=%d\n", ret);
+                fprintf(stderr, "  forward ret=%d\n", ret);
+                /* Wait for task completion via MPI API (handles ref_cnt cleanup) */
+                {
+                    int handle = *(int32_t *)fwd; /* handle from ioctl output */
+                    int finished = 0;
+                    HI_MPI_IVE_Query(handle, &finished, 1 /* block */);
+                }
 
                 /* Check tmp_buf for output */
                 HI_MPI_SYS_MmzFlushCache(tmp_mem.phys, (void *)(uintptr_t)tmp_mem.virt, 1024);
