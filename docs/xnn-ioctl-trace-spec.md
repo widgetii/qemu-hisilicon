@@ -315,8 +315,40 @@ First byte of each descriptor = layer type:
 | 5 | Preproc | 48B | +0x04:need_vgs, +0x06:in_c, +0x08:in_h, +0x0A:in_w, +0x2C:blob_type |
 | 6 | DMA | 32B | +0x06:in_w, +0x08:in_h |
 
-Weight data is referenced by `arg_offset` + `arg_len` within each Conv/FC layer,
-pointing into the weight blob at segment + `weight_data_off`.
+#### Weight Data Format
+
+Each Conv/FC layer references weights via `arg_offset` and `arg_len`:
+- `arg_offset`: byte offset into weight blob (at segment + `weight_data_off`)
+- `arg_len`: **cumulative** total weight bytes consumed up to this layer (not per-layer)
+- Offsets are non-monotonic — weights are shuffled/interleaved across layers
+
+Weight encoding: **int8 quantized weights + int32 bias per output channel**.
+For 1×1 convs: per-layer size ≈ `in_c * out_c + out_c * 4` (weights + bias).
+For 3×3 convs: per-layer size ≈ `9 * in_c * out_c + out_c * 4` with alignment padding.
+
+#### Corrected Conv Descriptor Byte Layout (80 bytes, packed)
+
+Field positions confirmed by scanning all conv layers in vendor model:
+```
++0x00: u8  layer_type      = 0 (Conv)
++0x01: u8  unknown (always 1 in vendor model)
++0x04: u8  in_fmt          [0,6)
++0x05: u8  out_fmt         {0,1}
++0x06: u8  pool_mode       [0,5)
++0x07: u8  af_mode         [0,4) — 0=none, 1=sigmoid, 2=tanh, 3=relu
++0x08: u16 input_c         [1,1024] — input channels
++0x0A: u16 input_h         [2,720] — spatial height
++0x0C: u16 input_w         [2,1280] — spatial width
++0x0E: u16 output_c        [1,1024] — output channels
++0x10: u16 output_h        [1,720]
++0x12: u16 output_w        [1,1280]
++0x18: u32 arg_len         — cumulative weight offset
++0x1C: u32 arg_offset      — per-layer offset into weight blob
++0x2C: u32 in_tmp_offset   — input activation offset in tmp_buf
++0x30: u32 out_tmp_offset  — output activation offset in tmp_buf
++0x3D: u8  kernel_size     {1, 3} — CONFIRMED by scanning all 43 convs
++0x3E: u8  in_bond_num     {1, 2, 8} — channel grouping
+```
 
 ### Layer Name Table
 At segment + `layer_name_off`. Each entry is 0x40 bytes:
