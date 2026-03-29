@@ -44,6 +44,49 @@ each zone bitmap. Any remaining non-zero pixels = intrusion in that zone.
 would be proper multi-zone alerting with per-zone sensitivity.
 **Effort:** ~1 day
 
+### QR Code Detection (IVE-gated)
+**IVE ops:** Thresh + Erode + Dilate + CCL (all implemented)
+**CPU fallback:** quirc library (ISC license, used by OpenIPC)
+**Algorithm (implemented, benchmarked on real EV300):**
+```
+Frame → Thresh(binary,128) → Erode(5×5) → Dilate(5×5) → CCL
+                                                           ↓
+                               CPU: count square-ish blobs (aspect 0.3-3.0)
+                               if ≥3 candidates → quirc decode full frame
+```
+
+1. Thresh (inverted binary, threshold=128) → dark QR modules become white blobs
+2. Erode (5×5) → remove noise, separate thin features
+3. Dilate (5×5) → merge finder pattern squares into solid blobs
+4. CCL (4-connected, min_area=16) → blob regions with bounding boxes
+5. CPU: filter blobs by aspect ratio 0.3–3.0 (roughly square)
+6. If ≥3 square blobs found (QR has 3 finder patterns) → run quirc on full frame
+
+IVE acts as a fast gate: on frames without QR codes, quirc never runs.
+For frames wider than 720px (CCL limit), SAD 4×4 block mode downscales first.
+
+**Benchmarked on real EV300 hardware (Cortex-A7 @ 900MHz, 640×480):**
+
+| Scenario | CPU-only (quirc/frame) | IVE-gated | Speedup |
+|----------|----------------------|-----------|---------|
+| 0% QR (blank) | 18.4 ms/frame | **7.6 ms/frame** | **2.43x** |
+| 50% QR (mixed) | 30.9 ms/frame | 28.2 ms/frame | 1.09x |
+| 100% QR (worst) | 43.7 ms/frame | 49.5 ms/frame | 0.88x |
+
+- IVE gate: **7.7 ms/frame constant** (130 fps capacity)
+- quirc CPU decode: ~42 ms/frame on Cortex-A7
+- Zero false negatives (IVE never filtered out a frame with QR)
+- Zero false positives on blank frames
+- Real-world (<5% QR presence): ~95% CPU savings, near-zero quirc overhead
+
+**Metadata output:**
+```json
+{"qr": {"payload": "Hello IVE", "version": 1, "ecc": "L"}}
+```
+**Value:** WiFi provisioning via QR code (OpenIPC qrscan), access control,
+inventory/asset tracking. IVE gate keeps CPU free for encoding/streaming.
+**Effort:** Implemented (`qemu-boot/test-qr-ive.c`).
+
 ## Tier 2: Moderate effort (needs 1-2 new IVE ops or CPU algorithms)
 
 ### Loitering Detection
@@ -230,6 +273,7 @@ and behavioral analytics. Required for most advanced CCTV features.
 | Tamper detection | High (every camera) | ✓ | None | 1 day | **P0** |
 | Line crossing | High (retail/access) | ✓ | None | 2 days | **P0** |
 | Zone intrusion | High (security) | ✓ | None | 1 day | **P0** |
+| QR code detection | Medium (provisioning) | ✓ | None (quirc CPU) | Done | **P1** |
 | Loitering | Medium (ATM/retail) | ✓ | None | 3 days | **P1** |
 | Object classification | Medium (false alarms) | Mostly | HOG helps | 1 week | **P1** |
 | Abandoned object | Medium (transport) | ✓ (basic) | Tracking for prod | Done+2w | **P2** |
@@ -327,6 +371,7 @@ device (`/dev/ive`) is only used for the 39 pixel/image ops above.
 | Object class. | | | | | | | ✓ | ✓ | ✓ | | | ✓ | | | | |
 | Abandoned obj | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ | | | ✓ | ✓ | | | | | |
 | Plate region | | | ✓ | | | | ✓ | | ✓ | ✓ | ✓ | | | | | |
+| QR detection | | | ✓ | | | | ✓ | | | ✓ | ✓ | | | | | |
 | Optical flow | | | | | | | | | | | | | | | ✓ | ✓ |
 | KCF tracking | ✓ | ✓ | ✓ | | | | | | | | | | | | | |
 
@@ -352,6 +397,7 @@ Real board MPI test (test-ive-mpi.c):       34/34 pass
 - `qemu-boot/test-ive-mpi.c` — real board MPI test suite (34 tests, incl. ML inference)
 - `qemu-boot/test-ive-video-mpi.c` — real board video pipeline (MD + abandoned + LPR)
 - `qemu-boot/test-ive-bytecmp.c` — byte-exact capture for differential testing
+- `qemu-boot/test-qr-ive.c` — IVE-gated QR detection PoC (quirc + IVE benchmark)
 - `qemu-boot/test-canny-capture.c` — Canny byte-identical verification tool
 - Majestic motion detection: `~/git/majestic/src/hisi/mdetect.c`
 - MEVA dataset: [mevadata.org](https://mevadata.org/) (CC BY 4.0)
