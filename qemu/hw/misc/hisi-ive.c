@@ -797,11 +797,10 @@ static void ive_op_dilate(HisiIveState *s)
             uint8_t maxv = 0;
             for (int ky = -2; ky <= 2; ky++) {
                 for (int kx = -2; kx <= 2; kx++) {
-                    int sy = y + ky, sx = x + kx;
-                    if (sy >= 0 && sy < h && sx >= 0 && sx < w) {
-                        uint8_t v = f1[sy * w + sx];
-                        if (v > maxv) maxv = v;
-                    }
+                    int sy = y + ky < 0 ? 0 : (y + ky >= h ? h - 1 : y + ky);
+                    int sx = x + kx < 0 ? 0 : (x + kx >= w ? w - 1 : x + kx);
+                    uint8_t v = f1[sy * w + sx];
+                    if (v > maxv) maxv = v;
                 }
             }
             out[y * w + x] = maxv;
@@ -822,11 +821,10 @@ static void ive_op_erode(HisiIveState *s)
             uint8_t minv = 255;
             for (int ky = -2; ky <= 2; ky++) {
                 for (int kx = -2; kx <= 2; kx++) {
-                    int sy = y + ky, sx = x + kx;
-                    if (sy >= 0 && sy < h && sx >= 0 && sx < w) {
-                        uint8_t v = f1[sy * w + sx];
-                        if (v < minv) minv = v;
-                    }
+                    int sy = y + ky < 0 ? 0 : (y + ky >= h ? h - 1 : y + ky);
+                    int sx = x + kx < 0 ? 0 : (x + kx >= w ? w - 1 : x + kx);
+                    uint8_t v = f1[sy * w + sx];
+                    if (v < minv) minv = v;
                 }
             }
             out[y * w + x] = minv;
