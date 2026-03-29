@@ -161,7 +161,7 @@ typedef struct HisiSoCConfig {
 #define HISI_SOC_ID_19V101      0x35190101
 
 /*
- * V5 generation (Cortex-A7 MP2 + GIC, new 0x11xxxxxx address map, 2025)
+ * V5 generation (Cortex-A7 MP2 + GIC, new 0x11xxxxxx address map, ~2023)
  * Same die, different feature tiers.  Model suffixes:
  *   10B=CV610, 20S=CV613, 00S/20G/00G=unknown IDs (not yet in lab)
  * Also HISI_OT: Hi3516DV500 (0x3516D500), Hi3519DV500 (0x3519D500)

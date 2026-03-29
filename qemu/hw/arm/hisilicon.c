@@ -4,10 +4,8 @@
  * Table-driven: each SoC variant is a HisiSoCConfig struct.
  * One shared init function handles VIC/GIC, peripherals, boot.
  *
- * Currently supported:
- *   hi3516cv300  (V3, ARM926EJ-S + PL190 VIC)
- *   hi3516ev300  (V4, Cortex-A7 + GICv2)
- *   gk7605v100   (Goke rebrand of V4)
+ * 17 machine types across six HiSilicon IPC SoC generations (V1–V5)
+ * plus Goke V4 rebrands.  See roadmap table below for specs & timeline.
  *
  * Copyright (c) 2020-2021, 2026 OpenIPC.
  * Written by Dmitry Ilyin
@@ -50,7 +48,58 @@
 /* ── SoC configuration tables ──────────────────────────────────────── */
 
 /*
- * Hi3516CV100 (V1): ARM926EJ-S + PL190-compatible VIC, oldest generation.
+ * HiSilicon IPC SoC product roadmap — release timeline & key specs
+ * (source: vendor roadmap + OpenIPC firmware CI platform groupings)
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ *  Gen   SoC         Year    CPU                 Video            Tier
+ *  ───── ─────────── ─────── ─────────────────── ──────────────── ─────
+ *  V1    CV100       <2015   ARM926 @550MHz      H.264 1080P@30   2M
+ *  V2    CV200       <2015   ARM926 @550MHz      H.264 960P@30    1M
+ *  V2A   AV100       <2015   A7 @600MHz          H.265 5M@25      5M
+ *        DV100*      <2015   A7 @600MHz          H.265 4M@25      4M
+ *  V3    CV300       ~2017   ARM926 @800MHz      H.265 1080P@30   2M
+ *        EV100*      ~2018   ARM9 @800MHz        H.265 1080P@20   1M
+ *  V3A   3519V101    ~2017   A17@1.2G+A7@800M    H.265 4K@30+2M   4K
+ *        AV200*      ~2017   A17@1.2G+A7@800M    H.265 5M@30      5M
+ *  V3.5  CV500       2018Q4  Dual A7 @1GHz       H.265/264 1080P  2M
+ *        AV300*      2018Q4  Dual A7 @1GHz       H.265/264 4K     4K
+ *        DV300*      2018Q4  Dual A7 @1GHz       H.265/264 4M     4M
+ *  V4    EV200       2018Q4  A7 @900MHz          H.265 3M@20      3M
+ *        EV300       2018Q4  A7 @900MHz          H.265 5M@15      5M
+ *        18EV300     2018Q4  A7 @900MHz          H.265 3M@20      3M
+ *        DV200       2018Q4  A7 @900MHz          H.265 5M@20      5M
+ *  V4g   GK7205V200  2019+   (die-identical V4 — Goke rebrand)
+ *  V5    CV608       ~2023   Dual A7 MP2         H.265 3M         3M
+ *        CV610       ~2023   Dual A7 MP2         H.265 5M         5M
+ *        CV613       ~2023   Dual A7 MP2         H.265 4K         4K
+ *
+ *  Entries marked * share a platform SDK with the line above but are
+ *  not emulated here.  Hi3519A (4K Smart Vision) and Hi3559A (8K,
+ *  2xA73+2xA53) also appear on the roadmap but are not emulated.
+ *
+ * Platform family groupings (same SDK, same address map):
+ *   CV100 platform:  hi3516cv100, hi3518cv100, hi3518ev100
+ *   CV200 platform:  hi3516cv200, hi3518ev200
+ *   AV100 platform:  hi3516av100, hi3516dv100
+ *   CV300 platform:  hi3516cv300, hi3516ev100
+ *   3519V101 platf:  hi3519v101, hi3516av200
+ *   CV500 platform:  hi3516cv500, hi3516av300, hi3516dv300
+ *   EV200 platform:  hi3516ev200, hi3516ev300, hi3518ev300, hi3516dv200
+ *   GK7205V200:      gk7205v200, gk7205v210, gk7205v300, gk7202v300, gk7605v100
+ *
+ * Address map evolution:
+ *   V1/V2/V2A: 0x20xxxxxx peripherals, RAM @ 0x80000000
+ *   V3/V3A:    0x12xxxxxx peripherals, RAM @ 0x80000000
+ *   V3.5:      0x12xxxxxx (variant), GIC @ 0x10301000, RAM @ 0x80000000
+ *   V4:        0x12xxxxxx peripherals, RAM @ 0x40000000
+ *   V5:        0x11xxxxxx peripherals, GIC @ 0x124xxxxx, RAM @ 0x40000000
+ */
+
+/*
+ * Hi3516CV100 (V1): pre-2015, 2M mainstream.  ARM926EJ-S @550MHz.
+ * Video: H.264, 1080P@30fps.  Memory: 64MB DDR2.
+ * Platform family: hi3518cv100, hi3518ev100 (same SDK).
  * VIC at 0x10140000 (not 0x100D0000 like V2).  HISFC350 flash controller
  * (not HiFMC V100) — set fmc_ctrl_base=0 to skip FMC creation.
  * 12 GPIO banks (GPIO0-11).  Single himciv100 SD controller.
@@ -132,8 +181,11 @@ static const HisiSoCConfig hi3516cv100_soc = {
 };
 
 /*
- * Hi3516CV200 (V2): ARM926EJ-S + PL190 VIC, 0x20xxxxxx peripheral space.
- * Also known as Hi3518EV200.  Uses hieth-sf in vendor kernel but FEMAC
+ * Hi3516CV200 (V2): pre-2015, 1M economy.  ARM926EJ-S @550MHz.
+ * Video: H.264, 960P@30fps.  Memory: 32/64MB DDR2 integrated.
+ * Platform family: hi3518ev200 (same die, =hi3516cv200).
+ *
+ * 0x20xxxxxx peripheral space.  Uses hieth-sf in vendor kernel but FEMAC
  * in OpenIPC's 4.9+ kernel.  FMC memory window at 0x58000000 (not 0x14000000).
  */
 static const HisiSoCConfig hi3516cv200_soc = {
@@ -208,9 +260,12 @@ static const HisiSoCConfig hi3516cv200_soc = {
 };
 
 /*
- * Hi3516AV100: V2A generation — Cortex-A7 + GICv2 but with V1/V2-era
- * 0x20xxxxxx peripheral addresses.  Uses HISFC350 flash controller
- * (like CV100) and GMAC (not FEMAC) for Ethernet.
+ * Hi3516AV100 (V2A): pre-2015, 5M professional.  Cortex-A7 @600MHz.
+ * Video: H.265, WDR, 5M@25fps.  First HiSilicon IPC SoC with H.265.
+ * Platform family: hi3516dv100 (4M@25fps, same SDK).
+ *
+ * Cortex-A7 + GICv2 but with V1/V2-era 0x20xxxxxx peripheral addresses.
+ * Uses HISFC350 flash controller (like CV100) and GMAC (not FEMAC).
  * No ARM arch timer — SP804 at 50 MHz is primary clocksource.
  */
 static const HisiSoCConfig hi3516av100_soc = {
@@ -296,6 +351,14 @@ static const HisiSoCConfig hi3516av100_soc = {
     },
 };
 
+/*
+ * Hi3516CV300 (V3): ~2017, 2M mainstream.  ARM926EJ-S @800MHz.
+ * Video: H.265, WDR, 1080P@30fps, 2K fisheye VI.  First ARM9 with H.265.
+ * Platform family: hi3516ev100 (1M, H.265 1080P@20fps, 64MB DRAM, LiteOS).
+ *
+ * New 0x12xxxxxx address map (breaks from V1/V2).
+ * VIC at 0x10040000.  Timer at 24 MHz.
+ */
 static const HisiSoCConfig hi3516cv300_soc = {
     .name               = "hi3516cv300",
     .desc               = "HiSilicon Hi3516CV300 (ARM926EJ-S)",
@@ -353,9 +416,12 @@ static const HisiSoCConfig hi3516cv300_soc = {
 };
 
 /*
- * Hi3516CV500: "V3.5" generation — Cortex-A7 + GICv2 (like V4),
- * but with a unique peripheral address map distinct from both V3 and V4.
- * RAM at 0x80000000 (like V1-V3), himciv200 MMC (like V3), 40 KB SRAM.
+ * Hi3516CV500 (V3.5): 2018 Q4, 2M mini-smart-vision.  Dual Cortex-A7 @1GHz.
+ * Video: H.265/H.264 codec, 1080P@30fps.  "Mini-Smart Vision Platform."
+ * Platform family: hi3516av300 (4K), hi3516dv300 (4M@30fps, same SDK).
+ *
+ * Cortex-A7 + GICv2 (like V4), but unique peripheral address map distinct
+ * from both V3 and V4.  RAM at 0x80000000 (like V1-V3), himciv200 MMC, 40 KB SRAM.
  */
 static const HisiSoCConfig hi3516cv500_soc = {
     .name               = "hi3516cv500",
@@ -445,8 +511,14 @@ static const HisiSoCConfig hi3516cv500_soc = {
 };
 
 /*
- * Hi3519V101: V3A generation — Cortex-A7/A17 big.LITTLE + GICv2,
- * V3-era peripheral addresses (0x121xxxxx UARTs/SPI/GPIO like CV300).
+ * Hi3519V101 (V3A): ~2017, 4K professional.
+ * CPU: Cortex-A17 @1.25GHz + Cortex-A7 @800MHz (big.LITTLE).
+ * Video: H.265, 4-frame WDR, 4K@30fps + 2M@30fps simultaneous.
+ * Sensor: dual input, max 16M pixels combined.
+ * Platform family: hi3516av200 (5M@30fps+720P@30fps, same big.LITTLE).
+ *
+ * V3A generation — big.LITTLE + GICv2, V3-era peripheral addresses
+ * (0x121xxxxx UARTs/SPI/GPIO like CV300).
  * Uses GMAC (not FEMAC) for Ethernet; GMAC not yet emulated.
  */
 static const HisiSoCConfig hi3519v101_soc = {
@@ -536,6 +608,13 @@ static const HisiSoCConfig hi3519v101_soc = {
     },
 };
 
+/*
+ * Hi3516EV300 (V4): 2019, 5M professional.  Cortex-A7 @900MHz.
+ * Video: H.265/H.264, 5M(2592x1944)@15fps / 4M(2688x1520)@25fps.
+ * Memory: 1Gbit DDR3L integrated (128MB).  279-pin TFBGA.
+ * V4 generation — new RAM base at 0x40000000.  SDHCI replaces himciv200.
+ * 10 GPIO groups.  Per-port GIC IRQs (SPI 16+).
+ */
 static const HisiSoCConfig hi3516ev300_soc = {
     .name               = "hi3516ev300",
     .desc               = "HiSilicon Hi3516EV300 (Cortex-A7)",
@@ -607,8 +686,9 @@ static const HisiSoCConfig hi3516ev300_soc = {
 };
 
 /*
- * Hi3516EV200: economy variant — 8 GPIO groups, 64MB DDR2.
- * Same peripheral addresses as EV300.
+ * Hi3516EV200 (V4): 2019, 3M economy.  Cortex-A7 @900MHz.
+ * Video: H.265/H.264, 3M(2304x1296)@20fps.  Memory: 512Mb DDR2 (64MB).
+ * Economy variant — 8 GPIO groups.  Same peripheral addresses as EV300.
  */
 static const HisiSoCConfig hi3516ev200_soc = {
     .name               = "hi3516ev200",
@@ -676,9 +756,11 @@ static const HisiSoCConfig hi3516ev200_soc = {
 };
 
 /*
- * Hi3518EV300: consumer variant — 8 GPIO groups, no integrated FE PHY.
- * FEMAC controller exists but there's no on-chip PHY; boards may have
- * an external PHY or no Ethernet at all.  We still instantiate FEMAC
+ * Hi3518EV300 (V4): 2019, 3M consumer/IoT.  Cortex-A7 @900MHz.
+ * Video: H.265/H.264, 3M(2304x1296)@20fps.  Memory: 512Mb DDR2 (64MB).
+ * No integrated FE PHY — boards need external PHY or go Ethernet-less.
+ * 8 GPIO groups.
+ * FEMAC controller exists but no on-chip PHY; we still instantiate FEMAC
  * so the driver probe succeeds (it just won't link up without a real PHY).
  */
 static const HisiSoCConfig hi3518ev300_soc = {
@@ -747,8 +829,9 @@ static const HisiSoCConfig hi3518ev300_soc = {
 };
 
 /*
- * Hi3516DV200: professional variant — 10 GPIO groups, up to 512MB DDR.
- * Same peripheral layout as EV300, higher video resolution.
+ * Hi3516DV200 (V4): 2019, 5M professional.  Cortex-A7 @900MHz.
+ * Video: H.265/H.264, 5M(3072x1728)@20fps.  Memory: ext DDR3/DDR3L up to 4Gbit.
+ * Professional variant — 10 GPIO groups.  Same peripheral layout as EV300.
  */
 static const HisiSoCConfig hi3516dv200_soc = {
     .name               = "hi3516dv200",
@@ -816,7 +899,10 @@ static const HisiSoCConfig hi3516dv200_soc = {
 };
 
 /*
- * Goke variants — die-identical V4 silicon, only SoC ID differs.
+ * Goke variants (2019+) — die-identical V4 silicon, only SoC ID differs.
+ * GK7205V200 = Hi3516EV200 (1M), GK7205V300 = Hi3516EV300 (3M),
+ * GK7202V300 = Hi3518EV300 (3M), GK7605V100 = Hi3516DV200 (4M).
+ * Also GK7205V210 (not emulated here).
  * Hardware addresses, IRQs, GPIO counts all match the HiSilicon original.
  */
 
@@ -916,7 +1002,10 @@ static const HisiSoCConfig gk7605v100_soc = {
 };
 
 /*
- * V5 family (2025): Hi3516CV608 / CV610 / CV613 — same die, different tiers.
+ * V5 family (~2023): Hi3516CV608 / CV610 / CV613 — Dual Cortex-A7 MP2 + NPU.
+ * Video: H.265/H.264, up to 4K.  New 0x11xxxxxx address map, GIC @ 0x124xxxxx.
+ * NPU: 0.2 TOPS (CV608), 0.5 TOPS (CV610), 1 TOPS (CV613).
+ * Same die, different feature tiers.
  * All share identical peripheral addresses; only SoC ID differs.
  *
  * Datasheet model suffixes → chip IDs (from Section 1.2.14):
@@ -1010,7 +1099,7 @@ static const HisiSoCConfig hi3516cv608_soc = {
 };
 
 /*
- * Hi3516CV610: V5 generation (2025) — Dual Cortex-A7 MP2, GICv2.
+ * Hi3516CV610: V5 generation (~2023) — Dual Cortex-A7 MP2, GICv2.
  * Completely new address map (0x11xxxxxx peripherals, GIC @ 0x124xxxxx).
  * No SP804 timer — uses ARM arch timer exclusively.
  * FEMAC-v2 with integrated FEPHY, "nebula,sdhci" for SD/MMC.
