@@ -1301,6 +1301,56 @@ int main(void) {
         HI_MPI_SYS_MmzFree(stat_data.u64PhyAddr, (HI_VOID *)(HI_UL)stat_data.u64VirAddr);
     }
 
+    /* === ANN_MLP (CPU-only ML in libive.so) === */
+    {
+        IVE_ANN_MLP_MODEL_S ann_model;
+        memset(&ann_model, 0, sizeof(ann_model));
+
+        /* LoadModel with NULL filename → should return ILLEGAL_PARAM */
+        ret = HI_MPI_IVE_ANN_MLP_LoadModel(NULL, &ann_model);
+        int ok_load = (ret != HI_SUCCESS); /* any error means function exists */
+        printf("  %-10s LoadModel(NULL)=0x%x  %s\n", "ann_mlp",
+               ret, ok_load ? "PASS (callable)" : "FAIL");
+        fails += !ok_load;
+
+        /* UnloadModel on zeroed model — should not crash */
+        HI_MPI_IVE_ANN_MLP_UnloadModel(&ann_model);
+        printf("  %-10s UnloadModel  PASS (no crash)\n", "ann_mlp2");
+    }
+
+    /* === SVM (CPU-only ML in libive.so) === */
+    {
+        IVE_SVM_MODEL_S svm_model;
+        memset(&svm_model, 0, sizeof(svm_model));
+
+        ret = HI_MPI_IVE_SVM_LoadModel(NULL, &svm_model);
+        int ok_load = (ret != HI_SUCCESS);
+        printf("  %-10s LoadModel(NULL)=0x%x  %s\n", "svm",
+               ret, ok_load ? "PASS (callable)" : "FAIL");
+        fails += !ok_load;
+
+        HI_MPI_IVE_SVM_UnloadModel(&svm_model);
+        printf("  %-10s UnloadModel  PASS (no crash)\n", "svm2");
+    }
+
+    /* === CNN (CPU-only ML in libive.so) === */
+    {
+        IVE_CNN_MODEL_S cnn_model;
+        memset(&cnn_model, 0, sizeof(cnn_model));
+
+        ret = HI_MPI_IVE_CNN_LoadModel(NULL, &cnn_model);
+        int ok_load = (ret != HI_SUCCESS);
+        printf("  %-10s LoadModel(NULL)=0x%x  %s\n", "cnn",
+               ret, ok_load ? "PASS (callable)" : "FAIL");
+        fails += !ok_load;
+
+        HI_MPI_IVE_CNN_UnloadModel(&cnn_model);
+        printf("  %-10s UnloadModel  PASS (no crash)\n", "cnn2");
+    }
+
+    /* === KCF (not in libive.so on EV200/EV300) === */
+    printf("  %-10s not in libive.so — N/A\n", "kcf");
+
     /* === PerspTrans + Hog: not in libive.so for EV200 SDK === */
     printf("  %-10s not in libive.so — N/A\n", "persp");
     printf("  %-10s not in libive.so — N/A\n", "hog");
@@ -1418,7 +1468,7 @@ int main(void) {
 #endif /* PerspTrans + Hog disabled */
 
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 31 - fails, 31);
+    printf("Result: %d/%d passed\n", 34 - fails, 34);
     printf("========================================\n");
 
 cleanup:

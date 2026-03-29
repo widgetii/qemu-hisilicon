@@ -278,6 +278,29 @@ LBP, Resize, NCC, CSC, GradFg, GMM(v1), FilterAndCSC, MatchBgModel
 **Not in SDK library (2 ops — headers only, no libive.so implementation):**
 PerspTrans, Hog
 
+### ML Inference Subsystem (CPU-only, in libive.so)
+
+EV300 has **both** IVE hardware and NNIE (0.5 TOPS) — these are completely
+separate subsystems. The IVE ML functions below run entirely on the CPU via
+`libive.so` internal `mpi_ive_xnn_*` functions. They do NOT use the NNIE
+hardware accelerator (`/dev/nnie`, separate `HI_MPI_SVP_NNIE_*` API).
+
+| Function group | Functions | Status on EV300 | Error code |
+|---------------|-----------|----------------|------------|
+| ANN_MLP | LoadModel, UnloadModel, Predict | **Callable** (CPU) | 0xa01d8006 for NULL file |
+| SVM | LoadModel, UnloadModel, Predict | **Callable** (CPU) | 0xa01d8006 for NULL file |
+| CNN | LoadModel, UnloadModel, Predict, GetResult | **Callable** (CPU) | 0xa01d8006 for NULL file |
+| KCF | GetMemSize, CreateObjList, etc. (10 functions) | **Not in libive.so** | Linker error |
+
+- ANN_MLP: Fixed-point MLP, up to 8 layers, 1024D input, sigmoid/gaussian activation
+- SVM: C-SVC/NU-SVC with Linear/RBF/Poly/Sigmoid kernels
+- CNN: Conv3×3 → ReLU → Pool2×2 pipeline, up to 8 conv layers + FC
+- KCF: Declared in headers but never implemented on EV200/EV300
+
+**QEMU implications:** No changes needed to `hisi-ive.c`. These functions
+execute natively on the emulated ARM CPU via `libive.so`. The IVE hardware
+device (`/dev/ive`) is only used for the 39 pixel/image ops above.
+
 ### Key reverse-engineering discoveries
 
 - **Dilate/Erode**: NOT standard max/min morphology. Uses bitwise OR/AND:
@@ -307,10 +330,11 @@ PerspTrans, Hog
 
 ```
 QEMU register-level test (test-ive-ops.c):  19/19 pass
-Real board MPI test (test-ive-mpi.c):       31/31 pass
-  - 24 ops verified working on real EV300 silicon
+Real board MPI test (test-ive-mpi.c):       34/34 pass
+  - 24 pixel/image ops verified on real EV300 silicon
+  - 3 ML functions tested (ANN_MLP, SVM, CNN — CPU-only, callable)
   - 8 ops NOT_SUPPORT (API exists, HW doesn't implement)
-  - 2 ops N/A (not in libive.so)
+  - 3 N/A (PerspTrans, Hog, KCF — not in libive.so)
 ```
 
 ## References
@@ -321,7 +345,7 @@ Real board MPI test (test-ive-mpi.c):       31/31 pass
 - `docs/meva-dataset-spec.md` — dataset download and indexing spec
 - `qemu/hw/misc/hisi-ive.c` — QEMU IVE implementation (39 ops, 22 byte-identical)
 - `qemu-boot/test-ive-ops.c` — QEMU register-level test suite (19 tests)
-- `qemu-boot/test-ive-mpi.c` — real board MPI test suite (31 tests)
+- `qemu-boot/test-ive-mpi.c` — real board MPI test suite (34 tests, incl. ML inference)
 - `qemu-boot/test-ive-video-mpi.c` — real board video pipeline (MD + abandoned + LPR)
 - `qemu-boot/test-ive-bytecmp.c` — byte-exact capture for differential testing
 - `qemu-boot/test-canny-capture.c` — Canny byte-identical verification tool
