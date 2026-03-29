@@ -13,6 +13,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <math.h>
 #include "hw/sysbus.h"
 #include "hw/irq.h"
 #include "qemu/log.h"
@@ -116,6 +117,13 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiIveState, HISI_IVE)
 #define IVE_OP_THRESH_S16   18
 #define IVE_OP_THRESH_U16   19
 #define IVE_OP_16BIT_TO_8BIT 20
+#define IVE_OP_ORD_STAT     21
+#define IVE_OP_EQUALIZE_HIST 22
+#define IVE_OP_MAG_AND_ANG  23
+#define IVE_OP_RESIZE       24
+#define IVE_OP_LBP          25
+#define IVE_OP_CANNY_EDGE   26
+#define IVE_OP_CSC          27
 
 /* CCL output structure matches hi_ive.h IVE_CCBLOB_S */
 #define IVE_MAX_REGION_NUM  254
@@ -1058,6 +1066,326 @@ static void ive_op_gmm2(HisiIveState *s)
     g_free(frame);
 }
 
+/* ── Phase 5: Additional operations ──────────────────────────── */
+
+/* OrdStatFilter: 3×3 median/min/max filter */
+static void ive_op_ord_stat(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    uint32_t mode = s->regs[IVE_EXT_MODE / 4] & 0xF;
+    uint8_t *out = g_malloc(w * h);
+    for (uint16_t y = 0; y < h; y++) {
+        for (uint16_t x = 0; x < w; x++) {
+            if (y == 0 || y == h-1 || x == 0 || x == w-1) {
+                out[y*w+x] = f1[y*w+x];
+                continue;
+            }
+            /* Collect 3×3 neighborhood */
+            uint8_t nb[9];
+            int k = 0;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                    nb[k++] = f1[(y+dy)*w+(x+dx)];
+            /* Sort for median (bubble sort on 9 elements) */
+            for (int i = 0; i < 8; i++)
+                for (int j = i+1; j < 9; j++)
+                    if (nb[i] > nb[j]) { uint8_t t = nb[i]; nb[i] = nb[j]; nb[j] = t; }
+            switch (mode) {
+            case 0: out[y*w+x] = nb[4]; break; /* median */
+            case 1: out[y*w+x] = nb[8]; break; /* max */
+            case 2: out[y*w+x] = nb[0]; break; /* min */
+            default: out[y*w+x] = nb[4];
+            }
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(out);
+}
+
+/* EqualizeHist: histogram equalization */
+static void ive_op_equalize_hist(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    /* Build histogram */
+    uint32_t hist[256] = {0};
+    int npix = w * h;
+    for (int i = 0; i < npix; i++) hist[f1[i]]++;
+    /* Build CDF and equalization map */
+    uint8_t map[256];
+    uint32_t cdf = 0;
+    for (int i = 0; i < 256; i++) {
+        cdf += hist[i];
+        map[i] = (uint8_t)((cdf * 255ULL) / npix);
+    }
+    /* Apply map */
+    uint8_t *out = g_malloc(npix);
+    for (int i = 0; i < npix; i++) out[i] = map[f1[i]];
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(out);
+}
+
+/* MagAndAng: gradient magnitude (and optionally angle) */
+static void ive_op_mag_and_ang(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    uint32_t mode = s->regs[IVE_EXT_MODE / 4] & 0xF; /* 0=mag only, 1=mag+ang */
+
+    /* Output: magnitude as U16, optionally angle as U8 */
+    int16_t *mag = g_malloc0(w * h * 2);
+    uint8_t *ang = mode ? g_malloc0(w * h) : NULL;
+
+    for (uint16_t y = 1; y < h-1; y++) {
+        for (uint16_t x = 1; x < w-1; x++) {
+            int gx = -f1[(y-1)*w+x-1] + f1[(y-1)*w+x+1]
+                     -2*f1[y*w+x-1]   + 2*f1[y*w+x+1]
+                     -f1[(y+1)*w+x-1]  + f1[(y+1)*w+x+1];
+            int gy = -f1[(y-1)*w+x-1] - 2*f1[(y-1)*w+x] - f1[(y-1)*w+x+1]
+                     +f1[(y+1)*w+x-1]  + 2*f1[(y+1)*w+x] + f1[(y+1)*w+x+1];
+            int m = abs(gx) + abs(gy); /* approximate magnitude */
+            mag[y*w+x] = (int16_t)(m > 32767 ? 32767 : m);
+            if (ang) {
+                /* Quantize angle to 0-255 (0°-360°) */
+                double a = atan2((double)gy, (double)gx);
+                if (a < 0) a += 2 * 3.14159265358979;
+                ang[y*w+x] = (uint8_t)(a * 255.0 / (2 * 3.14159265358979));
+            }
+        }
+    }
+
+    /* Write magnitude to dst1 (S16) */
+    uint32_t dst1 = s->regs[IVE_DST1_ADDR / 4];
+    uint32_t strides0 = s->regs[IVE_STRIDES_0 / 4];
+    uint16_t ds = (strides0 & 0xFFFF) ? (strides0 & 0xFFFF) : (w * 2);
+    for (uint16_t y = 0; y < h; y++)
+        dma_memory_write(&address_space_memory, dst1 + (uint64_t)y * ds,
+                         mag + y * w, w * 2, MEMTXATTRS_UNSPECIFIED);
+    /* Write angle to dst2 if mode=1 */
+    if (ang) {
+        uint32_t dst2 = s->regs[IVE_SRC2_ADDR / 4]; /* reuse src2 addr as dst2 */
+        for (uint16_t y = 0; y < h; y++)
+            dma_memory_write(&address_space_memory, dst2 + (uint64_t)y * w,
+                             ang + y * w, w, MEMTXATTRS_UNSPECIFIED);
+    }
+
+    g_free(f1); g_free(mag); g_free(ang);
+}
+
+/* Resize: bilinear interpolation */
+static void ive_op_resize(HisiIveState *s)
+{
+    uint32_t dim = s->regs[IVE_DIMENSIONS / 4];
+    uint16_t src_w = dim & 0xFFF, src_h = (dim >> 16) & 0xFFF;
+    /* Dst dimensions from a separate register (use THRESH_HI for dst_w, THRESH_VAL for dst_h) */
+    uint16_t dst_w = s->regs[IVE_THRESH_HI / 4] & 0xFFF;
+    uint16_t dst_h = s->regs[IVE_THRESH_VAL / 4] & 0xFFF;
+    if (!dst_w) dst_w = src_w;
+    if (!dst_h) dst_h = src_h;
+
+    uint32_t src_addr = s->regs[IVE_SRC1_ADDR / 4];
+    uint32_t strides0 = s->regs[IVE_STRIDES_0 / 4];
+    uint16_t src_stride = (strides0 >> 16) ? (strides0 >> 16) : src_w;
+
+    uint8_t *src = g_malloc(src_w * src_h);
+    for (uint16_t y = 0; y < src_h; y++)
+        dma_memory_read(&address_space_memory, src_addr + (uint64_t)y * src_stride,
+                        src + y * src_w, src_w, MEMTXATTRS_UNSPECIFIED);
+
+    uint8_t *dst = g_malloc(dst_w * dst_h);
+    /* Bilinear interpolation */
+    for (uint16_t dy = 0; dy < dst_h; dy++) {
+        float sy = (float)dy * src_h / dst_h;
+        int iy = (int)sy;
+        float fy = sy - iy;
+        if (iy >= src_h - 1) { iy = src_h - 2; fy = 1.0f; }
+        for (uint16_t dx = 0; dx < dst_w; dx++) {
+            float sx = (float)dx * src_w / dst_w;
+            int ix = (int)sx;
+            float fx = sx - ix;
+            if (ix >= src_w - 1) { ix = src_w - 2; fx = 1.0f; }
+            float v = src[iy*src_w+ix]     * (1-fx)*(1-fy)
+                    + src[iy*src_w+ix+1]   * fx*(1-fy)
+                    + src[(iy+1)*src_w+ix] * (1-fx)*fy
+                    + src[(iy+1)*src_w+ix+1] * fx*fy;
+            dst[dy*dst_w+dx] = (uint8_t)(v + 0.5f);
+        }
+    }
+
+    uint32_t dst_addr = s->regs[IVE_DST1_ADDR / 4];
+    uint16_t dst_stride = (strides0 & 0xFFFF) ? (strides0 & 0xFFFF) : dst_w;
+    for (uint16_t y = 0; y < dst_h; y++)
+        dma_memory_write(&address_space_memory, dst_addr + (uint64_t)y * dst_stride,
+                         dst + y * dst_w, dst_w, MEMTXATTRS_UNSPECIFIED);
+    g_free(src); g_free(dst);
+}
+
+/* LBP: Local Binary Pattern (3×3 neighborhood) */
+static void ive_op_lbp(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    uint32_t mode = s->regs[IVE_EXT_MODE / 4] & 0xF;
+    int8_t thr_s = (int8_t)(s->regs[IVE_THRESH_VAL / 4] & 0xFF);
+    uint8_t thr_u = (uint8_t)(s->regs[IVE_THRESH_VAL / 4] & 0xFF);
+
+    uint8_t *out = g_malloc0(w * h);
+    /* 8-neighbor offsets: clockwise from top-left */
+    int dx[8] = {-1, 0, 1, 1, 1, 0, -1, -1};
+    int dy[8] = {-1, -1, -1, 0, 1, 1, 1, 0};
+
+    for (uint16_t y = 1; y < h-1; y++) {
+        for (uint16_t x = 1; x < w-1; x++) {
+            uint8_t center = f1[y*w+x];
+            uint8_t code = 0;
+            for (int k = 0; k < 8; k++) {
+                int neighbor = f1[(y+dy[k])*w+(x+dx[k])];
+                int s_bit;
+                if (mode == 0) { /* normal: P(x)-P(center) >= thr */
+                    s_bit = ((int)neighbor - (int)center) >= (int)thr_s ? 1 : 0;
+                } else { /* abs: |P(x)-P(center)| >= thr */
+                    s_bit = abs((int)neighbor - (int)center) >= (int)thr_u ? 1 : 0;
+                }
+                code |= (s_bit << k);
+            }
+            out[y*w+x] = code;
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(out);
+}
+
+/* CannyEdge: Sobel + NMS + hysteresis thresholding */
+static void ive_op_canny_edge(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint8_t *f1;
+    ive_read_frames(s, &f1, NULL, &w, &h);
+    uint16_t lo_thr = s->regs[IVE_THRESH_VAL / 4] & 0xFFFF;
+    uint16_t hi_thr = s->regs[IVE_THRESH_HI / 4] & 0xFFFF;
+
+    /* 1. Sobel gradients */
+    int16_t *gx = g_malloc0(w * h * 2);
+    int16_t *gy = g_malloc0(w * h * 2);
+    uint16_t *mag = g_malloc0(w * h * 2);
+
+    for (uint16_t y = 1; y < h-1; y++) {
+        for (uint16_t x = 1; x < w-1; x++) {
+            gx[y*w+x] = -f1[(y-1)*w+x-1] + f1[(y-1)*w+x+1]
+                         -2*f1[y*w+x-1]   + 2*f1[y*w+x+1]
+                         -f1[(y+1)*w+x-1]  + f1[(y+1)*w+x+1];
+            gy[y*w+x] = -f1[(y-1)*w+x-1] - 2*f1[(y-1)*w+x] - f1[(y-1)*w+x+1]
+                         +f1[(y+1)*w+x-1]  + 2*f1[(y+1)*w+x] + f1[(y+1)*w+x+1];
+            mag[y*w+x] = abs(gx[y*w+x]) + abs(gy[y*w+x]);
+        }
+    }
+
+    /* 2. Non-Maximum Suppression */
+    uint8_t *nms = g_malloc0(w * h);
+    for (uint16_t y = 2; y < h-2; y++) {
+        for (uint16_t x = 2; x < w-2; x++) {
+            uint16_t m = mag[y*w+x];
+            if (m < lo_thr) continue;
+            /* Determine gradient direction (4 sectors) */
+            int ax = abs(gx[y*w+x]), ay = abs(gy[y*w+x]);
+            uint16_t n1, n2;
+            if (ay > 2 * ax) { /* vertical */
+                n1 = mag[(y-1)*w+x]; n2 = mag[(y+1)*w+x];
+            } else if (ax > 2 * ay) { /* horizontal */
+                n1 = mag[y*w+x-1]; n2 = mag[y*w+x+1];
+            } else if ((gx[y*w+x] > 0) == (gy[y*w+x] > 0)) { /* diagonal \ */
+                n1 = mag[(y-1)*w+x-1]; n2 = mag[(y+1)*w+x+1];
+            } else { /* diagonal / */
+                n1 = mag[(y-1)*w+x+1]; n2 = mag[(y+1)*w+x-1];
+            }
+            if (m >= n1 && m >= n2)
+                nms[y*w+x] = (m >= hi_thr) ? 255 : 128; /* strong or weak */
+        }
+    }
+
+    /* 3. Hysteresis: weak edges connected to strong edges become strong */
+    uint8_t *out = g_malloc0(w * h);
+    memcpy(out, nms, w * h);
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (uint16_t y = 1; y < h-1; y++)
+            for (uint16_t x = 1; x < w-1; x++) {
+                if (out[y*w+x] != 128) continue;
+                /* Check 8-neighbors for strong edge */
+                for (int dy2 = -1; dy2 <= 1; dy2++)
+                    for (int dx2 = -1; dx2 <= 1; dx2++)
+                        if (out[(y+dy2)*w+(x+dx2)] == 255) {
+                            out[y*w+x] = 255; changed = 1;
+                            goto next_pixel;
+                        }
+                next_pixel:;
+            }
+    }
+    /* Remove weak edges that didn't connect */
+    for (int i = 0; i < w * h; i++)
+        if (out[i] == 128) out[i] = 0;
+
+    ive_write_frame(s, out, w, h);
+    g_free(f1); g_free(gx); g_free(gy); g_free(mag); g_free(nms); g_free(out);
+}
+
+/* CSC: Color Space Conversion (YUV420SP→RGB only for now) */
+static void ive_op_csc(HisiIveState *s)
+{
+    uint32_t dim = s->regs[IVE_DIMENSIONS / 4];
+    uint16_t w = dim & 0xFFF, h = (dim >> 16) & 0xFFF;
+    /* mode selects BT.601/709 and YUV↔RGB — simplified to BT.601 full-range */
+    (void)s->regs[IVE_EXT_MODE / 4]; /* mode — future use */
+    uint32_t src_addr = s->regs[IVE_SRC1_ADDR / 4];
+    uint32_t strides0 = s->regs[IVE_STRIDES_0 / 4];
+    uint16_t src_stride = (strides0 >> 16) ? (strides0 >> 16) : w;
+
+    /* Read Y plane */
+    uint8_t *y_plane = g_malloc(w * h);
+    for (uint16_t y = 0; y < h; y++)
+        dma_memory_read(&address_space_memory, src_addr + (uint64_t)y * src_stride,
+                        y_plane + y * w, w, MEMTXATTRS_UNSPECIFIED);
+
+    /* Read UV plane (420SP: half resolution, interleaved U/V) */
+    uint32_t uv_addr = src_addr + src_stride * h;
+    uint8_t *uv_plane = g_malloc(w * (h / 2));
+    for (uint16_t y = 0; y < h / 2; y++)
+        dma_memory_read(&address_space_memory, uv_addr + (uint64_t)y * src_stride,
+                        uv_plane + y * w, w, MEMTXATTRS_UNSPECIFIED);
+
+    /* Convert to RGB (BT.601 full-range) */
+    uint8_t *rgb = g_malloc(w * h * 3);
+    for (uint16_t py = 0; py < h; py++) {
+        for (uint16_t px = 0; px < w; px++) {
+            int Y = y_plane[py * w + px];
+            int U = uv_plane[(py/2) * w + (px & ~1)] - 128;
+            int V = uv_plane[(py/2) * w + (px | 1)] - 128;
+            int R = Y + ((359 * V) >> 8);
+            int G = Y - ((88 * U + 183 * V) >> 8);
+            int B = Y + ((454 * U) >> 8);
+            int idx = (py * w + px) * 3;
+            rgb[idx+0] = (uint8_t)clamp_i32(R, 0, 255);
+            rgb[idx+1] = (uint8_t)clamp_i32(G, 0, 255);
+            rgb[idx+2] = (uint8_t)clamp_i32(B, 0, 255);
+        }
+    }
+
+    /* Write RGB output (packed U8C3) */
+    uint32_t dst_addr = s->regs[IVE_DST1_ADDR / 4];
+    uint16_t dst_stride = (strides0 & 0xFFFF) ? (strides0 & 0xFFFF) : (w * 3);
+    for (uint16_t y = 0; y < h; y++)
+        dma_memory_write(&address_space_memory, dst_addr + (uint64_t)y * dst_stride,
+                         rgb + y * w * 3, w * 3, MEMTXATTRS_UNSPECIFIED);
+
+    g_free(y_plane); g_free(uv_plane); g_free(rgb);
+}
+
 /* ── Fire handler ─────────────────────────────────────────────── */
 
 static void ive_fire(HisiIveState *s)
@@ -1086,6 +1414,13 @@ static void ive_fire(HisiIveState *s)
     case IVE_OP_THRESH_S16:    ive_op_thresh_s16(s); break;
     case IVE_OP_THRESH_U16:    ive_op_thresh_u16(s); break;
     case IVE_OP_16BIT_TO_8BIT: ive_op_16bit_to_8bit(s); break;
+    case IVE_OP_ORD_STAT:      ive_op_ord_stat(s); break;
+    case IVE_OP_EQUALIZE_HIST: ive_op_equalize_hist(s); break;
+    case IVE_OP_MAG_AND_ANG:   ive_op_mag_and_ang(s); break;
+    case IVE_OP_RESIZE:        ive_op_resize(s); break;
+    case IVE_OP_LBP:           ive_op_lbp(s); break;
+    case IVE_OP_CANNY_EDGE:    ive_op_canny_edge(s); break;
+    case IVE_OP_CSC:           ive_op_csc(s); break;
     default:
         qemu_log_mask(LOG_UNIMP, "hisi-ive: unimplemented op_type %d\n",
                       op_type);

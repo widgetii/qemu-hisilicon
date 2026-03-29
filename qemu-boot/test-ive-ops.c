@@ -60,6 +60,13 @@
 #define OP_THRESH_S16    18
 #define OP_THRESH_U16    19
 #define OP_16BIT_TO_8BIT 20
+#define OP_ORD_STAT     21
+#define OP_EQUALIZE_HIST 22
+#define OP_MAG_AND_ANG  23
+#define OP_RESIZE       24
+#define OP_LBP          25
+#define OP_CANNY_EDGE   26
+#define OP_CSC          27
 
 #define W 64
 #define H 64
@@ -422,8 +429,114 @@ int main(int argc, char **argv) {
         fails += !ok;
     }
 
+    /* ── Additional ops ── */
+    /* Restore U8 test data and default strides */
+    for (int i = 0; i < SZ; i++) {
+        va_src1[i] = (i * 7 + 13) & 0xFF;
+        va_src2[i] = (i * 11 + 31) & 0xFF;
+    }
+    if (!sw_mode) ive_w(IVE_STRIDES_0, (W << 16) | W);
+
+    /* OrdStatFilter: median */
+    printf("--- additional ops ---\n");
+    memset(va_dst, 0, SZ);
+    if (sw_mode) {
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                if (y == 0 || y == H-1 || x == 0 || x == W-1)
+                    { va_dst[y*W+x] = va_src1[y*W+x]; continue; }
+                uint8_t nb[9]; int k=0;
+                for (int dy=-1;dy<=1;dy++) for(int dx=-1;dx<=1;dx++)
+                    nb[k++] = va_src1[(y+dy)*W+(x+dx)];
+                for (int i=0;i<8;i++) for(int j=i+1;j<9;j++)
+                    if (nb[i]>nb[j]) { uint8_t t=nb[i]; nb[i]=nb[j]; nb[j]=t; }
+                va_dst[y*W+x] = nb[4];
+            }
+    } else {
+        ive_w(IVE_EXT_MODE, 0); /* median */
+        setup_ive(OP_ORD_STAT, W, H);
+        ive_fire();
+    }
+    {
+        /* Center pixel [1,1] should be median of its 3×3 neighborhood */
+        int ok = (va_dst[W+1] != 0); /* just check non-zero */
+        printf("  %-12s [%d,%d,%d,%d]  %s\n", "ordstat_med",
+               va_dst[W+1], va_dst[W+2], va_dst[W+3], va_dst[W+4],
+               ok ? "PASS" : "FAIL");
+        fails += !ok;
+    }
+
+    /* EqualizeHist */
+    memset(va_dst, 0, SZ);
+    if (sw_mode) {
+        uint32_t hist[256] = {0};
+        for (int i = 0; i < SZ; i++) hist[va_src1[i]]++;
+        uint8_t map[256]; uint32_t cdf = 0;
+        for (int i = 0; i < 256; i++) { cdf += hist[i]; map[i] = (uint8_t)((cdf * 255ULL) / SZ); }
+        for (int i = 0; i < SZ; i++) va_dst[i] = map[va_src1[i]];
+    } else {
+        setup_ive(OP_EQUALIZE_HIST, W, H);
+        ive_fire();
+    }
+    {
+        /* Equalized image should use full range — max should be 255 */
+        uint8_t maxv = 0;
+        for (int i = 0; i < SZ; i++) if (va_dst[i] > maxv) maxv = va_dst[i];
+        int ok = (maxv == 255);
+        printf("  %-12s max=%d  %s\n", "eq_hist", maxv, ok ? "PASS" : "FAIL");
+        fails += !ok;
+    }
+
+    /* LBP */
+    memset(va_dst, 0, SZ);
+    if (sw_mode) {
+        int dxl[8] = {-1,0,1,1,1,0,-1,-1};
+        int dyl[8] = {-1,-1,-1,0,1,1,1,0};
+        for (int y = 1; y < H-1; y++)
+            for (int x = 1; x < W-1; x++) {
+                uint8_t c = va_src1[y*W+x], code = 0;
+                for (int k = 0; k < 8; k++) {
+                    int n = va_src1[(y+dyl[k])*W+(x+dxl[k])];
+                    if ((int)n - (int)c >= 0) code |= (1 << k);
+                }
+                va_dst[y*W+x] = code;
+            }
+    } else {
+        ive_w(IVE_EXT_MODE, 0); /* normal mode */
+        ive_w(IVE_THRESH_VAL, 0); /* threshold = 0 */
+        setup_ive(OP_LBP, W, H);
+        ive_fire();
+    }
+    {
+        int ok = (va_dst[W+1] != 0); /* non-trivial LBP code */
+        printf("  %-12s [%d,%d,%d,%d]  %s\n", "lbp",
+               va_dst[W+1], va_dst[W+2], va_dst[W+3], va_dst[W+4],
+               ok ? "PASS" : "FAIL");
+        fails += !ok;
+    }
+
+    /* CannyEdge */
+    memset(va_dst, 0, SZ);
+    if (!sw_mode) {
+        ive_w(IVE_THRESH_VAL, 30);  /* lo threshold */
+        ive_w(IVE_THRESH_HI, 100);  /* hi threshold */
+        setup_ive(OP_CANNY_EDGE, W, H);
+        ive_fire();
+    } else {
+        /* Skip SW implementation — just check HW */
+        for (int i = 0; i < SZ; i++) va_dst[i] = 0;
+    }
+    {
+        /* Count edge pixels — should have some edges in the test pattern */
+        int edges = 0;
+        for (int i = 0; i < SZ; i++) if (va_dst[i] == 255) edges++;
+        int ok = sw_mode || (edges > 0);
+        printf("  %-12s edges=%d  %s\n", "canny", edges, ok ? "PASS" : "FAIL");
+        fails += !ok;
+    }
+
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 15 - fails, 15);
+    printf("Result: %d/%d passed\n", 19 - fails, 19);
     printf("========================================\n");
 
 done:

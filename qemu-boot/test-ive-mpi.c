@@ -435,8 +435,92 @@ int main(void) {
         HI_MPI_SYS_MmzFree(s16_img.au64PhyAddr[0], (HI_VOID *)(HI_UL)s16_img.au64VirAddr[0]);
     }
 
+    /* === OrdStatFilter (median) === */
+    {
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        IVE_ORD_STAT_FILTER_CTRL_S osf_ctrl = { .enMode = IVE_ORD_STAT_FILTER_MODE_MEDIAN };
+        ret = HI_MPI_IVE_OrdStatFilter(&handle, &src1, &dst, &osf_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        read_image(&dst, result, SZ);
+        int ok = (ret == HI_SUCCESS && result[W+1] != 0);
+        printf("  %-10s [%d,%d,%d,%d]  %s\n", "ordstat",
+               result[W+1], result[W+2], result[W+3], result[W+4],
+               ok ? "PASS" : "FAIL");
+        fails += !ok;
+    }
+
+    /* === EqualizeHist === */
+    {
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        IVE_MEM_INFO_S eq_mem;
+        memset(&eq_mem, 0, sizeof(eq_mem));
+        eq_mem.u32Size = 256 * 4 + 256; /* hist + map */
+        HI_MPI_SYS_MmzAlloc(&eq_mem.u64PhyAddr, (HI_VOID **)&eq_mem.u64VirAddr,
+                             NULL, HI_NULL, eq_mem.u32Size);
+        IVE_EQUALIZE_HIST_CTRL_S eq_ctrl = { .stMem = eq_mem };
+        ret = HI_MPI_IVE_EqualizeHist(&handle, &src1, &dst, &eq_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        read_image(&dst, result, SZ);
+        uint8_t maxv = 0;
+        for (int i = 0; i < SZ; i++) if (result[i] > maxv) maxv = result[i];
+        int ok = (ret == HI_SUCCESS && maxv >= 250);
+        printf("  %-10s max=%d  %s\n", "eq_hist", maxv, ok ? "PASS" : "FAIL");
+        fails += !ok;
+        HI_MPI_SYS_MmzFree(eq_mem.u64PhyAddr, (HI_VOID *)(HI_UL)eq_mem.u64VirAddr);
+    }
+
+    /* === LBP === */
+    {
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        IVE_LBP_CTRL_S lbp_ctrl = { .enMode = IVE_LBP_CMP_MODE_NORMAL };
+        lbp_ctrl.un8BitThr.s8Val = 0;
+        ret = HI_MPI_IVE_LBP(&handle, &src1, &dst, &lbp_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        read_image(&dst, result, SZ);
+        int ok = (ret == HI_SUCCESS && result[W+1] != 0);
+        printf("  %-10s [%d,%d,%d,%d]  %s\n", "lbp",
+               result[W+1], result[W+2], result[W+3], result[W+4],
+               ok ? "PASS" : "FAIL");
+        fails += !ok;
+    }
+
+    /* === CannyHysEdge + CannyEdge === */
+    {
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        IVE_MEM_INFO_S canny_mem;
+        memset(&canny_mem, 0, sizeof(canny_mem));
+        canny_mem.u32Size = W * H * 4 + 16;
+        HI_MPI_SYS_MmzAlloc(&canny_mem.u64PhyAddr, (HI_VOID **)&canny_mem.u64VirAddr,
+                             NULL, HI_NULL, canny_mem.u32Size);
+        IVE_DST_MEM_INFO_S canny_stack;
+        memset(&canny_stack, 0, sizeof(canny_stack));
+        canny_stack.u32Size = W * H * 8;
+        HI_MPI_SYS_MmzAlloc(&canny_stack.u64PhyAddr, (HI_VOID **)&canny_stack.u64VirAddr,
+                             NULL, HI_NULL, canny_stack.u32Size);
+        HI_S8 canny_mask[25] = {0,0,0,0,0, 0,-1,0,1,0, 0,-2,0,2,0, 0,-1,0,1,0, 0,0,0,0,0};
+        IVE_CANNY_HYS_EDGE_CTRL_S canny_ctrl = {
+            .stMem = canny_mem, .u16LowThr = 30, .u16HighThr = 100
+        };
+        memcpy(canny_ctrl.as8Mask, canny_mask, 25);
+        ret = HI_MPI_IVE_CannyHysEdge(&handle, &src1, &dst, &canny_stack,
+                                        &canny_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        /* Part 2: edge tracing */
+        if (ret == HI_SUCCESS) {
+            ret = HI_MPI_IVE_CannyEdge(&dst, &canny_stack);
+        }
+        read_image(&dst, result, SZ);
+        int edges = 0;
+        for (int i = 0; i < SZ; i++) if (result[i] == 255) edges++;
+        int ok = (ret == HI_SUCCESS && edges > 0);
+        printf("  %-10s edges=%d  %s\n", "canny", edges, ok ? "PASS" : "FAIL");
+        fails += !ok;
+        HI_MPI_SYS_MmzFree(canny_mem.u64PhyAddr, (HI_VOID *)(HI_UL)canny_mem.u64VirAddr);
+        HI_MPI_SYS_MmzFree(canny_stack.u64PhyAddr, (HI_VOID *)(HI_UL)canny_stack.u64VirAddr);
+    }
+
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 12 - fails, 12);
+    printf("Result: %d/%d passed\n", 16 - fails, 16);
     printf("========================================\n");
 
 cleanup:
