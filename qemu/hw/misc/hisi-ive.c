@@ -1260,7 +1260,15 @@ static void ive_op_lbp(HisiIveState *s)
     g_free(f1); g_free(out);
 }
 
-/* CannyEdge: Sobel + NMS + hysteresis thresholding */
+/* CannyEdge: 5×5 gradient (from mask register) + NMS + hysteresis
+ *
+ * Matches real hardware CannyHysEdge + CannyEdge two-step pipeline:
+ * 1. Apply 5×5 mask as horizontal gradient kernel, transpose as vertical
+ * 2. Compute magnitude = |gx| + |gy|
+ * 3. Non-Maximum Suppression (strict: m > both neighbors)
+ * 4. Double threshold: strong (>= hi_thr) and weak (>= lo_thr)
+ * 5. Hysteresis: weak edges connected to strong edges → strong
+ */
 static void ive_op_canny_edge(HisiIveState *s)
 {
     uint16_t w, h;
@@ -1269,70 +1277,107 @@ static void ive_op_canny_edge(HisiIveState *s)
     uint16_t lo_thr = s->regs[IVE_THRESH_VAL / 4] & 0xFFFF;
     uint16_t hi_thr = s->regs[IVE_THRESH_HI / 4] & 0xFFFF;
 
-    /* 1. Sobel gradients */
+    /* Read 5×5 mask from registers (same location as Sobel/Filter) */
+    int8_t mask_h[25];
+    uint32_t mask_addr = s->regs[IVE_OP_DESC / 4];
+    if (mask_addr) {
+        dma_memory_read(&address_space_memory, mask_addr,
+                        mask_h, 25, MEMTXATTRS_UNSPECIFIED);
+    } else {
+        /* Default: Sobel horizontal 3×3 embedded in 5×5 */
+        int8_t def[25] = {0,0,0,0,0, 0,-1,0,1,0, 0,-2,0,2,0, 0,-1,0,1,0, 0,0,0,0,0};
+        memcpy(mask_h, def, 25);
+    }
+    /* Transpose mask for vertical gradient */
+    int8_t mask_v[25];
+    for (int r = 0; r < 5; r++)
+        for (int c = 0; c < 5; c++)
+            mask_v[r * 5 + c] = mask_h[c * 5 + r];
+
+    /* 1. Apply 5×5 gradient kernels */
     int16_t *gx = g_malloc0(w * h * 2);
     int16_t *gy = g_malloc0(w * h * 2);
     uint16_t *mag = g_malloc0(w * h * 2);
 
-    for (uint16_t y = 1; y < h-1; y++) {
-        for (uint16_t x = 1; x < w-1; x++) {
-            gx[y*w+x] = -f1[(y-1)*w+x-1] + f1[(y-1)*w+x+1]
-                         -2*f1[y*w+x-1]   + 2*f1[y*w+x+1]
-                         -f1[(y+1)*w+x-1]  + f1[(y+1)*w+x+1];
-            gy[y*w+x] = -f1[(y-1)*w+x-1] - 2*f1[(y-1)*w+x] - f1[(y-1)*w+x+1]
-                         +f1[(y+1)*w+x-1]  + 2*f1[(y+1)*w+x] + f1[(y+1)*w+x+1];
-            mag[y*w+x] = abs(gx[y*w+x]) + abs(gy[y*w+x]);
+    for (uint16_t y = 2; y < h - 2; y++) {
+        for (uint16_t x = 2; x < w - 2; x++) {
+            int sumx = 0, sumy = 0;
+            for (int ky = -2; ky <= 2; ky++)
+                for (int kx = -2; kx <= 2; kx++) {
+                    uint8_t pixel = f1[(y + ky) * w + (x + kx)];
+                    sumx += pixel * mask_h[(ky + 2) * 5 + (kx + 2)];
+                    sumy += pixel * mask_v[(ky + 2) * 5 + (kx + 2)];
+                }
+            gx[y * w + x] = sumx;
+            gy[y * w + x] = sumy;
+            mag[y * w + x] = abs(sumx) + abs(sumy);
         }
     }
 
-    /* 2. Non-Maximum Suppression */
+    /* 2. Non-Maximum Suppression (strict comparison to match HW) */
     uint8_t *nms = g_malloc0(w * h);
-    for (uint16_t y = 2; y < h-2; y++) {
-        for (uint16_t x = 2; x < w-2; x++) {
-            uint16_t m = mag[y*w+x];
+    for (uint16_t y = 3; y < h - 3; y++) {
+        for (uint16_t x = 3; x < w - 3; x++) {
+            uint16_t m = mag[y * w + x];
             if (m < lo_thr) continue;
-            /* Determine gradient direction (4 sectors) */
-            int ax = abs(gx[y*w+x]), ay = abs(gy[y*w+x]);
+
+            int ax = abs(gx[y * w + x]);
+            int ay = abs(gy[y * w + x]);
             uint16_t n1, n2;
-            if (ay > 2 * ax) { /* vertical */
-                n1 = mag[(y-1)*w+x]; n2 = mag[(y+1)*w+x];
-            } else if (ax > 2 * ay) { /* horizontal */
-                n1 = mag[y*w+x-1]; n2 = mag[y*w+x+1];
-            } else if ((gx[y*w+x] > 0) == (gy[y*w+x] > 0)) { /* diagonal \ */
-                n1 = mag[(y-1)*w+x-1]; n2 = mag[(y+1)*w+x+1];
-            } else { /* diagonal / */
-                n1 = mag[(y-1)*w+x+1]; n2 = mag[(y+1)*w+x-1];
+
+            if (ay > 2 * ax) {
+                n1 = mag[(y - 1) * w + x];
+                n2 = mag[(y + 1) * w + x];
+            } else if (ax > 2 * ay) {
+                n1 = mag[y * w + x - 1];
+                n2 = mag[y * w + x + 1];
+            } else if ((gx[y * w + x] > 0) == (gy[y * w + x] > 0)) {
+                n1 = mag[(y - 1) * w + x - 1];
+                n2 = mag[(y + 1) * w + x + 1];
+            } else {
+                n1 = mag[(y - 1) * w + x + 1];
+                n2 = mag[(y + 1) * w + x - 1];
             }
-            if (m >= n1 && m >= n2)
-                nms[y*w+x] = (m >= hi_thr) ? 255 : 128; /* strong or weak */
+
+            /* Strict: must be strictly greater than both neighbors */
+            if (m > n1 && m > n2)
+                nms[y * w + x] = (m >= hi_thr) ? 255 : 128;
         }
     }
 
-    /* 3. Hysteresis: weak edges connected to strong edges become strong */
+    /* 3. Hysteresis: stack-based edge tracing (matches HW CannyEdge) */
     uint8_t *out = g_malloc0(w * h);
-    memcpy(out, nms, w * h);
-    int changed = 1;
-    while (changed) {
-        changed = 0;
-        for (uint16_t y = 1; y < h-1; y++)
-            for (uint16_t x = 1; x < w-1; x++) {
-                if (out[y*w+x] != 128) continue;
-                /* Check 8-neighbors for strong edge */
-                for (int dy2 = -1; dy2 <= 1; dy2++)
-                    for (int dx2 = -1; dx2 <= 1; dx2++)
-                        if (out[(y+dy2)*w+(x+dx2)] == 255) {
-                            out[y*w+x] = 255; changed = 1;
-                            goto next_pixel;
-                        }
-                next_pixel:;
+
+    /* Stack for strong edge propagation */
+    typedef struct { uint16_t x, y; } Point;
+    Point *stack = g_malloc(w * h * sizeof(Point));
+    int sp = 0;
+
+    /* Seed stack with all strong edges */
+    for (uint16_t y = 0; y < h; y++)
+        for (uint16_t x = 0; x < w; x++)
+            if (nms[y * w + x] == 255) {
+                out[y * w + x] = 255;
+                stack[sp++] = (Point){x, y};
+            }
+
+    /* Trace: connect weak edges adjacent to strong edges */
+    while (sp > 0) {
+        Point p = stack[--sp];
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                int nx = p.x + dx, ny = p.y + dy;
+                if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                if (nms[ny * w + nx] == 128 && out[ny * w + nx] == 0) {
+                    out[ny * w + nx] = 255;
+                    stack[sp++] = (Point){nx, ny};
+                }
             }
     }
-    /* Remove weak edges that didn't connect */
-    for (int i = 0; i < w * h; i++)
-        if (out[i] == 128) out[i] = 0;
 
     ive_write_frame(s, out, w, h);
-    g_free(f1); g_free(gx); g_free(gy); g_free(mag); g_free(nms); g_free(out);
+    g_free(f1); g_free(gx); g_free(gy); g_free(mag);
+    g_free(nms); g_free(out); g_free(stack);
 }
 
 /* CSC: Color Space Conversion (YUV420SP→RGB only for now) */

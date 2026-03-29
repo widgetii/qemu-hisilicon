@@ -518,12 +518,15 @@ int main(int argc, char **argv) {
     /* CannyEdge */
     memset(va_dst, 0, SZ);
     if (!sw_mode) {
+        /* Write 5×5 Sobel mask to src2 memory (reuse as mask storage) */
+        int8_t canny_mask[25] = {0,0,0,0,0, 0,-1,0,1,0, 0,-2,0,2,0, 0,-1,0,1,0, 0,0,0,0,0};
+        memcpy(va_src2, canny_mask, 25);
+        ive_w(0x0010, pa_src2);     /* OP_DESC = physical addr of mask */
         ive_w(IVE_THRESH_VAL, 30);  /* lo threshold */
         ive_w(IVE_THRESH_HI, 100);  /* hi threshold */
         setup_ive(OP_CANNY_EDGE, W, H);
         ive_fire();
     } else {
-        /* Skip SW implementation — just check HW */
         for (int i = 0; i < SZ; i++) va_dst[i] = 0;
     }
     {
