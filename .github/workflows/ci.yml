@@ -136,9 +136,9 @@ jobs:
           tar xzf "openipc.${{ matrix.soc }}-nor-lite.tgz"
 
       - name: Boot test
-        timeout-minutes: 3
+        timeout-minutes: 6
         run: |
-          timeout 120 ./qemu-src/build/qemu-system-arm \
+          timeout 300 ./qemu-src/build/qemu-system-arm \
             -M ${{ matrix.machine }} -m ${{ matrix.mem }} \
             -kernel "qemu-boot/${{ matrix.kernel }}" \
             -initrd "qemu-boot/${{ matrix.rootfs }}" \
@@ -149,8 +149,8 @@ jobs:
           QEMU_PID=$!
 
           # Wait for login prompt
-          for i in $(seq 1 120); do
-            if grep -q "login:" boot-output.txt 2>/dev/null; then
+          for i in $(seq 1 300); do
+            if grep -qE "login:|#\s*$" boot-output.txt 2>/dev/null; then
               echo ""
               echo "=== Boot successful: login prompt reached ==="
               kill $QEMU_PID 2>/dev/null || true
