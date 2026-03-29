@@ -35,16 +35,24 @@ typedef struct {
  * Used for input/output tensors in forward pass.
  * Max 16 src blobs, 16 dst blobs.
  *
- * Field layout partially known from error messages:
- *   - blob_type / entype: data format
- *   - u32Chn: channels
- *   - u32Width, u32Height: spatial dims
- *   - u32Stride: row stride
- *   - u64PhyAddr, u64VirAddr: buffer addresses
+ * Decoded from LD_PRELOAD ioctl hook capturing live hi_ivp_process_ex() calls.
+ * First forward_slice blob for 640x360 YUV420SP input:
+ *   08: type=2  0C: w=640  10: virt  14: ???  18: phys=0x42480000
+ *   20: num=1   28: stride=640  2C: h=360  30: channels=3
  */
 typedef struct {
-    HI_U8 data[48]; /* opaque until fully mapped */
-} IVE_XNN_BLOB_S;
+    HI_U32 blob_type;      /* 0x00: data type enum (2 = YUV420SP?) */
+    HI_U32 u32Width;       /* 0x04: width in pixels */
+    HI_U32 u32VirAddr;     /* 0x08: virtual address (32-bit on ARM32) */
+    HI_U32 reserved0;      /* 0x0C: unknown (second virt addr?) */
+    HI_U64 u64PhyAddr;     /* 0x10: physical address (64-bit) */
+    HI_U32 u32Num;         /* 0x18: number of images / batch (1) */
+    HI_U32 reserved1;      /* 0x1C: padding */
+    HI_U32 u32Stride;      /* 0x20: row stride in bytes */
+    HI_U32 u32Height;      /* 0x24: height in pixels */
+    HI_U32 u32Chn;         /* 0x28: channels (3 for YUV) */
+    HI_U32 reserved2;      /* 0x2C: padding */
+} IVE_XNN_BLOB_S; /* 48 bytes */
 
 /*
  * Forward control — 8 bytes minimum
@@ -73,12 +81,17 @@ typedef struct {
 
 /*
  * ioctl commands (from disassembly, _IOC encoding):
- *   loadmodel:  0xc8a04636 = _IOWR('F', 0x36, 2208_bytes)
- *   forward:    0xc620463a = _IOWR('F', 0x3a, 1568_bytes)
- *   unloadmodel: (not yet extracted)
- *   preproc:     (not yet extracted)
- *   get_tmpbuf:  (not yet extracted — may be userspace-only)
- *   svp_init:   0x8010463b = _IOR('F', 0x3b, 16_bytes)
+ *   loadmodel:     0xc8a04636 = _IOWR('F', 0x36, 2208)  — load OMS model
+ *   forward:       0xc620463a = _IOWR('F', 0x3a, 1568)  — single forward pass
+ *   forward_slice: 0xc9704638 = _IOWR('F', 0x38, 2416)  — sliced forward (used by IVP)
+ *   query:         0x463c     = _IO('F', 0x3c)           — query completion
+ *   finish:        0x463d     = _IO('F', 0x3d)           — finish/sync
+ *   svp_init:      0x8010463b = _IOR('F', 0x3b, 16)      — map HW registers
+ *   unloadmodel:   (nr ~0x37, not yet captured)
+ *   preproc:       (nr ~0x39, not yet captured)
+ *   open_dev:      0x801046c8 = _IOR('F', 0xc8, 16)      — open IVE device
+ *   close:         0x46c9     = _IO('F', 0xc9)           — close/sync
+ *   enable:        0x46ca     = _IO('F', 0xca)           — enable
  */
 
 /*
