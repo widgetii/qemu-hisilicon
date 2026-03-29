@@ -1568,9 +1568,10 @@ static void ive_op_norm_grad(HisiIveState *s)
                     sumx += f1[sy*w+sx] * mask_h[(ky+2)*5+(kx+2)];
                     sumy += f1[sy*w+sx] * mask_v[(ky+2)*5+(kx+2)];
                 }
-            out_h[y*w+x] = (int8_t)clamp_i32(sumx >> norm, -128, 127);
-            out_v[y*w+x] = (int8_t)clamp_i32(sumy >> norm, -128, 127);
-            out_hv[y*w+x] = (uint8_t)clamp_i32((abs(sumx) + abs(sumy)) >> norm, 0, 255);
+            int round = 1 << (norm - 1); /* rounding: add 2^(norm-1) before shift */
+            out_h[y*w+x] = (int8_t)clamp_i32((sumx + round) >> norm, -128, 127);
+            out_v[y*w+x] = (int8_t)clamp_i32((sumy + round) >> norm, -128, 127);
+            out_hv[y*w+x] = (uint8_t)clamp_i32((abs(sumx) + abs(sumy) + round) >> norm, 0, 255);
         }
     }
 
