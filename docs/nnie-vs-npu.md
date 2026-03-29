@@ -222,6 +222,129 @@ Fixed-function accelerator for traditional computer vision:
 - IVE 2.5: V5/CV610 (added: perimeter protection, perspective transform,
   video diagnosis, multiple intelligent analysis)
 
+### IVE XNN — Hidden CNN Accelerator Inside IVE
+
+The IVE hardware on EV200/EV300 contains a **built-in CNN inference engine** (XNN)
+that is separate from NNIE. This is not documented in public API headers — the
+`mpi_ive_xnn_*` functions are private symbols in the static `libive.a`, accessed
+via ioctl on the same `/dev/ive` device.
+
+**Discovery source:** `/proc/umap/ive` on EV300 lists `XNN` as the last instruction
+type in the invoke counters. The kernel module `hi3516ev200_ive.ko` contains the
+full XNN layer parser and execution engine.
+
+#### Hardware-Accelerated Layer Types
+
+| Layer | Key Parameters | Purpose |
+|-------|---------------|---------|
+| Conv | kernel_size, input_c/h/w, output_c/h/w, pool_mode, af_mode, pad | Convolution + fused pooling + activation |
+| FC | input_w, output_w, batch_num, af_mode | Fully connected |
+| Eltwise | eltwise_op, in_num, af_mode | Element-wise ops (residual add/mul) |
+| Flatten | input_c/h/w | Reshape tensor for FC input |
+| Preproc | (VGS-based) | Input resize + color space conversion |
+| DMA | | Inter-layer data movement |
+| Unpack | | Data format conversion |
+
+- `af_mode` = activation function (ReLU, etc.)
+- `pool_mode` = pooling type (max, average), fused into conv layer
+- `in_fmt`/`out_fmt` = quantization format
+- Conv `kernel_size` supports at least two sizes (error: "must be {%d, %d}")
+- Eltwise supports residual connections (`in_num` up to some max)
+
+#### XNN API (Private, in static libive.a)
+
+```
+mpi_ive_xnn_loadmodel(model_data, ...)     → parse OMS, allocate HW resources
+mpi_ive_xnn_preproc(input_frame, ...)      → VGS-based input preprocessing
+mpi_ive_xnn_forward(model, input, output)  → run full network inference in HW
+mpi_ive_xnn_forward_slice(...)             → sliced execution for large inputs
+mpi_ive_xnn_unloadmodel(...)               → free resources
+mpi_ive_xnn_get_tmpbuf_size(...)           → query temp buffer requirements
+```
+
+These are called by `libivp.a` (Intelligent Video Processing) which provides
+the user-facing `hi_ivp_process_ex()` API.
+
+#### OMS Model Format (Reverse-Engineered Structure)
+
+The `.oms` files in `mpp/sample/ivp/res/` are the XNN model format.
+Analyzed: `ivp_re_allday_f1y2f2m1_640x360_v1003.oms` (1010 KB).
+
+**File layout:**
+```
+0x000-0x01F   Global header (magic, total size, segment count)
+0x020-0x06F   Segment descriptors (offsets, sizes, checksums)
+0x070-0x07F   Build timestamp: "1904291011231421" (2019-04-29)
+0x080-0x09F   Input descriptor (dimensions, strides, format)
+0x0A0-0x0CF   Network I/O names (32-byte padded): "data", "layer69-conv_report0"
+0x0F0-0x926FF Per-layer binary descriptors + quantized weights (586 KB)
+0x92700       Layer name table: 46 entries × 0x40 bytes (network 1)
+0x93290       Second network weights + descriptors (421 KB)
+0xFC5C0       Layer name table: 9 entries × 0x40 bytes (network 2)
+```
+
+Layer name table entry format: 32-byte name (null-padded) + 32-byte metadata
+(layer index at offset +0x30).
+
+**Input dimensions** at offsets 0xF6-0xF9: height=360, width=640 (LE uint16).
+
+#### Two-Stage Detection Architecture in OMS
+
+The model contains two cascaded networks:
+
+**Network 1 — YOLO detection backbone (586 KB, 46 conv layers):**
+```
+Input: 640×360 grayscale
+layer1-conv → layer2-conv → layer4-conv → ... → layer69-conv
+                                                       ↓
+                                              layer69-conv_report0 (proposals)
+```
+- Layers numbered 1-69 with gaps (3,6,9,10,13,14...) = implicit BatchNorm+ReLU
+- Architecture: compact YOLO variant (confirmed by `svp_alg_yoloonet_process` symbol)
+- Post-processing: `svp_alg_rpn_process()` filters proposals
+
+**Network 2 — Classification refinement head (421 KB, 9 layers):**
+```
+Input: cropped proposals from network 1
+conv1 → conv2 → conv3 → conv4 → conv4_up → fc5_flatten → fc5 → fc6_det_score
+```
+- 4 conv + 1 deconv (upsample) + flatten + 2 FC layers
+- Output: `fc6_det_score` = per-detection confidence
+- Two-stage pattern: backbone proposes, head refines (like Faster R-CNN)
+
+#### IVP Call Chain (How It All Connects)
+
+```
+hi_ivp_process_ex()                         [libivp.a — user API]
+  → ivp_process()
+    → mpi_ive_xnn_preproc()                 [libive.a — VGS resize/CSC]
+    → mpi_ive_xnn_forward()                 [libive.a — HW CNN inference]
+      → ioctl(/dev/ive, XNN_FORWARD_CMD)    [kernel: ive_xnn_fill_forward_node_info]
+        → IVE hardware XNN engine           [silicon: conv/fc/eltwise/flatten]
+    → svp_alg_yoloonet_process()            [libivp.a — YOLO decode, CPU]
+    → svp_alg_rpn_process()                 [libivp.a — NMS/filtering, CPU]
+  → ivp_get_obj_array()                     [libivp.a — extract bboxes]
+```
+
+#### Implications
+
+1. **EV200/EV300 can run CNNs without NNIE** — the IVE XNN engine is a separate
+   CNN accelerator embedded in the IVE block. The "0.5 TOPS" attributed to NNIE
+   on these chips may actually be the IVE XNN engine (there is no separate NNIE
+   kernel module — only `hi3516ev200_ive.ko` exists).
+
+2. **The XNN API is private but usable** — symbols are in `libive.a` (static lib).
+   Custom models could be loaded via `mpi_ive_xnn_loadmodel()` if the OMS format
+   is fully reverse-engineered.
+
+3. **IVP is a thin wrapper** — the "Intelligent Video Processing" framework just
+   orchestrates XNN inference + YOLO post-processing + ISP/VENC integration.
+   The actual HW acceleration is all IVE XNN.
+
+4. **The vendor QR library (`libqr.a`)** also uses `HI_MPI_SYS_Mmap` and
+   `detect_proc` — it likely runs a small CNN via IVE XNN for QR finder
+   pattern detection, not just classical image processing.
+
 ## QEMU Emulation Status
 
 | Block | Address (example) | QEMU Device | Functional |
@@ -239,6 +362,13 @@ Register reads return 0 (regbank default).
 - NNIE samples: `Hi3516CV500_SDK_V2.0.2.1/smp/a7_linux/mpp/sample/svp/nnie/`
 - NPU docs: `Hi3516CV610R001C01SPC020/ReleaseDoc/en/01.software/pc/SVP_NPU/`
 - Engine diffs: `Image Analysis Engine Differences.pdf` (2025-03-28)
+- IVE XNN symbols: `Hi3516EV200_SDK_V1.0.1.2/mpp/lib/libive.a` (static, private API)
+- IVP framework: `Hi3516EV200_SDK_V1.0.1.2/mpp/lib/libivp.a` + `mpp/include/hi_ivp.h`
+- IVP sample: `Hi3516EV200_SDK_V1.0.1.2/mpp/sample/ivp/sample_ivp.c`
+- IVP models: `mpp/sample/ivp/res/ivp_re_allday_f1y2f2m1_{640x360,360x640}_v1003.oms`
+- IVE QR sample: `Hi3516EV200_SDK_V1.0.1.2/mpp/sample/ive/sample/sample_ive_qr.c`
+- QR library: `Hi3516EV200_SDK_V1.0.1.2/mpp/lib/libqr.a` (static, closed-source)
+- IVE kernel module: `Hi3516EV200_SDK_V1.0.1.2/mpp/ko/hi3516ev200_ive.ko`
 
 ### Public Sources
 - [NNIE Development Notes - Huawei Cloud](https://bbs.huaweicloud.com/blogs/395170)
