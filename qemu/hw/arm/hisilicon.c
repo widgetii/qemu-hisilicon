@@ -4,8 +4,9 @@
  * Table-driven: each SoC variant is a HisiSoCConfig struct.
  * One shared init function handles VIC/GIC, peripherals, boot.
  *
- * 17 machine types across six HiSilicon IPC SoC generations (V1–V5)
- * plus Goke V4 rebrands.  See roadmap table below for specs & timeline.
+ * 21 machine types across six HiSilicon IPC SoC generations (V1–V5)
+ * plus Goke V4 rebrands and Goke next-gen NPU SoCs.
+ * See roadmap table below for specs & timeline.
  *
  * Copyright (c) 2020-2021, 2026 OpenIPC.
  * Written by Dmitry Ilyin
@@ -70,6 +71,7 @@
  *        18EV300     2018Q4  A7 @900MHz          H.265 3M@20      3M
  *        DV200       2018Q4  A7 @900MHz          H.265 5M@20      5M
  *  V4g   GK7205V200  2021    (die-identical V4 — Goke rebrand)
+ *  V4n   GK7205V500  2022    A7 @1GHz            H.265 5M@25      5M+NPU
  *  V5    CV608       ~2023   Dual A7 MP2         H.265 3M         3M
  *        CV610       ~2023   Dual A7 MP2         H.265 5M         5M
  *        CV613       ~2023   Dual A7 MP2         H.265 4K         4K
@@ -87,6 +89,7 @@
  *   CV500 platform:  hi3516cv500, hi3516av300, hi3516dv300
  *   EV200 platform:  hi3516ev200, hi3516ev300, hi3518ev300, hi3516dv200
  *   GK7205V200:      gk7205v200, gk7205v210, gk7205v300, gk7202v300, gk7605v100
+ *   GK7205V500:      gk7205v500, gk7205v510, gk7205v530, gk7202v330 (NPU)
  *
  * Address map evolution:
  *   V1/V2/V2A: 0x20xxxxxx peripherals, RAM @ 0x80000000
@@ -970,7 +973,7 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .wdt_base           = 0x12030000,                       \
     .wdt_irq            = 2,                                \
     .wdt_freq           = 3000000,                          \
-    .num_regbanks       = 14,                               \
+    .num_regbanks       = 15,                               \
     .regbanks           = {                                 \
         { "hisi-misc",       0x12028000, 0x8000  },         \
         { "hisi-ddr",        0x120d0000, 0x10000 },         \
@@ -985,6 +988,7 @@ static const HisiSoCConfig hi3516dv200_soc = {
         { "hisi-vi-proc",    0x11200000, 0x40000 },         \
         { "hisi-vgs",        0x11300000, 0x10000 },         \
         { "hisi-ive",        0x11320000, 0x10000 },         \
+        { "hisi-npu",        0x11340000, 0x10000 },         \
         { "hisi-vpss",       0x11400000, 0x10000 },         \
     }
 
@@ -1017,6 +1021,51 @@ static const HisiSoCConfig gk7605v100_soc = {
     .desc               = "Goke GK7605V100 (Cortex-A7, ~Hi3516DV200)",
     .soc_id             = GOKE_SOC_ID_7605V100,
     .gpio_count         = 10,
+    HISI_V4_COMMON_PERIPH,
+};
+
+/*
+ * Goke next-gen (2022+) — Goke's own designs with NPU, V4-compatible address map.
+ * CPU: Cortex-A7 @1GHz.  Video: H.265/H.264, 5M@25-30fps.
+ * NPU: 0.5 TOPS (V500, V330) or 1.0 TOPS (V510, V530).
+ * Same peripheral addresses as V4; NPU added at 0x11340000.
+ * SDK: XMediaIPCLinuxV100R002C00SPC020, kernel 5.10.
+ *
+ * GK7205V500:  5M@25fps, 0.5 TOPS, 512Mb DDR2 MCP, FEPHY
+ * GK7205V510:  5M@30fps, 1.0 TOPS, 1Gb DDR3 MCP, FEPHY
+ * GK7205V530:  5M@30fps, 1.0 TOPS, ext DDR, FEPHY
+ * GK7202V330:  5M@25fps, 0.5 TOPS, 512Mb DDR2 MCP, no FEPHY
+ */
+
+static const HisiSoCConfig gk7205v500_soc = {
+    .name               = "gk7205v500",
+    .desc               = "Goke GK7205V500 (Cortex-A7, 0.5 TOPS NPU)",
+    .soc_id             = GOKE_SOC_ID_7205V500,
+    .gpio_count         = 8,
+    HISI_V4_COMMON_PERIPH,
+};
+
+static const HisiSoCConfig gk7205v510_soc = {
+    .name               = "gk7205v510",
+    .desc               = "Goke GK7205V510 (Cortex-A7, 1.0 TOPS NPU)",
+    .soc_id             = GOKE_SOC_ID_7205V510,
+    .gpio_count         = 8,
+    HISI_V4_COMMON_PERIPH,
+};
+
+static const HisiSoCConfig gk7205v530_soc = {
+    .name               = "gk7205v530",
+    .desc               = "Goke GK7205V530 (Cortex-A7, 1.0 TOPS NPU, ext DDR)",
+    .soc_id             = GOKE_SOC_ID_7205V530,
+    .gpio_count         = 8,
+    HISI_V4_COMMON_PERIPH,
+};
+
+static const HisiSoCConfig gk7202v330_soc = {
+    .name               = "gk7202v330",
+    .desc               = "Goke GK7202V330 (Cortex-A7, 0.5 TOPS NPU, no FEPHY)",
+    .soc_id             = GOKE_SOC_ID_7202V330,
+    .gpio_count         = 8,
     HISI_V4_COMMON_PERIPH,
 };
 
@@ -1921,6 +1970,10 @@ DEFINE_HISI_MACHINE("gk7205v200", gk7205v200, gk7205v200_soc)
 DEFINE_HISI_MACHINE("gk7205v300", gk7205v300, gk7205v300_soc)
 DEFINE_HISI_MACHINE("gk7202v300", gk7202v300, gk7202v300_soc)
 DEFINE_HISI_MACHINE("gk7605v100", gk7605v100, gk7605v100_soc)
+DEFINE_HISI_MACHINE("gk7205v500", gk7205v500, gk7205v500_soc)
+DEFINE_HISI_MACHINE("gk7205v510", gk7205v510, gk7205v510_soc)
+DEFINE_HISI_MACHINE("gk7205v530", gk7205v530, gk7205v530_soc)
+DEFINE_HISI_MACHINE("gk7202v330", gk7202v330, gk7202v330_soc)
 DEFINE_HISI_MACHINE("hi3516cv608", hi3516cv608, hi3516cv608_soc)
 DEFINE_HISI_MACHINE("hi3516cv610", hi3516cv610, hi3516cv610_soc)
 DEFINE_HISI_MACHINE("hi3516cv613", hi3516cv613, hi3516cv613_soc)
