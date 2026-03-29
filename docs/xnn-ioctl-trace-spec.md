@@ -261,6 +261,83 @@ a) Capture the complete 2416-byte ioctl buffer from a working IVP call
 b) RE the `svp_alg_load_model` in libivp.a to find how it queries
    dst_node info and output offsets from the loaded model
 
+## OMS Model Format (fully decoded from ive_xnn_loop_parse_every_layer)
+
+### Outer File Structure
+```
++0x00..0x4F: OMS outer header (80 bytes)
+  +0x04: u32 total_file_size
+  +0x24: u32 payload_size (file_size - 0x20)
+  +0x38: u32 tmp_buf_size_hint
+  +0x48: u32 segment2_offset (from file start)
++0x50: Segment 1 start
++0x50+seg2_off: Segment 2 start (if multi-network model)
+```
+
+### Segment Header
+```
++0x00: u32 crc32            — ~CRC32 of bytes [4..end]
++0x04: u32 segment_size     — total segment size
++0x08: u32 model_buf_offset — weight data start (also = layer descriptor region size + header)
++0x0C: u32 tmp_buf_size     — required temp buffer for inference
++0x14: u8  data_slice       — 0=normal, 1=slice mode
++0x16: u8  roi_batch_num    — [0, 32]
++0x30: u16 total_scale_num  — scales [1, 16]
++0x32: u16 total_layer_num  — layers [1, 65535/scale_num]
++0x34: u8  src_num          — input nodes [1, 16]
++0x35: u8  dst_num          — output nodes [1, 16]
++0x36: u8  top_layer_num    — [1, 16]
++0x38: u32 weight_data_size — weight blob size
++0x3C: u32 weight_data_off  — offset from segment start to weights
++0x40: u32 layer_name_off   — offset from segment start to name table
++0x50: u16[] src_node_ids   — src_num entries (layer IDs for input nodes)
++0x50+2*src_num: u16[] dst_node_ids — dst_num entries
+```
+
+### Layer Descriptor Start Offset
+```
+v63 = align16(2*(src_num + dst_num)) + 80
+v61 = 32 * src_num + v63          — end of src node data
+v70 = 32 * dst_num + v61          — layer descriptors start at seg + v70
+For src=1, dst=1: v70 = 0xA0 (160 bytes from segment start)
+```
+
+### Layer Descriptors (sequential, variable-length)
+First byte of each descriptor = layer type:
+
+| Type | Name | Size | Key Fields |
+|------|------|------|-----------|
+| 0 | Conv | 80B | +0x04:in_fmt, +0x05:out_fmt, +0x06:pool_mode, +0x07:af_mode, +0x08:is_pad, +0x0A:in_c(u16), +0x0C:in_h, +0x0E:in_w, +0x10:out_c, +0x12:out_h, +0x14:out_w, +0x18:arg_len, +0x1C:arg_offset, +0x2C:in_tmp_off, +0x30:out_tmp_off |
+| 1 | Flatten | 48B | +0x08:in_c, +0x0A:in_h, +0x0C:in_w, +0x10:in_tmp_off, +0x14:out_tmp_off |
+| 2 | FC | 64B | +0x0A:in_w, +0x0C:out_w, +0x14:arg_len, +0x18:arg_offset |
+| 3 | Eltwise | 96B | +0x06:in_num, +0x07:eltwise_op, +0x08:out_c, +0x0A:out_h, +0x0C:out_w |
+| 4 | Unpack | 64B | +0x08:out_c, +0x0A:out_h, +0x0C:out_w |
+| 5 | Preproc | 48B | +0x04:need_vgs, +0x06:in_c, +0x08:in_h, +0x0A:in_w, +0x2C:blob_type |
+| 6 | DMA | 32B | +0x06:in_w, +0x08:in_h |
+
+Weight data is referenced by `arg_offset` + `arg_len` within each Conv/FC layer,
+pointing into the weight blob at segment + `weight_data_off`.
+
+### Layer Name Table
+At segment + `layer_name_off`. Each entry is 0x40 bytes:
+32 bytes name (null-padded) + 32 bytes metadata (layer index at +0x30).
+
+### Vendor YOLO Model Architecture (parsed from OMS)
+```
+[0]  Preproc VGS: 360×640×3 input
+[1]  Conv: 3→8ch, 360×640    (first conv, likely 3×3)
+[2]  Conv: 8→8ch, 360→180    (stride-2 downscale)
+[3]  Conv: 16ch, 180×320
+...
+[20] Conv: 64ch, 23×40       (final spatial resolution)
+...
+[42] Conv: 512→512ch, 23×40
+[43] Conv: 512→63ch, 23×40   (detection head, no pool/relu)
+[44] Unpack                   (output format conversion)
+```
+45 layers total, 42 conv + 1 preproc + 1 unpack + 1 output conv.
+Output: 40×23×63 = 9 anchors × (4 bbox + 1 conf + 2 class).
+
 ## Success Criteria
 
 The RE is complete when we can:
