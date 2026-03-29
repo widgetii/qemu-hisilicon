@@ -399,11 +399,44 @@ int main(void) {
                ok_ts16 ? "PASS" : "FAIL");
         fails += !ok_ts16;
 
+        /* Thresh_U16: mode=MIN_MID_MAX, lo=50, hi=150 */
+        IVE_IMAGE_S u16_img;
+        memset(&u16_img, 0, sizeof(u16_img));
+        u16_img.enType = IVE_IMAGE_TYPE_U16C1;
+        u16_img.u32Width = W; u16_img.u32Height = H;
+        u16_img.au32Stride[0] = STRIDE * 2;
+        HI_MPI_SYS_MmzAlloc(&u16_img.au64PhyAddr[0],
+            (HI_VOID **)&u16_img.au64VirAddr[0], NULL, HI_NULL, STRIDE * 2 * H);
+
+        uint16_t *u16_data = (uint16_t *)(HI_UL)u16_img.au64VirAddr[0];
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                u16_data[y * STRIDE + x] = ((y * W + x) * 7 + 13) % 256;
+        HI_MPI_SYS_MmzFlushCache(u16_img.au64PhyAddr[0],
+            (HI_VOID *)(HI_UL)u16_img.au64VirAddr[0], STRIDE * 2 * H);
+
+        IVE_THRESH_U16_CTRL_S tu16_ctrl = {
+            .enMode = IVE_THRESH_U16_MODE_U16_TO_U8_MIN_MID_MAX,
+            .u16LowThr = 50, .u16HighThr = 150,
+            .u8MinVal = 0, .u8MidVal = 128, .u8MaxVal = 255
+        };
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        ret = HI_MPI_IVE_Thresh_U16(&handle, &u16_img, &dst, &tu16_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        read_image(&dst, result, SZ);
+        /* val[0]=13 → <=50 → 0; val[7]=62 → 50<62<=150 → 128 */
+        int ok_tu16 = (result[0] == 0 && result[7] == 128);
+        printf("  %-10s [%d,%d,%d,%d,...,%d]  %s\n", "thresh_u16",
+               result[0], result[1], result[2], result[3], result[7],
+               ok_tu16 ? "PASS" : "FAIL");
+        fails += !ok_tu16;
+
+        HI_MPI_SYS_MmzFree(u16_img.au64PhyAddr[0], (HI_VOID *)(HI_UL)u16_img.au64VirAddr[0]);
         HI_MPI_SYS_MmzFree(s16_img.au64PhyAddr[0], (HI_VOID *)(HI_UL)s16_img.au64VirAddr[0]);
     }
 
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 11 - fails, 11);
+    printf("Result: %d/%d passed\n", 12 - fails, 12);
     printf("========================================\n");
 
 cleanup:
