@@ -194,7 +194,7 @@ To reach production-grade plate detection (>50% precision), needs either:
 ## Tier 3: Significant effort (complex algorithms or many new IVE ops)
 
 ### Optical Flow / Speed Estimation
-**IVE ops:** LKOpticalFlowPyr + STCandiCorner + STCorner
+**IVE ops:** LKOpticalFlowPyr + STCandiCorner + STCorner (all implemented)
 **Algorithm:** Detect feature points (Shi-Tomasi corners), track with
 Lucas-Kanade optical flow across frames, compute velocity vectors.
 Aggregate per-object speeds from tracked feature clusters.
@@ -203,8 +203,10 @@ Aggregate per-object speeds from tracked feature clusters.
 {"flow": {"avgSpeed": 2.3, "direction": 135, "movingObjects": 3}}
 ```
 **Value:** Traffic monitoring (vehicle speed), crowd density estimation.
-**New IVE ops needed:** LKOpticalFlowPyr, STCandiCorner, STCorner
-**Effort:** ~2 weeks
+**Effort:** Implemented in QEMU. Tested on real EV300: 4/5 points tracked
+with correct flow direction on 2px-shift test. LK flow vectors within
+±0.016 pixels of HW output (sub-pixel precision difference from HW
+fixed-point arithmetic).
 
 ### Persistent Object Tracking (KCF)
 **IVE ops:** KCF (11 functions) + SAD + CCL
@@ -232,7 +234,7 @@ and behavioral analytics. Required for most advanced CCTV features.
 | Object classification | Medium (false alarms) | Mostly | HOG helps | 1 week | **P1** |
 | Abandoned object | Medium (transport) | ✓ (basic) | Tracking for prod | Done+2w | **P2** |
 | Plate detection | Medium (parking) | ✓ | None | Done | **P2** |
-| Optical flow | Low-Medium (traffic) | No | LK+ST | 2 weeks | **P3** |
+| Optical flow | Low-Medium (traffic) | ✓ | None | Done | **P3** |
 | KCF tracking | Medium (persistent IDs) | No | KCF×11 | 3 weeks | **P3** |
 
 ## Metadata Integration
@@ -248,29 +250,82 @@ Shinobi, or any system supporting ONVIF analytics events.
 
 ## IVE Operation Coverage
 
-| Application | DMA | SAD | CCL | Sub | Add | And | Thresh | Hist | Sobel | Dilate | Erode | Integ | Map | NCC | GMM2 | LK | KCF |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Motion detect | ✓ | ✓ | ✓ | | | | | | | | | | | | | | |
-| Tamper detect | | | | ✓ | | | ✓ | ✓ | | | | | | | | | |
-| Line crossing | ✓ | ✓ | ✓ | | | | | | | | | | | | | | |
-| Zone intrusion | ✓ | ✓ | ✓ | | | ✓ | | | | | | | | | | | |
-| Loitering | ✓ | ✓ | ✓ | | | | | | | | | | | | | | |
-| Object class. | | | | | | | ✓ | ✓ | ✓ | | | ✓ | | | | | |
-| Abandoned obj | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ | | | ✓ | ✓ | | | | | | |
-| Plate region | | | ✓ | | | | ✓ | | ✓ | ✓ | ✓ | | | | | | |
-| Optical flow | | | | | | | | | | | | | | | | ✓ | |
-| KCF tracking | ✓ | ✓ | ✓ | | | | | | | | | | | | | | ✓ |
+### QEMU Emulation Status (39 ops implemented)
+
+**Byte-identical to real EV300 hardware (22 ops, verified via full pixel capture):**
+
+| Category | Ops | Pixels verified |
+|----------|-----|----------------|
+| Pixel-wise | Sub, Add, And, Or, Xor | 4096/4096 each |
+| Threshold | Thresh, Thresh_S16, Thresh_U16, 16BitTo8Bit | 4096/4096 each |
+| Convolution | Filter, Sobel (S16C1 output) | 4096/4096 each |
+| Morphology | Dilate (bitwise OR), Erode (bitwise AND), OrdStatFilter | 4096/4096 each |
+| Edge | CannyEdge (5×5 mask + NMS + hysteresis), MagAndAng, NormGrad | 3968-4096 each |
+| Histogram | Hist, EqualizeHist | 256/256 bins, 4096/4096 px |
+| Analysis | Integ (COMBINE: sqsum<<28\|sum), Map | 4096/4096 each |
+| Background | GMM2 (30-frame stateful test) | 256/256 fg pixels |
+
+**Functionally correct, sub-pixel precision gap (2 ops):**
+
+| Op | Gap | Detail |
+|----|-----|--------|
+| STCandiCorner | Eigenvalue scaling | HW internal fixed-point normalization unknown; 46 corners detected correctly |
+| LKOpticalFlowPyr | ±0.016 px flow | HW fixed-point matrix solve rounding; 4/5 points tracked with correct direction |
+
+**NOT_SUPPORT on EV300 (8 ops — API exists but HW doesn't implement):**
+LBP, Resize, NCC, CSC, GradFg, GMM(v1), FilterAndCSC, MatchBgModel
+
+**Not in SDK library (2 ops — headers only, no libive.so implementation):**
+PerspTrans, Hog
+
+### Key reverse-engineering discoveries
+
+- **Dilate/Erode**: NOT standard max/min morphology. Uses bitwise OR/AND:
+  `dilate = OR(src[i] & mask[i])`, `erode = AND(src[i] | ~mask[i])`
+- **Canny NMS**: Asymmetric comparison `(m > n1 && m >= n2)` with boundary
+  clamping where n1 is the "backward" neighbor
+- **Sobel**: Outputs S16C1 (not U8 magnitude), uses configurable 5×5 mask
+  with clamped border access for rows 1..H-2
+- **Integ COMBINE**: U64 = `(sqsum << 28) | sum` — 28-bit sum + 36-bit sqsum
+
+### Application coverage
+
+| Application | DMA | SAD | CCL | Sub | Add | And | Thresh | Hist | Sobel | Dilate | Erode | Integ | Map | GMM2 | LK | ST |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Motion detect | ✓ | ✓ | ✓ | | | | | | | | | | | | | |
+| Tamper detect | | | | ✓ | | | ✓ | ✓ | | | | | | | | |
+| Line crossing | ✓ | ✓ | ✓ | | | | | | | | | | | | | |
+| Zone intrusion | ✓ | ✓ | ✓ | | | ✓ | | | | | | | | | | |
+| Loitering | ✓ | ✓ | ✓ | | | | | | | | | | | | | |
+| Object class. | | | | | | | ✓ | ✓ | ✓ | | | ✓ | | | | |
+| Abandoned obj | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ | | | ✓ | ✓ | | | | | |
+| Plate region | | | ✓ | | | | ✓ | | ✓ | ✓ | ✓ | | | | | |
+| Optical flow | | | | | | | | | | | | | | | ✓ | ✓ |
+| KCF tracking | ✓ | ✓ | ✓ | | | | | | | | | | | | | |
+
+### Real hardware test coverage
+
+```
+QEMU register-level test (test-ive-ops.c):  19/19 pass
+Real board MPI test (test-ive-mpi.c):       31/31 pass
+  - 24 ops verified working on real EV300 silicon
+  - 8 ops NOT_SUPPORT (API exists, HW doesn't implement)
+  - 2 ops N/A (not in libive.so)
+```
 
 ## References
 
 - HiSilicon IVE API Reference (SDK documentation)
 - `docs/ive-registers.md` — hardware register map
-- `docs/nnie-vs-npu.md` — NNIE/NPU architecture comparison
 - `docs/ive-eval-methodology.md` — evaluation pipeline, metrics, reproducing results
 - `docs/meva-dataset-spec.md` — dataset download and indexing spec
-- `qemu/hw/misc/hisi-ive.c` — QEMU IVE implementation (18 ops)
-- `qemu-boot/test-ive-video-mpi.c` — real board test (Y4M, full HW pipeline)
-- `qemu-boot/test-ive-ops.c` — operation test suite
+- `qemu/hw/misc/hisi-ive.c` — QEMU IVE implementation (39 ops, 22 byte-identical)
+- `qemu-boot/test-ive-ops.c` — QEMU register-level test suite (19 tests)
+- `qemu-boot/test-ive-mpi.c` — real board MPI test suite (31 tests)
+- `qemu-boot/test-ive-video-mpi.c` — real board video pipeline (MD + abandoned + LPR)
+- `qemu-boot/test-ive-bytecmp.c` — byte-exact capture for differential testing
+- `qemu-boot/test-canny-capture.c` — Canny byte-identical verification tool
 - Majestic motion detection: `~/git/majestic/src/hisi/mdetect.c`
 - MEVA dataset: [mevadata.org](https://mevadata.org/) (CC BY 4.0)
 - VIRAT Ground 2.0: [viratdata.org](https://viratdata.org/)
+- CCPD dataset: [GitHub](https://github.com/detectRecog/CCPD) (MIT license)
