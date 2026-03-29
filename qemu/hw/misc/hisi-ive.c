@@ -760,30 +760,69 @@ static void ive_op_filter(HisiIveState *s)
     g_free(f1); g_free(out);
 }
 
+/* Sobel: 5×5 configurable mask, outputs S16C1 horizontal + vertical gradients.
+ * Matches real HW: two separate S16 output images, clamped border handling. */
 static void ive_op_sobel(HisiIveState *s)
 {
     uint16_t w, h;
     uint8_t *f1;
     ive_read_frames(s, &f1, NULL, &w, &h);
-    /* Sobel 3×3: Gx and Gy, output magnitude */
-    uint8_t *out = g_malloc(w * h);
-    for (uint16_t y = 0; y < h; y++) {
+
+    /* Read 5×5 mask from OP_DESC (horizontal gradient kernel) */
+    int8_t mask_h[25];
+    uint32_t mask_addr = s->regs[IVE_OP_DESC / 4];
+    if (mask_addr) {
+        dma_memory_read(&address_space_memory, mask_addr,
+                        mask_h, 25, MEMTXATTRS_UNSPECIFIED);
+    } else {
+        /* Default: Sobel horizontal 3×3 embedded in 5×5 */
+        int8_t def[25] = {0,0,0,0,0, 0,-1,0,1,0, 0,-2,0,2,0, 0,-1,0,1,0, 0,0,0,0,0};
+        memcpy(mask_h, def, 25);
+    }
+    /* Transpose mask for vertical gradient */
+    int8_t mask_v[25];
+    for (int r = 0; r < 5; r++)
+        for (int c = 0; c < 5; c++)
+            mask_v[r * 5 + c] = mask_h[c * 5 + r];
+
+    /* Compute S16 gradients — clamped borders for rows 1..H-2, row 0 undefined */
+    int16_t *out_h = g_malloc0(w * h * 2);
+    int16_t *out_v = g_malloc0(w * h * 2);
+
+    for (uint16_t y = 1; y < h - 1; y++) {
         for (uint16_t x = 0; x < w; x++) {
-            if (y == 0 || y == h-1 || x == 0 || x == w-1) {
-                out[y * w + x] = 0;
-                continue;
-            }
-            int gx = -f1[(y-1)*w+x-1] + f1[(y-1)*w+x+1]
-                     -2*f1[y*w+x-1]   + 2*f1[y*w+x+1]
-                     -f1[(y+1)*w+x-1]  + f1[(y+1)*w+x+1];
-            int gy = -f1[(y-1)*w+x-1] - 2*f1[(y-1)*w+x] - f1[(y-1)*w+x+1]
-                     +f1[(y+1)*w+x-1]  + 2*f1[(y+1)*w+x] + f1[(y+1)*w+x+1];
-            int mag = (abs(gx) + abs(gy)) >> 1;
-            out[y * w + x] = (mag > 255) ? 255 : mag;
+            int sumx = 0, sumy = 0;
+            for (int ky = -2; ky <= 2; ky++)
+                for (int kx = -2; kx <= 2; kx++) {
+                    int sy = y + ky < 0 ? 0 : (y + ky >= h ? h - 1 : y + ky);
+                    int sx = x + kx < 0 ? 0 : (x + kx >= w ? w - 1 : x + kx);
+                    uint8_t pixel = f1[sy * w + sx];
+                    sumx += pixel * mask_h[(ky + 2) * 5 + (kx + 2)];
+                    sumy += pixel * mask_v[(ky + 2) * 5 + (kx + 2)];
+                }
+            out_h[y * w + x] = (int16_t)clamp_i32(sumx, -32768, 32767);
+            out_v[y * w + x] = (int16_t)clamp_i32(sumy, -32768, 32767);
         }
     }
-    ive_write_frame(s, out, w, h);
-    g_free(f1); g_free(out);
+
+    /* Write horizontal gradient to dst1 (S16, stride = w*2 aligned to 16) */
+    uint32_t dst1 = s->regs[IVE_DST1_ADDR / 4];
+    uint32_t dst2 = s->regs[IVE_DST2_ADDR / 4];
+    uint32_t strides0 = s->regs[IVE_STRIDES_0 / 4];
+    uint16_t ds = (strides0 & 0xFFFF) ? (strides0 & 0xFFFF) : (w * 2);
+    for (uint16_t y = 0; y < h; y++) {
+        dma_memory_write(&address_space_memory, dst1 + (uint64_t)y * ds,
+                         out_h + y * w, w * 2, MEMTXATTRS_UNSPECIFIED);
+    }
+    /* Write vertical gradient to dst2 */
+    if (dst2) {
+        for (uint16_t y = 0; y < h; y++) {
+            dma_memory_write(&address_space_memory, dst2 + (uint64_t)y * ds,
+                             out_v + y * w, w * 2, MEMTXATTRS_UNSPECIFIED);
+        }
+    }
+
+    g_free(f1); g_free(out_h); g_free(out_v);
 }
 
 static void ive_op_dilate(HisiIveState *s)

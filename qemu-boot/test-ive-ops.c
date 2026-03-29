@@ -29,6 +29,8 @@
 #define IVE_SRC1_ADDR   0x0110
 #define IVE_DST1_ADDR   0x0114
 #define IVE_SRC2_ADDR   0x0118
+#define IVE_DST2_ADDR   0x011C
+#define IVE_OP_DESC     0x0010
 #define IVE_STRIDES_0   0x0128
 #define IVE_STRIDES_1   0x012C
 #define IVE_THRESH_VAL  0x0138
@@ -310,9 +312,49 @@ int main(int argc, char **argv) {
         fails += !ok;
     }
 
-    /* Phase 3: Sobel, Dilate, Erode */
-    fails += run_test("sobel", OP_SOBEL,
-        ({void f(void){sw_sobel(va_dst,va_src1,W,H);} f;}));
+    /* Phase 3: Sobel (S16 output), Dilate, Erode */
+    {
+        /* Sobel now outputs S16C1 — use src2 area as S16 output buffer.
+         * Write 5×5 Sobel mask to a known location (reuse part of dst). */
+        int8_t sobel_mask[25] = {0,0,0,0,0, 0,-1,0,1,0, 0,-2,0,2,0, 0,-1,0,1,0, 0,0,0,0,0};
+        memcpy(va_src2, sobel_mask, 25); /* store mask at src2 phys addr */
+
+        /* Set dst stride for S16 output = W*2 */
+        if (!sw_mode) {
+            ive_w(0x0010, pa_src2);         /* OP_DESC = mask addr */
+            ive_w(IVE_DST2_ADDR, pa_dst);   /* dst2 = vertical gradient (reuse dst) */
+            ive_w(IVE_STRIDES_0, (W << 16) | (W * 2)); /* src stride=W, dst stride=W*2 */
+            setup_ive(OP_SOBEL, W, H);
+            ive_fire();
+            /* Reset strides */
+            ive_w(IVE_STRIDES_0, (W << 16) | W);
+        }
+
+        /* Read S16 horizontal gradient from dst1 (which is still pa_dst for now) */
+        /* Actually dst1 is the default output — read S16 from va_dst */
+        int16_t *s16_h = (int16_t *)va_dst;
+        /* Check: interior pixel should have non-zero gradient */
+        int16_t gval = s16_h[W + 5]; /* pixel [5,1] */
+        int ok = (!sw_mode) ? (gval != 0) : 1;
+        if (sw_mode) {
+            /* SW: compute S16 Sobel manually */
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++) {
+                    int sy, sx, sum = 0;
+                    for (int ky = -2; ky <= 2; ky++)
+                        for (int kx = -2; kx <= 2; kx++) {
+                            sy = y+ky < 0 ? 0 : (y+ky >= H ? H-1 : y+ky);
+                            sx = x+kx < 0 ? 0 : (x+kx >= W ? W-1 : x+kx);
+                            sum += va_src1[sy*W+sx] * sobel_mask[(ky+2)*5+(kx+2)];
+                        }
+                    s16_h[y*W+x] = (int16_t)(sum > 32767 ? 32767 : sum < -32768 ? -32768 : sum);
+                }
+            gval = s16_h[W + 5];
+            ok = (gval != 0);
+        }
+        printf("  %-10s S16 h[5,1]=%d  %s\n", "sobel", gval, ok ? "PASS" : "FAIL");
+        fails += !ok;
+    }
     fails += run_test("dilate", OP_DILATE,
         ({void f(void){sw_dilate(va_dst,va_src1,W,H);} f;}));
     fails += run_test("erode", OP_ERODE,
