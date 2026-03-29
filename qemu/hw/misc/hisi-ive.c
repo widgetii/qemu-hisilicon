@@ -825,48 +825,71 @@ static void ive_op_sobel(HisiIveState *s)
     g_free(f1); g_free(out_h); g_free(out_v);
 }
 
+/* Dilate: bitwise morphology — max(src[i] & mask[i]) over 5×5 neighborhood.
+ * With mask=255 this is standard max-filter. With mask<255, bits are masked. */
 static void ive_op_dilate(HisiIveState *s)
 {
     uint16_t w, h;
     uint8_t *f1;
     ive_read_frames(s, &f1, NULL, &w, &h);
+
+    /* Read 5×5 mask from registers */
+    uint8_t mask[25];
+    uint32_t mask_addr = s->regs[IVE_OP_DESC / 4];
+    if (mask_addr) {
+        dma_memory_read(&address_space_memory, mask_addr,
+                        mask, 25, MEMTXATTRS_UNSPECIFIED);
+    } else {
+        memset(mask, 255, 25); /* default: all-ones = standard max */
+    }
+
     uint8_t *out = g_malloc(w * h);
     for (uint16_t y = 0; y < h; y++) {
         for (uint16_t x = 0; x < w; x++) {
-            uint8_t maxv = 0;
+            uint8_t orv = 0; /* bitwise OR accumulator */
             for (int ky = -2; ky <= 2; ky++) {
                 for (int kx = -2; kx <= 2; kx++) {
                     int sy = y + ky < 0 ? 0 : (y + ky >= h ? h - 1 : y + ky);
                     int sx = x + kx < 0 ? 0 : (x + kx >= w ? w - 1 : x + kx);
-                    uint8_t v = f1[sy * w + sx];
-                    if (v > maxv) maxv = v;
+                    orv |= f1[sy * w + sx] & mask[(ky + 2) * 5 + (kx + 2)];
                 }
             }
-            out[y * w + x] = maxv;
+            out[y * w + x] = orv;
         }
     }
     ive_write_frame(s, out, w, h);
     g_free(f1); g_free(out);
 }
 
+/* Erode: bitwise morphology — min(src[i] | ~mask[i]) over 5×5 neighborhood.
+ * With mask=255 this is standard min-filter. With mask<255, bits are forced on. */
 static void ive_op_erode(HisiIveState *s)
 {
     uint16_t w, h;
     uint8_t *f1;
     ive_read_frames(s, &f1, NULL, &w, &h);
+
+    uint8_t mask[25];
+    uint32_t mask_addr = s->regs[IVE_OP_DESC / 4];
+    if (mask_addr) {
+        dma_memory_read(&address_space_memory, mask_addr,
+                        mask, 25, MEMTXATTRS_UNSPECIFIED);
+    } else {
+        memset(mask, 255, 25);
+    }
+
     uint8_t *out = g_malloc(w * h);
     for (uint16_t y = 0; y < h; y++) {
         for (uint16_t x = 0; x < w; x++) {
-            uint8_t minv = 255;
+            uint8_t andv = 255; /* bitwise AND accumulator */
             for (int ky = -2; ky <= 2; ky++) {
                 for (int kx = -2; kx <= 2; kx++) {
                     int sy = y + ky < 0 ? 0 : (y + ky >= h ? h - 1 : y + ky);
                     int sx = x + kx < 0 ? 0 : (x + kx >= w ? w - 1 : x + kx);
-                    uint8_t v = f1[sy * w + sx];
-                    if (v < minv) minv = v;
+                    andv &= f1[sy * w + sx] | (~mask[(ky + 2) * 5 + (kx + 2)] & 0xFF);
                 }
             }
-            out[y * w + x] = minv;
+            out[y * w + x] = andv;
         }
     }
     ive_write_frame(s, out, w, h);
