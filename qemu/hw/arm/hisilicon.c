@@ -69,7 +69,7 @@
  *        EV300       2018Q4  A7 @900MHz          H.265 5M@15      5M
  *        18EV300     2018Q4  A7 @900MHz          H.265 3M@20      3M
  *        DV200       2018Q4  A7 @900MHz          H.265 5M@20      5M
- *  V4g   GK7205V200  2019+   (die-identical V4 — Goke rebrand)
+ *  V4g   GK7205V200  2021    (die-identical V4 — Goke rebrand)
  *  V5    CV608       ~2023   Dual A7 MP2         H.265 3M         3M
  *        CV610       ~2023   Dual A7 MP2         H.265 5M         5M
  *        CV613       ~2023   Dual A7 MP2         H.265 4K         4K
@@ -900,11 +900,29 @@ static const HisiSoCConfig hi3516dv200_soc = {
 };
 
 /*
- * Goke variants (2019+) — die-identical V4 silicon, only SoC ID differs.
- * GK7205V200 = Hi3516EV200 (1M), GK7205V300 = Hi3516EV300 (3M),
- * GK7202V300 = Hi3518EV300 (3M), GK7605V100 = Hi3516DV200 (4M).
- * Also GK7205V210 (not emulated here).
+ * Goke (国科微) variants — die-identical V4 HiSilicon silicon rebranded.
  * Hardware addresses, IRQs, GPIO counts all match the HiSilicon original.
+ *
+ * Goke V4 (2021, emulated here):
+ *   GK7205V200 = Hi3516EV200  3M@25fps,  512Mb DDR2
+ *   GK7205V210 (not emulated) 4M@20fps,  512Mb DDR
+ *   GK7205V300 = Hi3516EV300  5M@25fps,  1Gb DDR
+ *   GK7202V300 = Hi3518EV300  4M@20fps,  512Mb DDR
+ *   GK7605V100 = Hi3516DV200  5M@25fps
+ *
+ * Goke next-gen (2022+, NOT emulated, separate Goke designs with NPU):
+ *   GK7205V500  5M@25fps  0.5 TOPS  512Mb DDR   (2022)
+ *   GK7205V510  5M@30fps  1 TOPS    1Gb DDR     (2022)
+ *   GK7205V530  5M@30fps  1 TOPS    ext DDR     (2022)
+ *   GK7202V330  5M@25fps  0.5 TOPS  512Mb DDR   (2022)
+ *   GK7606V100  4K@60fps  2 TOPS                (2022)
+ *   GK7609V100  8K@30fps  4 TOPS                (2022)
+ *   GK7608V100  4K@60fps  4+4 TOPS              (2021)
+ *   GK7605V200  4K@30fps  2 TOPS                (2023)
+ *   GK7205V600  4K@20fps  1 TOPS                (2024)
+ *   GK7606V200  4K@60fps  4 TOPS                (2024)
+ *   GK7609V200  8K@30fps  8 TOPS    H.266       (2024)
+ *   GK7608V200  4K@60fps  8 TOPS    H.266       (2025)
  */
 
 /* Common V4 peripheral block — shared by all V4 & Goke configs */
