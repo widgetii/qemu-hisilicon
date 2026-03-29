@@ -51,9 +51,11 @@ int __fgetc_unlocked(FILE *stream) { return fgetc(stream); }
 typedef struct { uint64_t phys, virt; uint32_t size, pad; } xnn_mem_t;
 
 extern int mpi_ive_xnn_loadmodel(void *model_mem, void *tmp_mem, void *model_params);
+extern int mpi_ive_xnn_forward_slice(void *buf);
 extern void mpi_ive_xnn_unloadmodel(void *model_params);
 extern int mp_ive_svp_alg_proc_init(void *a, void *b);
 extern void mp_ive_svp_alg_proc_exit(void);
+extern int ioctl(int fd, unsigned long request, ...);
 
 /* Find segment start by scanning for valid header */
 static int find_segment(const uint8_t *data, int file_size) {
@@ -165,6 +167,86 @@ int main(int argc, char **argv) {
                 *(uint32_t *)(model_params + 0x1C));
         fprintf(stderr, "  model_params[0x24] (name):     %.32s\n",
                 model_params + 0x24);
+        /* Try forward inference */
+        uint32_t in_w = *(uint32_t *)(model_params + 0x14);
+        uint32_t in_h = *(uint32_t *)(model_params + 0x18);
+        uint32_t in_c = *(uint32_t *)(model_params + 0x1C);
+        uint32_t stride = (in_w + 15) & ~15;
+        uint32_t y_sz = stride * in_h;
+        uint32_t uv_sz = stride * in_h / 2;
+
+        /* Allocate frame buffer */
+        uint64_t frm_p, frm_v;
+        ret = HI_MPI_SYS_MmzAlloc(&frm_p, (void **)&frm_v, "FRM", NULL, y_sz + uv_sz);
+        if (ret == 0) {
+            /* Fill with test pattern: gray 128 */
+            memset((void *)(uintptr_t)frm_v, 128, y_sz);
+            memset((void *)(uintptr_t)frm_v + y_sz, 128, uv_sz);
+            HI_MPI_SYS_MmzFlushCache(frm_p, (void *)(uintptr_t)frm_v, y_sz + uv_sz);
+
+            /* Build forward_slice ioctl buffer (2416 bytes) */
+            uint8_t fwd[2416];
+            memset(fwd, 0, sizeof(fwd));
+
+            /* src_blob at +0x008 (48 bytes) */
+            *(uint32_t *)(fwd + 0x008) = 2;         /* type = YVU420SP */
+            *(uint32_t *)(fwd + 0x00C) = stride;    /* stride */
+            *(uint64_t *)(fwd + 0x010) = frm_v;     /* virt */
+            *(uint64_t *)(fwd + 0x018) = frm_p;     /* phys */
+            *(uint32_t *)(fwd + 0x020) = 1;         /* num */
+            *(uint32_t *)(fwd + 0x028) = in_w;      /* width */
+            *(uint32_t *)(fwd + 0x02C) = in_h;      /* height */
+            *(uint32_t *)(fwd + 0x030) = in_c;      /* channels */
+
+            /* model_id at +0x338 */
+            *(uint32_t *)(fwd + 0x338) = 0;
+
+            /* tmp_buf at +0x940 */
+            *(uint64_t *)(fwd + 0x940) = tmp_mem.phys;
+            *(uint64_t *)(fwd + 0x948) = tmp_mem.virt;
+            *(uint32_t *)(fwd + 0x950) = tmp_size;
+
+            /* ctrl at +0x958: src_num=1, dst_num=1 */
+            *(uint32_t *)(fwd + 0x958) = 1;
+            *(uint32_t *)(fwd + 0x95C) = 1;
+
+            /* instant at +0x968 */
+            *(uint32_t *)(fwd + 0x968) = 1;
+
+            /* Find IVE fd */
+            int ive_fd = -1;
+            char path[64], link[64];
+            for (int fd = 3; fd < 64; fd++) {
+                snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+                int n = readlink(path, link, sizeof(link) - 1);
+                if (n > 0) { link[n] = '\0'; if (strstr(link, "ive")) { ive_fd = fd; break; } }
+            }
+
+            if (ive_fd >= 0) {
+                fprintf(stderr, "\nRunning forward (fd=%d, %ux%u)...\n", ive_fd, in_w, in_h);
+                ret = ioctl(ive_fd, 0xc9704638, fwd);
+                fprintf(stderr, "  ioctl ret=%d\n", ret);
+
+                /* Check tmp_buf for output */
+                HI_MPI_SYS_MmzFlushCache(tmp_mem.phys, (void *)(uintptr_t)tmp_mem.virt, 1024);
+                int8_t *out = (int8_t *)(uintptr_t)tmp_mem.virt;
+                int nz = 0;
+                for (int i = 0; i < 512; i++) if (out[i] != 0) nz++;
+                fprintf(stderr, "  tmp_buf nonzero: %d/512\n", nz);
+                fprintf(stderr, "  first 32 bytes: ");
+                for (int i = 0; i < 32; i++) fprintf(stderr, "%02x ", (uint8_t)out[i]);
+                fprintf(stderr, "\n");
+
+                /* Also check last part of tmp_buf where FC output might be */
+                HI_MPI_SYS_MmzFlushCache(tmp_mem.phys, (void *)(uintptr_t)tmp_mem.virt, tmp_size);
+                int nz2 = 0;
+                for (uint32_t i = 0; i < tmp_size; i++) if (out[i] != 0) nz2++;
+                fprintf(stderr, "  tmp_buf total nonzero: %d/%u\n", nz2, tmp_size);
+            }
+
+            HI_MPI_SYS_MmzFree(frm_p, (void *)(uintptr_t)frm_v);
+        }
+
         mpi_ive_xnn_unloadmodel(model_params);
     } else {
         fprintf(stderr, "FAILED. Error 0x%x\n", ret);
