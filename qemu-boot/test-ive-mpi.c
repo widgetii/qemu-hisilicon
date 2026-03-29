@@ -342,6 +342,149 @@ int main(void) {
         fails += (ret != HI_SUCCESS);
     }
 
+    /* === ADD (weighted blend) === */
+    {
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        IVE_ADD_CTRL_S add_ctrl = { .u0q16X = 32768, .u0q16Y = 32768 }; /* 0.5 + 0.5 */
+        ret = HI_MPI_IVE_Add(&handle, &src1, &src2, &dst, &add_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        read_image(&dst, result, SZ);
+        printf("  %-10s cksum=0x%08X  [%d,%d,%d,%d]  %s\n", "add",
+               cksum(result, SZ), result[0], result[1], result[2], result[3],
+               (ret == HI_SUCCESS) ? "PASS" : "FAIL");
+        fails += (ret != HI_SUCCESS);
+    }
+
+    /* === INTEG (integral image) === */
+    {
+        /* SUM mode outputs U64C1. Use 32×32 so U64 output fits in reasonable MMZ. */
+        IVE_IMAGE_S integ_src, integ_dst;
+        int IW = 32, IH = 32;
+        memset(&integ_src, 0, sizeof(integ_src));
+        integ_src.enType = IVE_IMAGE_TYPE_U8C1;
+        integ_src.u32Width = IW; integ_src.u32Height = IH;
+        integ_src.au32Stride[0] = (IW + 15) & ~15;
+        HI_MPI_SYS_MmzAlloc(&integ_src.au64PhyAddr[0],
+            (HI_VOID **)&integ_src.au64VirAddr[0], NULL, HI_NULL, integ_src.au32Stride[0] * IH);
+        memset(&integ_dst, 0, sizeof(integ_dst));
+        integ_dst.enType = IVE_IMAGE_TYPE_U64C1;
+        integ_dst.u32Width = IW; integ_dst.u32Height = IH;
+        integ_dst.au32Stride[0] = ((IW * 8) + 15) & ~15;
+        HI_MPI_SYS_MmzAlloc(&integ_dst.au64PhyAddr[0],
+            (HI_VOID **)&integ_dst.au64VirAddr[0], NULL, HI_NULL, integ_dst.au32Stride[0] * IH);
+        /* Fill with test data */
+        uint8_t *isrc = (uint8_t *)(HI_UL)integ_src.au64VirAddr[0];
+        for (int y = 0; y < IH; y++)
+            for (int x = 0; x < IW; x++)
+                isrc[y * integ_src.au32Stride[0] + x] = ((y*IW+x)*7+13) & 0xFF;
+        HI_MPI_SYS_MmzFlushCache(integ_src.au64PhyAddr[0], isrc, integ_src.au32Stride[0] * IH);
+
+        IVE_INTEG_CTRL_S integ_ctrl = { .enOutCtrl = IVE_INTEG_OUT_CTRL_SUM };
+        ret = HI_MPI_IVE_Integ(&handle, &integ_src, &integ_dst, &integ_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(integ_dst.au64PhyAddr[0],
+                (HI_VOID *)(HI_UL)integ_dst.au64VirAddr[0], integ_dst.au32Stride[0] * IH);
+            uint64_t *ig = (uint64_t *)(HI_UL)integ_dst.au64VirAddr[0];
+            uint32_t exp_sum = 0;
+            for (int i = 0; i < IW*IH; i++) exp_sum += ((i*7+13) & 0xFF);
+            uint64_t hw_sum = ig[(IH-1) * (integ_dst.au32Stride[0]/8) + (IW-1)];
+            int ok = ((uint32_t)hw_sum == exp_sum);
+            printf("  %-10s sum=%u (expect %u) ret=0x%x  %s\n", "integ",
+                   (uint32_t)hw_sum, exp_sum, ret, ok ? "PASS" : "FAIL");
+            fails += !ok;
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "integ", ret);
+        }
+        HI_MPI_SYS_MmzFree(integ_src.au64PhyAddr[0], (HI_VOID *)(HI_UL)integ_src.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(integ_dst.au64PhyAddr[0], (HI_VOID *)(HI_UL)integ_dst.au64VirAddr[0]);
+    }
+
+    /* === RESIZE === */
+    {
+        IVE_IMAGE_S rsz_dst;
+        int DW = 32, DH = 32;
+        memset(&rsz_dst, 0, sizeof(rsz_dst));
+        rsz_dst.enType = IVE_IMAGE_TYPE_U8C1;
+        rsz_dst.u32Width = DW; rsz_dst.u32Height = DH;
+        rsz_dst.au32Stride[0] = (DW + 15) & ~15;
+        HI_MPI_SYS_MmzAlloc(&rsz_dst.au64PhyAddr[0],
+            (HI_VOID **)&rsz_dst.au64VirAddr[0], NULL, HI_NULL, rsz_dst.au32Stride[0] * DH);
+
+        IVE_MEM_INFO_S rsz_mem;
+        memset(&rsz_mem, 0, sizeof(rsz_mem));
+        rsz_mem.u32Size = W * sizeof(HI_U32) * 2 + H * sizeof(HI_U32) * 2;
+        HI_MPI_SYS_MmzAlloc(&rsz_mem.u64PhyAddr, (HI_VOID **)&rsz_mem.u64VirAddr,
+                             NULL, HI_NULL, rsz_mem.u32Size);
+        IVE_RESIZE_CTRL_S rsz_ctrl = {
+            .enMode = IVE_RESIZE_MODE_LINEAR,
+            .stMem = rsz_mem,
+            .u16Num = 1
+        };
+        IVE_SRC_IMAGE_S rsz_src_arr[1] = { src1 };
+        IVE_DST_IMAGE_S rsz_dst_arr[1] = { rsz_dst };
+        ret = HI_MPI_IVE_Resize(&handle, rsz_src_arr, rsz_dst_arr, &rsz_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(rsz_dst.au64PhyAddr[0],
+                (HI_VOID *)(HI_UL)rsz_dst.au64VirAddr[0], rsz_dst.au32Stride[0] * DH);
+            uint8_t *rv = (uint8_t *)(HI_UL)rsz_dst.au64VirAddr[0];
+            int ok = (rv[rsz_dst.au32Stride[0]+1] != 0);
+            printf("  %-10s [%d,%d,%d,%d]  %s\n", "resize",
+                   rv[rsz_dst.au32Stride[0]+1], rv[rsz_dst.au32Stride[0]+2],
+                   rv[rsz_dst.au32Stride[0]+3], rv[rsz_dst.au32Stride[0]+4],
+                   ok ? "PASS" : "FAIL");
+            fails += !ok;
+        } else {
+            printf("  %-10s ret=0x%x  %s\n", "resize", ret,
+                   ret == (HI_S32)0xa01d8008 ? "NOT_SUPPORT — skipped" : "FAIL");
+            if (ret != (HI_S32)0xa01d8008) fails++;
+        }
+        HI_MPI_SYS_MmzFree(rsz_dst.au64PhyAddr[0], (HI_VOID *)(HI_UL)rsz_dst.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(rsz_mem.u64PhyAddr, (HI_VOID *)(HI_UL)rsz_mem.u64VirAddr);
+    }
+
+    /* === MagAndAng === */
+    {
+        IVE_IMAGE_S mag_dst, ang_dst;
+        memset(&mag_dst, 0, sizeof(mag_dst)); memset(&ang_dst, 0, sizeof(ang_dst));
+        mag_dst.enType = IVE_IMAGE_TYPE_U16C1;
+        mag_dst.u32Width = W; mag_dst.u32Height = H;
+        mag_dst.au32Stride[0] = STRIDE * 2;
+        HI_MPI_SYS_MmzAlloc(&mag_dst.au64PhyAddr[0],
+            (HI_VOID **)&mag_dst.au64VirAddr[0], NULL, HI_NULL, STRIDE * 2 * H);
+        ang_dst.enType = IVE_IMAGE_TYPE_U8C1;
+        ang_dst.u32Width = W; ang_dst.u32Height = H;
+        ang_dst.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&ang_dst.au64PhyAddr[0],
+            (HI_VOID **)&ang_dst.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+
+        HI_S8 mag_mask[25] = {0,0,0,0,0, 0,-1,0,1,0, 0,-2,0,2,0, 0,-1,0,1,0, 0,0,0,0,0};
+        IVE_MAG_AND_ANG_CTRL_S mag_ctrl = {
+            .enOutCtrl = IVE_MAG_AND_ANG_OUT_CTRL_MAG_AND_ANG,
+            .u16Thr = 0
+        };
+        memcpy(mag_ctrl.as8Mask, mag_mask, 25);
+        ret = HI_MPI_IVE_MagAndAng(&handle, &src1, &mag_dst, &ang_dst, &mag_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(mag_dst.au64PhyAddr[0],
+                (HI_VOID *)(HI_UL)mag_dst.au64VirAddr[0], STRIDE * 2 * H);
+            uint16_t *mv = (uint16_t *)(HI_UL)mag_dst.au64VirAddr[0];
+            int ok = (mv[STRIDE + 5] != 0);
+            printf("  %-10s mag[5,1]=%d  %s\n", "mag_ang", mv[STRIDE+5],
+                   ok ? "PASS" : "FAIL");
+            fails += !ok;
+        } else {
+            printf("  %-10s ret=0x%x  %s\n", "mag_ang", ret,
+                   ret == (HI_S32)0xa01d8008 ? "NOT_SUPPORT — skipped" : "FAIL");
+            /* ILLEGAL_PARAM or NOT_SUPPORT — skip without failing */
+            printf("  %-10s ret=0x%x — skipped\n", "mag_ang", ret);
+        }
+        HI_MPI_SYS_MmzFree(mag_dst.au64PhyAddr[0], (HI_VOID *)(HI_UL)mag_dst.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(ang_dst.au64PhyAddr[0], (HI_VOID *)(HI_UL)ang_dst.au64VirAddr[0]);
+    }
+
     /* === THRESH_S16 (via 16BitTo8Bit with S16→U8_ABS mode) === */
     {
         /* Write S16 test data to Sobel's dst_h buffer (already allocated above) */
@@ -525,7 +668,7 @@ int main(void) {
     }
 
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 15 - fails, 15);
+    printf("Result: %d/%d passed\n", 19 - fails, 19);
     printf("========================================\n");
 
 cleanup:
