@@ -1126,16 +1126,15 @@ static void ive_op_ord_stat(HisiIveState *s)
     uint8_t *out = g_malloc(w * h);
     for (uint16_t y = 0; y < h; y++) {
         for (uint16_t x = 0; x < w; x++) {
-            if (y == 0 || y == h-1 || x == 0 || x == w-1) {
-                out[y*w+x] = f1[y*w+x];
-                continue;
-            }
-            /* Collect 3×3 neighborhood */
+            /* Collect 3×3 neighborhood with clamped borders */
             uint8_t nb[9];
             int k = 0;
             for (int dy = -1; dy <= 1; dy++)
-                for (int dx = -1; dx <= 1; dx++)
-                    nb[k++] = f1[(y+dy)*w+(x+dx)];
+                for (int dx = -1; dx <= 1; dx++) {
+                    int sy = y+dy < 0 ? 0 : (y+dy >= h ? h-1 : y+dy);
+                    int sx = x+dx < 0 ? 0 : (x+dx >= w ? w-1 : x+dx);
+                    nb[k++] = f1[sy*w+sx];
+                }
             /* Sort for median (bubble sort on 9 elements) */
             for (int i = 0; i < 8; i++)
                 for (int j = i+1; j < 9; j++)
