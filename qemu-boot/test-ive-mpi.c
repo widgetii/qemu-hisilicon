@@ -357,9 +357,9 @@ int main(void) {
 
     /* === INTEG (integral image) === */
     {
-        /* SUM mode outputs U64C1. Use 32×32 so U64 output fits in reasonable MMZ. */
+        /* COMBINE mode outputs U64C1. Use 64×64 (IVE minimum size). */
         IVE_IMAGE_S integ_src, integ_dst;
-        int IW = 32, IH = 32;
+        int IW = W, IH = H;
         memset(&integ_src, 0, sizeof(integ_src));
         integ_src.enType = IVE_IMAGE_TYPE_U8C1;
         integ_src.u32Width = IW; integ_src.u32Height = IH;
@@ -380,7 +380,7 @@ int main(void) {
                 isrc[y * integ_src.au32Stride[0] + x] = ((y*IW+x)*7+13) & 0xFF;
         HI_MPI_SYS_MmzFlushCache(integ_src.au64PhyAddr[0], isrc, integ_src.au32Stride[0] * IH);
 
-        IVE_INTEG_CTRL_S integ_ctrl = { .enOutCtrl = IVE_INTEG_OUT_CTRL_SUM };
+        IVE_INTEG_CTRL_S integ_ctrl = { .enOutCtrl = IVE_INTEG_OUT_CTRL_COMBINE };
         ret = HI_MPI_IVE_Integ(&handle, &integ_src, &integ_dst, &integ_ctrl, HI_TRUE);
         if (ret == HI_SUCCESS) {
             ive_wait(handle);
