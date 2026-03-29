@@ -388,23 +388,47 @@ def parse_oms(filename: str) -> OMSModel:
     model.filename = filename
     model.file_size = len(data)
 
-    # Timestamp at outer header +0x70
-    ts = data[0x70:0x80]
-    if all(0x30 <= b <= 0x39 for b in ts[:16]):
-        raw = ts[:16].decode()
-        model.timestamp = f'20{raw[0:2]}-{raw[2:4]}-{raw[4:6]} {raw[6:8]}:{raw[8:10]}:{raw[10:12]}'
+    # Scan for timestamp (16 ASCII digits YYMMDDHHMMSSxxxx)
+    for ts_off in range(0x60, min(0x100, len(data) - 16)):
+        ts = data[ts_off:ts_off + 16]
+        if all(0x30 <= b <= 0x39 for b in ts):
+            raw = ts.decode()
+            model.timestamp = f'20{raw[0:2]}-{raw[2:4]}-{raw[4:6]} {raw[6:8]}:{raw[8:10]}:{raw[10:12]}'
+            break
 
-    # Segment 1 at offset 0x50
-    seg1 = parse_segment(data, 0x50)
+    # Scan for valid segment headers.
+    # A valid segment has: total_scale_num [1,16] at +0x30,
+    # total_layer_num [1,500] at +0x32, src_num [1,16] at +0x34, dst_num [1,16] at +0x35
+    segments_found = []
+    for off in range(0x40, min(len(data) - 80, 0x200), 0x10):
+        scale = struct.unpack_from('<H', data, off + 48)[0]
+        layers = struct.unpack_from('<H', data, off + 50)[0]
+        src = data[off + 52]
+        dst = data[off + 53]
+        if 1 <= scale <= 16 and 1 <= layers <= 500 and 1 <= src <= 16 and 1 <= dst <= 16:
+            seg_size = struct.unpack_from('<I', data, off + 4)[0]
+            if seg_size < len(data) * 2:  # reasonable size
+                segments_found.append(off)
+
+    if not segments_found:
+        return model
+
+    seg1 = parse_segment(data, segments_found[0])
     model.segments.append(seg1)
 
-    # Check for segment 2
-    seg2_raw = struct.unpack_from('<I', data, 0x48)[0]
-    if seg2_raw > 0:
-        seg2_off = seg2_raw + 0x20
-        if seg2_off < len(data) - 80:
-            seg2 = parse_segment(data, seg2_off)
+    # Find segment 2 by scanning after segment 1 data
+    seg1_end = segments_found[0] + seg1.header.segment_size
+    for off in range(seg1_end - 0x100, min(len(data) - 80, seg1_end + 0x200), 0x10):
+        if off <= segments_found[0]:
+            continue
+        scale = struct.unpack_from('<H', data, off + 48)[0]
+        layers = struct.unpack_from('<H', data, off + 50)[0]
+        src = data[off + 52]
+        dst = data[off + 53]
+        if 1 <= scale <= 16 and 1 <= layers <= 500 and 1 <= src <= 16 and 1 <= dst <= 16:
+            seg2 = parse_segment(data, off)
             model.segments.append(seg2)
+            break
 
     return model
 
