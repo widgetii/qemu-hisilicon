@@ -322,20 +322,29 @@ pointing into the weight blob at segment + `weight_data_off`.
 At segment + `layer_name_off`. Each entry is 0x40 bytes:
 32 bytes name (null-padded) + 32 bytes metadata (layer index at +0x30).
 
-### Vendor YOLO Model Architecture (parsed from OMS)
+### Multi-Input / Multi-Output Support
+
+The format supports `src_num` up to 16 and `dst_num` up to 16.
+
+**Dual-input example** (from production camera flash dump, 1046 KB):
+- `src_num=2, dst_num=2, data_slice=1, roi_batch_num=32`
+- Two Preproc layers feed two 320×360 streams (current + reference frame)
+- Two DMA layers merge the streams into shared backbone
+- Two Conv→Unpack output heads producing 23×40×320 tensors each
+- Single segment (no refinement head), names stripped
+
+This is a **temporal dual-frame motion-aware detector** — the CNN takes
+both current and previous frames as input, enabling motion-based detection
+directly in the network without external frame differencing.
+
+### Vendor YOLO Model Architecture (640×360 SDK sample)
 ```
 [0]  Preproc VGS: 360×640×3 input
-[1]  Conv: 3→8ch, 360×640    (first conv, likely 3×3)
-[2]  Conv: 8→8ch, 360→180    (stride-2 downscale)
-[3]  Conv: 16ch, 180×320
-...
-[20] Conv: 64ch, 23×40       (final spatial resolution)
-...
-[42] Conv: 512→512ch, 23×40
+[1-42] 42 Conv layers: 360×640 → 23×40, channels 8→512
 [43] Conv: 512→63ch, 23×40   (detection head, no pool/relu)
 [44] Unpack                   (output format conversion)
 ```
-45 layers total, 42 conv + 1 preproc + 1 unpack + 1 output conv.
+45 layers, single-input/single-output.
 Output: 40×23×63 = 9 anchors × (4 bbox + 1 conf + 2 class).
 
 ## Success Criteria
