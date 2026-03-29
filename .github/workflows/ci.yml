@@ -53,7 +53,7 @@ jobs:
             kernel: uImage.hi3516cv100
             rootfs: rootfs.squashfs.hi3516cv100
             append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            nic: "-nic user"
+
 
           - name: hi3516cv200
             soc: hi3516cv200
@@ -62,7 +62,7 @@ jobs:
             kernel: uImage.hi3516cv200
             rootfs: rootfs.squashfs.hi3516cv200
             append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            nic: "-nic user"
+
 
           - name: hi3516av100
             soc: hi3516av100
@@ -71,7 +71,7 @@ jobs:
             kernel: uImage.hi3516av100
             rootfs: rootfs.squashfs.hi3516av100
             append: "console=ttyAMA0,115200 earlyprintk mem=256M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            nic: ""
+
 
           - name: hi3516cv300
             soc: hi3516cv300
@@ -80,7 +80,7 @@ jobs:
             kernel: uImage.hi3516cv300
             rootfs: rootfs.squashfs.hi3516cv300
             append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            nic: "-nic user"
+
 
           - name: hi3516cv500
             soc: hi3516cv500
@@ -89,7 +89,7 @@ jobs:
             kernel: uImage.hi3516cv500
             rootfs: rootfs.squashfs.hi3516cv500
             append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            nic: "-nic user"
+
 
           - name: hi3519v101
             soc: hi3519v101
@@ -98,7 +98,7 @@ jobs:
             kernel: uImage.hi3519v101
             rootfs: rootfs.squashfs.hi3519v101
             append: "console=ttyAMA0,115200 earlyprintk mem=256M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            nic: ""
+
 
           - name: hi3516ev300
             soc: hi3516ev300
@@ -107,7 +107,7 @@ jobs:
             kernel: uImage.hi3516ev300
             rootfs: rootfs.squashfs.hi3516ev300
             append: "console=ttyAMA0,115200 earlyprintk mem=96M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data) mmz_allocator=hisi mmz=anonymous,0,0x46000000,32M"
-            nic: "-nic user"
+
 
           # hi3516cv610 (V5) excluded: no OpenIPC firmware release yet
 
@@ -144,7 +144,6 @@ jobs:
             -initrd "qemu-boot/${{ matrix.rootfs }}" \
             -nographic -serial mon:stdio \
             -append '${{ matrix.append }}' \
-            ${{ matrix.nic }} \
             -d unimp,guest_errors -D qemu-boot/qemu.log \
             2>&1 | tee boot-output.txt &
           QEMU_PID=$!
