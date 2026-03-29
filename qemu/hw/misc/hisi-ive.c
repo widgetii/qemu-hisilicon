@@ -1294,17 +1294,23 @@ static void ive_op_canny_edge(HisiIveState *s)
         for (int c = 0; c < 5; c++)
             mask_v[r * 5 + c] = mask_h[c * 5 + r];
 
-    /* 1. Apply 5×5 gradient kernels */
+    /* 1. Apply 5×5 gradient kernels (with clamped border handling) */
     int16_t *gx = g_malloc0(w * h * 2);
     int16_t *gy = g_malloc0(w * h * 2);
     uint16_t *mag = g_malloc0(w * h * 2);
 
-    for (uint16_t y = 2; y < h - 2; y++) {
-        for (uint16_t x = 2; x < w - 2; x++) {
+    for (uint16_t y = 0; y < h; y++) {
+        for (uint16_t x = 0; x < w; x++) {
             int sumx = 0, sumy = 0;
             for (int ky = -2; ky <= 2; ky++)
                 for (int kx = -2; kx <= 2; kx++) {
-                    uint8_t pixel = f1[(y + ky) * w + (x + kx)];
+                    /* Clamp to image boundaries */
+                    int sy = y + ky, sx = x + kx;
+                    if (sy < 0) sy = 0;
+                    if (sy >= h) sy = h - 1;
+                    if (sx < 0) sx = 0;
+                    if (sx >= w) sx = w - 1;
+                    uint8_t pixel = f1[sy * w + sx];
                     sumx += pixel * mask_h[(ky + 2) * 5 + (kx + 2)];
                     sumy += pixel * mask_v[(ky + 2) * 5 + (kx + 2)];
                 }
@@ -1314,33 +1320,54 @@ static void ive_op_canny_edge(HisiIveState *s)
         }
     }
 
-    /* 2. Non-Maximum Suppression (strict comparison to match HW) */
+    /* 2. Non-Maximum Suppression with clamped border access */
     uint8_t *nms = g_malloc0(w * h);
-    for (uint16_t y = 3; y < h - 3; y++) {
-        for (uint16_t x = 3; x < w - 3; x++) {
+    for (uint16_t y = 0; y < h; y++) {
+        for (uint16_t x = 0; x < w; x++) {
             uint16_t m = mag[y * w + x];
             if (m < lo_thr) continue;
 
             int ax = abs(gx[y * w + x]);
             int ay = abs(gy[y * w + x]);
-            uint16_t n1, n2;
 
+            /* Neighbor coordinates with clamping */
+            int ym1 = (y > 0) ? y - 1 : 0;
+            int yp1 = (y < h - 1) ? y + 1 : h - 1;
+            int xm1 = (x > 0) ? x - 1 : 0;
+            int xp1 = (x < w - 1) ? x + 1 : w - 1;
+
+            uint16_t n1, n2;
             if (ay > 2 * ax) {
-                n1 = mag[(y - 1) * w + x];
-                n2 = mag[(y + 1) * w + x];
+                n1 = mag[ym1 * w + x];
+                n2 = mag[yp1 * w + x];
             } else if (ax > 2 * ay) {
-                n1 = mag[y * w + x - 1];
-                n2 = mag[y * w + x + 1];
+                n1 = mag[y * w + xm1];
+                n2 = mag[y * w + xp1];
             } else if ((gx[y * w + x] > 0) == (gy[y * w + x] > 0)) {
-                n1 = mag[(y - 1) * w + x - 1];
-                n2 = mag[(y + 1) * w + x + 1];
+                n1 = mag[ym1 * w + xm1];
+                n2 = mag[yp1 * w + xp1];
             } else {
-                n1 = mag[(y - 1) * w + x + 1];
-                n2 = mag[(y + 1) * w + x - 1];
+                n1 = mag[ym1 * w + xp1];
+                n2 = mag[yp1 * w + xm1];
             }
 
-            /* Strict: must be strictly greater than both neighbors */
-            if (m > n1 && m > n2)
+            /* NMS: m > n1 && m >= n2.
+             * n1 is the "backward" neighbor along gradient direction.
+             * At boundaries, n1 coordinate gets clamped to self → m==n1.
+             * In that case, the pixel IS the boundary maximum → pass. */
+            int n1_clamped = 0;
+            if (ay > 2 * ax) { /* vertical: n1 at y-1 */
+                n1_clamped = (y == 0);
+            } else if (ax > 2 * ay) { /* horizontal: n1 at x-1 */
+                n1_clamped = (x == 0);
+            } else if ((gx[y * w + x] > 0) == (gy[y * w + x] > 0)) { /* diag \ */
+                n1_clamped = (y == 0 || x == 0);
+            } else { /* diag / */
+                n1_clamped = (y == 0 || x == w - 1);
+            }
+
+            int pass1 = n1_clamped ? (m >= n1) : (m > n1);
+            if (pass1 && m >= n2)
                 nms[y * w + x] = (m >= hi_thr) ? 255 : 128;
         }
     }
