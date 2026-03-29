@@ -180,10 +180,15 @@ int main(int argc, char **argv) {
         uint64_t frm_p, frm_v;
         ret = HI_MPI_SYS_MmzAlloc(&frm_p, (void **)&frm_v, "FRM", NULL, y_sz + uv_sz);
         if (ret == 0) {
-            /* Fill with test pattern: gray 128 */
+            /* Fill frame with gray 128 */
             memset((void *)(uintptr_t)frm_v, 128, y_sz);
             memset((void *)(uintptr_t)frm_v + y_sz, 128, uv_sz);
             HI_MPI_SYS_MmzFlushCache(frm_p, (void *)(uintptr_t)frm_v, y_sz + uv_sz);
+
+            /* ASAN-style: fill tmp_buf and out_buf with 0xAA pattern.
+             * After forward, anything != 0xAA was written by hardware. */
+            memset((void *)(uintptr_t)tmp_mem.virt, 0xAA, tmp_size);
+            HI_MPI_SYS_MmzFlushCache(tmp_mem.phys, (void *)(uintptr_t)tmp_mem.virt, tmp_size);
 
             /* Allocate output buffer in MMZ for detection results */
             uint64_t out_p, out_v;
@@ -319,21 +324,34 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "  region: 0x%04x-0x%04x (%d bytes)\n",
                             rgn_start, tmp_size, tmp_size - rgn_start);
 
-                /* FC output at tmp+0x1800, Unpack output at tmp+0x1830 */
-                fprintf(stderr, "  tmp+0x1800 FC out (hex):    ");
-                for (int i = 0; i < 48; i++)
-                    fprintf(stderr, "%02x ", (uint8_t)out[0x1800 + i]);
-                fprintf(stderr, "\n");
-                /* Read as int32 (FC accumulation) */
-                fprintf(stderr, "  tmp+0x1800 as int32[10]:    ");
-                for (int i = 0; i < 10; i++)
-                    fprintf(stderr, "%d ", *(int32_t *)(out + 0x1800 + i * 4));
-                fprintf(stderr, "\n");
-                /* Read Unpack output */
-                fprintf(stderr, "  tmp+0x1830 Unpack out (hex):");
-                for (int i = 0; i < 32; i++)
-                    fprintf(stderr, " %02x", (uint8_t)out[0x1830 + i]);
-                fprintf(stderr, "\n");
+                /* Scan for bytes != 0xAA (written by hardware) */
+                fprintf(stderr, "  HW-written regions (not 0xAA):\n");
+                int rgn_s = -1;
+                for (uint32_t i = 0; i < tmp_size; i += 16) {
+                    int changed = 0;
+                    for (int j = 0; j < 16 && i + j < tmp_size; j++)
+                        if ((uint8_t)out[i + j] != 0xAA) changed++;
+                    if (changed > 0 && rgn_s < 0) rgn_s = i;
+                    else if (changed == 0 && rgn_s >= 0) {
+                        fprintf(stderr, "    +0x%04x - +0x%04x (%d bytes)\n",
+                                rgn_s, (int)i, (int)i - rgn_s);
+                        /* Dump first and last 16 bytes of each region */
+                        fprintf(stderr, "      first: ");
+                        for (int j = 0; j < 16; j++) fprintf(stderr, "%02x ", (uint8_t)out[rgn_s + j]);
+                        fprintf(stderr, "\n");
+                        if ((int)i - rgn_s > 16) {
+                            fprintf(stderr, "      last:  ");
+                            for (int j = 0; j < 16; j++) fprintf(stderr, "%02x ", (uint8_t)out[i - 16 + j]);
+                            fprintf(stderr, "\n");
+                        }
+                        rgn_s = -1;
+                    }
+                }
+                if (rgn_s >= 0)
+                    fprintf(stderr, "    +0x%04x - +0x%04x (%d bytes)\n",
+                            rgn_s, tmp_size, tmp_size - rgn_s);
+
+                /* Also dump the output buffer we allocated */
 
                 /* Also check our allocated output buffer */
                 HI_MPI_SYS_MmzFlushCache(out_p, (void *)(uintptr_t)out_v, 256);
