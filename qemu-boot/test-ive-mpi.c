@@ -1301,17 +1301,121 @@ int main(void) {
         HI_MPI_SYS_MmzFree(stat_data.u64PhyAddr, (HI_VOID *)(HI_UL)stat_data.u64VirAddr);
     }
 
-    /* === Hog === */
+    /* === PerspTrans + Hog: not in libive.so for EV200 SDK === */
+    printf("  %-10s not in libive.so — N/A\n", "persp");
+    printf("  %-10s not in libive.so — N/A\n", "hog");
+
+#if 0 /* PerspTrans + Hog — headers exist but functions not linked in EV200 SDK */
+    /* === PerspTrans (affine transform) === */
     {
-        ret = (HI_S32)0xa01d8008; /* Likely NOT_SUPPORT — test anyway */
-        printf("  %-10s complex YUV input — skipped (not tested)\n", "hog");
+        /* Set up ROI + point pairs for identity-like transform */
+        IVE_RECT_U32_S roi = { .u32X = 0, .u32Y = 0, .u32Width = W, .u32Height = H };
+
+        IVE_DST_IMAGE_S pt_dst;
+        memset(&pt_dst, 0, sizeof(pt_dst));
+        pt_dst.enType = IVE_IMAGE_TYPE_U8C1;
+        pt_dst.u32Width = W; pt_dst.u32Height = H;
+        pt_dst.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&pt_dst.au64PhyAddr[0], (HI_VOID **)&pt_dst.au64VirAddr[0],
+                             NULL, HI_NULL, STRIDE * H);
+
+        /* 3 point pairs for affine: src→dst identity mapping (Q14.2 fixed point) */
+        /* Point = (x << 2, y << 2) for U14Q2 format */
+        typedef struct { uint16_t sx, sy, dx, dy; } PP;
+        PP pairs[3] = {
+            { 0 << 2, 0 << 2, 0 << 2, 0 << 2 },
+            { (W-1) << 2, 0 << 2, (W-1) << 2, 0 << 2 },
+            { 0 << 2, (H-1) << 2, 0 << 2, (H-1) << 2 }
+        };
+        IVE_SRC_MEM_INFO_S pp_mem;
+        memset(&pp_mem, 0, sizeof(pp_mem));
+        pp_mem.u32Size = sizeof(pairs);
+        HI_MPI_SYS_MmzAlloc(&pp_mem.u64PhyAddr, (HI_VOID **)&pp_mem.u64VirAddr,
+                             NULL, HI_NULL, pp_mem.u32Size);
+        memcpy((void *)(HI_UL)pp_mem.u64VirAddr, pairs, sizeof(pairs));
+        HI_MPI_SYS_MmzFlushCache(pp_mem.u64PhyAddr,
+            (HI_VOID *)(HI_UL)pp_mem.u64VirAddr, pp_mem.u32Size);
+
+        IVE_PERSP_TRANS_CTRL_S pt_ctrl;
+        memset(&pt_ctrl, 0, sizeof(pt_ctrl));
+        pt_ctrl.enAlgMode = IVE_PERSP_TRANS_ALG_MODE_AFFINE;
+        pt_ctrl.enCscMode = IVE_PERSP_TRANS_CSC_MODE_NONE;
+        pt_ctrl.u16RoiNum = 1;
+        pt_ctrl.u16PointPairNum = 3;
+
+        ret = HI_MPI_IVE_PerspTrans(&handle, &src1, &roi, &pp_mem, &pt_dst,
+                                     &pt_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(pt_dst.au64PhyAddr[0],
+                (HI_VOID *)(HI_UL)pt_dst.au64VirAddr[0], STRIDE * H);
+            uint8_t *pv = (uint8_t *)(HI_UL)pt_dst.au64VirAddr[0];
+            /* Identity transform: output should match input */
+            uint8_t *sv2 = (uint8_t *)(HI_UL)src1.au64VirAddr[0];
+            int ok = (pv[STRIDE+5] == sv2[STRIDE+5]);
+            printf("  %-10s out[5,1]=%d (expect %d)  %s\n", "persp",
+                   pv[STRIDE+5], sv2[STRIDE+5], ok ? "PASS" : "FAIL");
+            fails += !ok;
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "persp", ret);
+        }
+        HI_MPI_SYS_MmzFree(pt_dst.au64PhyAddr[0], (HI_VOID *)(HI_UL)pt_dst.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(pp_mem.u64PhyAddr, (HI_VOID *)(HI_UL)pp_mem.u64VirAddr);
     }
 
-    /* === PerspTrans === */
+    /* === Hog (Histogram of Oriented Gradients) === */
     {
-        ret = (HI_S32)0xa01d8008;
-        printf("  %-10s complex point-pair input — skipped (not tested)\n", "persp");
+        /* Create YUV420SP input */
+        IVE_IMAGE_S hog_yuv;
+        memset(&hog_yuv, 0, sizeof(hog_yuv));
+        hog_yuv.enType = IVE_IMAGE_TYPE_YUV420SP;
+        hog_yuv.u32Width = W; hog_yuv.u32Height = H;
+        hog_yuv.au32Stride[0] = STRIDE; hog_yuv.au32Stride[1] = STRIDE;
+        HI_U32 hog_yuv_sz = STRIDE * H * 3 / 2;
+        HI_MPI_SYS_MmzAlloc(&hog_yuv.au64PhyAddr[0], (HI_VOID **)&hog_yuv.au64VirAddr[0],
+                             NULL, HI_NULL, hog_yuv_sz);
+        hog_yuv.au64PhyAddr[1] = hog_yuv.au64PhyAddr[0] + STRIDE * H;
+        hog_yuv.au64VirAddr[1] = hog_yuv.au64VirAddr[0] + STRIDE * H;
+        /* Fill with gradient pattern */
+        uint8_t *hv = (uint8_t *)(HI_UL)hog_yuv.au64VirAddr[0];
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                hv[y * STRIDE + x] = ((y * W + x) * 7 + 13) & 0xFF;
+        memset(hv + STRIDE * H, 128, STRIDE * H / 2); /* UV = neutral */
+        HI_MPI_SYS_MmzFlushCache(hog_yuv.au64PhyAddr[0], hv, hog_yuv_sz);
+
+        /* ROI: full image */
+        IVE_RECT_U32_S hog_roi = { .u32X = 0, .u32Y = 0, .u32Width = W, .u32Height = H };
+
+        /* Output blob */
+        IVE_DST_BLOB_S hog_dst;
+        memset(&hog_dst, 0, sizeof(hog_dst));
+        hog_dst.enType = IVE_BLOB_TYPE_VEC_S32;
+        hog_dst.u32Num = 1;
+        hog_dst.unShape.stWhc.u32Width = 1;
+        hog_dst.unShape.stWhc.u32Height = 1;
+        hog_dst.unShape.stWhc.u32Chn = 9 * 4; /* 9 orientation bins * 4 cells */
+        hog_dst.u32Stride = (9 * 4 * 4 + 15) & ~15;
+        HI_MPI_SYS_MmzAlloc(&hog_dst.u64PhyAddr, (HI_VOID **)&hog_dst.u64VirAddr,
+                             NULL, HI_NULL, hog_dst.u32Stride * 4);
+
+        IVE_HOG_CTRL_S hog_ctrl;
+        memset(&hog_ctrl, 0, sizeof(hog_ctrl));
+        hog_ctrl.enCscMode = IVE_CSC_MODE_PIC_BT601_YUV2RGB;
+        hog_ctrl.enHogMode = IVE_HOG_MODE_VERTICAL_TANGENT_PLANE;
+        hog_ctrl.u32RoiNum = 1;
+
+        ret = HI_MPI_IVE_Hog(&handle, &hog_yuv, &hog_roi, &hog_dst, &hog_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            printf("  %-10s PASS\n", "hog");
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "hog", ret);
+        }
+        HI_MPI_SYS_MmzFree(hog_yuv.au64PhyAddr[0], (HI_VOID *)(HI_UL)hog_yuv.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(hog_dst.u64PhyAddr, (HI_VOID *)(HI_UL)hog_dst.u64VirAddr);
     }
+#endif /* PerspTrans + Hog disabled */
 
     printf("========================================\n");
     printf("Result: %d/%d passed\n", 31 - fails, 31);
