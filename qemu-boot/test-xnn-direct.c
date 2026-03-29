@@ -265,9 +265,9 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    /* Dump first 128 bytes of model_params to find correct offsets */
-    fprintf(stderr, "Model 1 params raw dump:\n");
-    for (int i = 0; i < 128; i += 16) {
+    /* Dump first 512 bytes of model_params to find output node descriptors */
+    fprintf(stderr, "Model 1 params raw dump (512B):\n");
+    for (int i = 0; i < 512; i += 16) {
         fprintf(stderr, "  %04x:", i);
         for (int j = 0; j < 16; j++) fprintf(stderr, " %02x", model1_params.raw[i+j]);
         fprintf(stderr, "  ");

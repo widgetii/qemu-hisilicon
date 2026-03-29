@@ -32,27 +32,35 @@ typedef struct {
 
 /*
  * Blob descriptor — 48 bytes (0x30)
- * Used for input/output tensors in forward pass.
+ * Authoritative layout from decompiled kernel module (ive.c).
+ * Used for input/output tensors in forward/forward_slice.
  * Max 16 src blobs, 16 dst blobs.
  *
- * Decoded from LD_PRELOAD ioctl hook capturing live hi_ivp_process_ex() calls.
- * First forward_slice blob for 640x360 YUV420SP input:
- *   08: type=2  0C: w=640  10: virt  14: ???  18: phys=0x42480000
- *   20: num=1   28: stride=640  2C: h=360  30: channels=3
+ * Note: u32Stride is at +0x04 (NOT after phys addr). Addresses are u64
+ * at 8-byte aligned offsets. ARM32 EABI pads the struct to 48 bytes.
  */
 typedef struct {
-    HI_U32 blob_type;      /* 0x00: data type enum (2 = YUV420SP?) */
-    HI_U32 u32Width;       /* 0x04: width in pixels */
-    HI_U32 u32VirAddr;     /* 0x08: virtual address (32-bit on ARM32) */
-    HI_U32 reserved0;      /* 0x0C: unknown (second virt addr?) */
-    HI_U64 u64PhyAddr;     /* 0x10: physical address (64-bit) */
-    HI_U32 u32Num;         /* 0x18: number of images / batch (1) */
-    HI_U32 reserved1;      /* 0x1C: padding */
-    HI_U32 u32Stride;      /* 0x20: row stride in bytes */
-    HI_U32 u32Height;      /* 0x24: height in pixels */
-    HI_U32 u32Chn;         /* 0x28: channels (3 for YUV) */
-    HI_U32 reserved2;      /* 0x2C: padding */
-} IVE_XNN_BLOB_S; /* 48 bytes */
+    HI_U32 enType;         /* +0x00: IVE_BLOB_TYPE_E (2=YVU420SP, 7=S8 for output) */
+    HI_U32 u32Stride;      /* +0x04: row stride in bytes (aligned to 16) */
+    HI_U64 u64VirAddr;     /* +0x08: virtual address */
+    HI_U64 u64PhyAddr;     /* +0x10: physical address */
+    HI_U32 u32Num;         /* +0x18: batch count [1, 32] */
+    HI_U32 u32Width;       /* +0x1C: width in pixels */
+    HI_U32 u32Height;      /* +0x20: height in pixels */
+    HI_U32 u32Chn;         /* +0x24: channels */
+    HI_U32 pad[2];         /* +0x28: alignment padding to 48 bytes */
+} IVE_XNN_BLOB_S; /* sizeof = 0x30 = 48 bytes */
+
+/* IVE_BLOB_TYPE_E */
+#define IVE_BLOB_TYPE_S32       0
+#define IVE_BLOB_TYPE_U8        1
+#define IVE_BLOB_TYPE_YVU420SP  2
+#define IVE_BLOB_TYPE_YVU422SP  3
+#define IVE_BLOB_TYPE_VEC_S32   4
+#define IVE_BLOB_TYPE_SEQ_S32   5
+#define IVE_BLOB_TYPE_U16       6
+#define IVE_BLOB_TYPE_S8        7   /* CNN output is always S8 */
+#define IVE_BLOB_TYPE_F32       8
 
 /*
  * Forward control — 8 bytes minimum

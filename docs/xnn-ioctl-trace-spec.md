@@ -193,11 +193,78 @@ r3: model_params_t *model
 [sp+12]: int instant         (1=sync)
 ```
 
+## Findings from Decompiled Kernel Source
+
+Reference: `/tmp/ive.c` (Ghidra decompilation of hi3516cv500_ive, 17K lines)
+Spec update: `/tmp/xnn-ioctl-trace-spec.md` (603 lines, complete RE results)
+
+### Key Answers
+
+1. **ctrl struct**: Just `{u32 src_num, u32 dst_num}` — 8 bytes.
+   Kernel derives everything else from model_ctx loaded during LOADMODEL.
+
+2. **Output location**: dst_blobs_out at forward_slice buffer +0x640.
+   Physical addresses computed as `tmp_buf_phys + output_offset_table[dst_idx]`.
+   The output_offset_table is at model_ctx+0x3A0 (kernel memory only).
+
+3. **Output format**: Always IVE_BLOB_TYPE_S8 (signed 8-bit, enum value 7).
+   Stride = width aligned to 16 bytes. Dimensions from model's dst_node array.
+
+4. **The gap**: model_params (2160B returned to userspace) does NOT contain
+   dst_node descriptors or output_offset_table. Those stay in kernel's model_ctx
+   (1080B per model at `g_ive_xnn_ctx + model_id * 0x438`).
+   The vendor's `svp_alg_load_model` reads these via additional queries.
+
+### FORWARD_SLICE Buffer Layout (confirmed, 2416 bytes)
+
+```
++0x000..0x007: reserved/handle
++0x008..0x307: src_blobs[]         — IVE_BLOB_S[16] (input)
++0x308..0x337: roi_info[]
++0x338:        u32 model_id
++0x340..0x63F: dst_blobs_template  — IVE_BLOB_S[16] (preproc fills from this)
++0x640..0x93F: dst_blobs_out[]     — IVE_BLOB_S[16] (actual output destination)
++0x940:        u64 tmp_buf_phys
++0x948:        u64 report_buf_phys (VGS path virtual addr base)
++0x950:        u32 tmp_buf_size
++0x958:        ctrl {u32 src_num, u32 dst_num}
++0x960:        u32 has_roi         (0=picture, 1=ROI)
++0x968:        u32 is_instant      (1=sync)
+```
+
+### IVE_BLOB_S Corrected Layout (48 bytes)
+
+```c
+typedef struct {
+    u32 enType;        // +0x00: IVE_BLOB_TYPE_E
+    u32 u32Stride;     // +0x04: row stride (aligned to 16)
+    u64 u64VirAddr;    // +0x08: virtual address
+    u64 u64PhyAddr;    // +0x10: physical address
+    u32 u32Num;        // +0x18: batch count [1,32]
+    u32 u32Width;      // +0x1C: width
+    u32 u32Height;     // +0x20: height
+    u32 u32Chn;        // +0x24: channels
+    u32 pad[2];        // +0x28: alignment padding
+} IVE_BLOB_S;          // 0x30 = 48 bytes
+```
+
+### Remaining Work
+
+To make direct forward_slice work, we need the output blob descriptors
+(dst_blobs_out at +0x640) pre-filled with correct phys addresses pointing
+into tmp_buf. The kernel's `ive_xnn_pre_dst_data` does this, but only
+from model_ctx data that's not returned to userspace.
+
+**Two approaches**:
+a) Capture the complete 2416-byte ioctl buffer from a working IVP call
+   (via our LD_PRELOAD hook) and replay it with our own frame data
+b) RE the `svp_alg_load_model` in libivp.a to find how it queries
+   dst_node info and output offsets from the loaded model
+
 ## Success Criteria
 
 The RE is complete when we can:
-1. Define the complete `ctrl` struct (arg [sp+8]) with all field offsets and valid values
-2. Know exactly where the kernel writes CNN output (which blob, which phys_addr)
-3. Know the output tensor format (data type, dimensions, layout)
-4. Populate all forward_slice arguments correctly to get non-zero detection output
-   from `test-xnn-direct.c`
+1. ~~Define the complete ctrl struct~~ — DONE (just src_num + dst_num)
+2. ~~Know where kernel writes CNN output~~ — DONE (dst_blobs_out at +0x640)
+3. ~~Know output tensor format~~ — DONE (S8, stride aligned to 16)
+4. Populate dst_blobs_out with correct phys addresses → get non-zero detection output
