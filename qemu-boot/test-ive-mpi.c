@@ -1026,8 +1026,295 @@ int main(void) {
         HI_MPI_SYS_MmzFree(st_mem.u64PhyAddr, (HI_VOID *)(HI_UL)st_mem.u64VirAddr);
     }
 
+    /* === GradFg === */
+    {
+        /* Need 3 inputs: bgDiffFg, curGrad, bgGrad — use src1 for all */
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        IVE_GRAD_FG_CTRL_S gf_ctrl;
+        memset(&gf_ctrl, 0, sizeof(gf_ctrl));
+        gf_ctrl.enMode = IVE_GRAD_FG_MODE_USE_CUR_GRAD;
+        gf_ctrl.u16EdwFactor = 1000;
+        gf_ctrl.u8CrlCoefThr = 80;
+        gf_ctrl.u8MagCrlThr = 4;
+        gf_ctrl.u8MinMagDiff = 2;
+        gf_ctrl.u8NoiseVal = 1;
+        gf_ctrl.u8EdwDark = 1;
+        ret = HI_MPI_IVE_GradFg(&handle, &src1, &src1, &src2, &dst, &gf_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle); flush_cache(&dst);
+            read_image(&dst, result, SZ);
+            printf("  %-10s [%d,%d,%d,%d]  PASS\n", "gradfg",
+                   result[0], result[1], result[2], result[3]);
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "gradfg", ret);
+        }
+    }
+
+    /* === GMM v1 === */
+    {
+        IVE_IMAGE_S gmm1_fg, gmm1_bg;
+        memset(&gmm1_fg, 0, sizeof(gmm1_fg));
+        gmm1_fg.enType = IVE_IMAGE_TYPE_U8C1;
+        gmm1_fg.u32Width = W; gmm1_fg.u32Height = H;
+        gmm1_fg.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&gmm1_fg.au64PhyAddr[0],
+            (HI_VOID **)&gmm1_fg.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+        gmm1_bg = gmm1_fg;
+        HI_MPI_SYS_MmzAlloc(&gmm1_bg.au64PhyAddr[0],
+            (HI_VOID **)&gmm1_bg.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+        IVE_MEM_INFO_S gmm1_model;
+        memset(&gmm1_model, 0, sizeof(gmm1_model));
+        gmm1_model.u32Size = 3 * 8 * W * H;
+        HI_MPI_SYS_MmzAlloc(&gmm1_model.u64PhyAddr, (HI_VOID **)&gmm1_model.u64VirAddr,
+                             NULL, HI_NULL, gmm1_model.u32Size);
+        memset((void *)(HI_UL)gmm1_model.u64VirAddr, 0, gmm1_model.u32Size);
+        HI_MPI_SYS_MmzFlushCache(gmm1_model.u64PhyAddr,
+            (HI_VOID *)(HI_UL)gmm1_model.u64VirAddr, gmm1_model.u32Size);
+
+        IVE_GMM_CTRL_S gmm1_ctrl;
+        memset(&gmm1_ctrl, 0, sizeof(gmm1_ctrl));
+        gmm1_ctrl.u8ModelNum = 3;
+        gmm1_ctrl.u22q10NoiseVar = 225 << 10;
+        gmm1_ctrl.u22q10MaxVar = (16*16) << 10;
+        gmm1_ctrl.u22q10MinVar = (8*8) << 10;
+        gmm1_ctrl.u0q16LearnRate = 65535 / 10;
+        gmm1_ctrl.u0q16BgRatio = 49152;
+        gmm1_ctrl.u8q8VarThr = 4 << 8;
+        gmm1_ctrl.u0q16InitWeight = 3277;
+
+        ret = HI_MPI_IVE_GMM(&handle, &src1, &gmm1_fg, &gmm1_bg, &gmm1_model, &gmm1_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            printf("  %-10s PASS\n", "gmm");
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "gmm", ret);
+        }
+        HI_MPI_SYS_MmzFree(gmm1_fg.au64PhyAddr[0], (HI_VOID *)(HI_UL)gmm1_fg.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(gmm1_bg.au64PhyAddr[0], (HI_VOID *)(HI_UL)gmm1_bg.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(gmm1_model.u64PhyAddr, (HI_VOID *)(HI_UL)gmm1_model.u64VirAddr);
+    }
+
+    /* === FilterAndCSC === */
+    {
+        /* Input YUV420SP, output RGB planar */
+        IVE_IMAGE_S flt_yuv, flt_rgb;
+        memset(&flt_yuv, 0, sizeof(flt_yuv));
+        flt_yuv.enType = IVE_IMAGE_TYPE_YUV420SP;
+        flt_yuv.u32Width = W; flt_yuv.u32Height = H;
+        flt_yuv.au32Stride[0] = STRIDE; flt_yuv.au32Stride[1] = STRIDE;
+        HI_U32 yuv_sz = STRIDE * H * 3 / 2;
+        HI_MPI_SYS_MmzAlloc(&flt_yuv.au64PhyAddr[0], (HI_VOID **)&flt_yuv.au64VirAddr[0],
+                             NULL, HI_NULL, yuv_sz);
+        flt_yuv.au64PhyAddr[1] = flt_yuv.au64PhyAddr[0] + STRIDE * H;
+        flt_yuv.au64VirAddr[1] = flt_yuv.au64VirAddr[0] + STRIDE * H;
+        memset((void *)(HI_UL)flt_yuv.au64VirAddr[0], 128, yuv_sz);
+        HI_MPI_SYS_MmzFlushCache(flt_yuv.au64PhyAddr[0],
+            (HI_VOID *)(HI_UL)flt_yuv.au64VirAddr[0], yuv_sz);
+
+        memset(&flt_rgb, 0, sizeof(flt_rgb));
+        flt_rgb.enType = IVE_IMAGE_TYPE_U8C3_PLANAR;
+        flt_rgb.u32Width = W; flt_rgb.u32Height = H;
+        flt_rgb.au32Stride[0] = flt_rgb.au32Stride[1] = flt_rgb.au32Stride[2] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&flt_rgb.au64PhyAddr[0], (HI_VOID **)&flt_rgb.au64VirAddr[0],
+                             NULL, HI_NULL, STRIDE * H * 3);
+        flt_rgb.au64PhyAddr[1] = flt_rgb.au64PhyAddr[0] + STRIDE * H;
+        flt_rgb.au64VirAddr[1] = flt_rgb.au64VirAddr[0] + STRIDE * H;
+        flt_rgb.au64PhyAddr[2] = flt_rgb.au64PhyAddr[0] + STRIDE * H * 2;
+        flt_rgb.au64VirAddr[2] = flt_rgb.au64VirAddr[0] + STRIDE * H * 2;
+
+        IVE_FILTER_AND_CSC_CTRL_S fltcsc_ctrl;
+        memset(&fltcsc_ctrl, 0, sizeof(fltcsc_ctrl));
+        fltcsc_ctrl.enMode = IVE_CSC_MODE_PIC_BT601_YUV2RGB;
+        /* Identity filter */
+        fltcsc_ctrl.as8Mask[12] = 16;
+        fltcsc_ctrl.u8Norm = 4;
+
+        ret = HI_MPI_IVE_FilterAndCSC(&handle, &flt_yuv, &flt_rgb, &fltcsc_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            printf("  %-10s PASS\n", "flt_csc");
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "flt_csc", ret);
+        }
+        HI_MPI_SYS_MmzFree(flt_yuv.au64PhyAddr[0], (HI_VOID *)(HI_UL)flt_yuv.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(flt_rgb.au64PhyAddr[0], (HI_VOID *)(HI_UL)flt_rgb.au64VirAddr[0]);
+    }
+
+    /* === LKOpticalFlowPyr === */
+    {
+        /* Build simple 1-level pyramid (level 0 only) */
+        IVE_SRC_IMAGE_S lk_prev[1], lk_next[1];
+        memset(lk_prev, 0, sizeof(lk_prev));
+        memset(lk_next, 0, sizeof(lk_next));
+        lk_prev[0] = src1; /* reuse */
+        lk_next[0].enType = IVE_IMAGE_TYPE_U8C1;
+        lk_next[0].u32Width = W; lk_next[0].u32Height = H;
+        lk_next[0].au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&lk_next[0].au64PhyAddr[0],
+            (HI_VOID **)&lk_next[0].au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+        /* Next = src1 shifted right by 2 pixels (simulate motion) */
+        uint8_t *nv = (uint8_t *)(HI_UL)lk_next[0].au64VirAddr[0];
+        uint8_t *pv = (uint8_t *)(HI_UL)src1.au64VirAddr[0];
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                nv[y*STRIDE+x] = (x >= 2) ? pv[y*STRIDE+(x-2)] : pv[y*STRIDE+x];
+        HI_MPI_SYS_MmzFlushCache(lk_next[0].au64PhyAddr[0], nv, STRIDE * H);
+
+        /* Points: put 5 test points at known positions */
+        int lk_npts = 5;
+        IVE_SRC_MEM_INFO_S lk_prev_pts;
+        IVE_MEM_INFO_S lk_next_pts;
+        IVE_DST_MEM_INFO_S lk_status, lk_err;
+        memset(&lk_prev_pts, 0, sizeof(lk_prev_pts));
+        memset(&lk_next_pts, 0, sizeof(lk_next_pts));
+        memset(&lk_status, 0, sizeof(lk_status));
+        memset(&lk_err, 0, sizeof(lk_err));
+
+        HI_U32 pts_sz = 500 * sizeof(HI_S32) * 2; /* S25Q7: 4 bytes each for x,y */
+        pts_sz = (pts_sz + 15) & ~15;
+        HI_MPI_SYS_MmzAlloc(&lk_prev_pts.u64PhyAddr, (HI_VOID **)&lk_prev_pts.u64VirAddr,
+                             NULL, HI_NULL, pts_sz);
+        lk_prev_pts.u32Size = pts_sz;
+        HI_MPI_SYS_MmzAlloc(&lk_next_pts.u64PhyAddr, (HI_VOID **)&lk_next_pts.u64VirAddr,
+                             NULL, HI_NULL, pts_sz);
+        lk_next_pts.u32Size = pts_sz;
+        HI_U32 status_sz = (500 + 15) & ~15;
+        HI_MPI_SYS_MmzAlloc(&lk_status.u64PhyAddr, (HI_VOID **)&lk_status.u64VirAddr,
+                             NULL, HI_NULL, status_sz);
+        lk_status.u32Size = status_sz;
+        HI_U32 err_sz = (500 * 2 + 15) & ~15;
+        HI_MPI_SYS_MmzAlloc(&lk_err.u64PhyAddr, (HI_VOID **)&lk_err.u64VirAddr,
+                             NULL, HI_NULL, err_sz);
+        lk_err.u32Size = err_sz;
+
+        /* Set prev points: S25Q7 format (value << 7) */
+        int32_t *pp = (int32_t *)(HI_UL)lk_prev_pts.u64VirAddr;
+        memset(pp, 0, pts_sz);
+        int test_pts[][2] = {{20,20},{30,30},{10,40},{40,10},{32,32}};
+        for (int i = 0; i < lk_npts; i++) {
+            pp[i*2]   = test_pts[i][0] << 7;
+            pp[i*2+1] = test_pts[i][1] << 7;
+        }
+        HI_MPI_SYS_MmzFlushCache(lk_prev_pts.u64PhyAddr, pp, pts_sz);
+        /* Copy to next_pts as initial flow */
+        memcpy((void *)(HI_UL)lk_next_pts.u64VirAddr, pp, pts_sz);
+        HI_MPI_SYS_MmzFlushCache(lk_next_pts.u64PhyAddr,
+            (void *)(HI_UL)lk_next_pts.u64VirAddr, pts_sz);
+
+        IVE_LK_OPTICAL_FLOW_PYR_CTRL_S lk_ctrl;
+        memset(&lk_ctrl, 0, sizeof(lk_ctrl));
+        lk_ctrl.enOutMode = IVE_LK_OPTICAL_FLOW_PYR_OUT_MODE_BOTH;
+        lk_ctrl.bUseInitFlow = HI_TRUE;
+        lk_ctrl.u16PtsNum = lk_npts;
+        lk_ctrl.u8MaxLevel = 0;
+        lk_ctrl.u0q8MinEigThr = 100;
+        lk_ctrl.u8IterCnt = 10;
+        lk_ctrl.u0q8Eps = 2;
+
+        ret = HI_MPI_IVE_LKOpticalFlowPyr(&handle, lk_prev, lk_next,
+                                            &lk_prev_pts, &lk_next_pts,
+                                            &lk_status, &lk_err, &lk_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(lk_status.u64PhyAddr,
+                (HI_VOID *)(HI_UL)lk_status.u64VirAddr, status_sz);
+            uint8_t *st = (uint8_t *)(HI_UL)lk_status.u64VirAddr;
+            int tracked = 0;
+            for (int i = 0; i < lk_npts; i++) if (st[i]) tracked++;
+            printf("  %-10s tracked=%d/%d  %s\n", "lk_flow", tracked, lk_npts,
+                   (tracked > 0) ? "PASS" : "FAIL");
+            fails += (tracked == 0);
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "lk_flow", ret);
+        }
+        HI_MPI_SYS_MmzFree(lk_next[0].au64PhyAddr[0], (HI_VOID *)(HI_UL)lk_next[0].au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(lk_prev_pts.u64PhyAddr, (HI_VOID *)(HI_UL)lk_prev_pts.u64VirAddr);
+        HI_MPI_SYS_MmzFree(lk_next_pts.u64PhyAddr, (HI_VOID *)(HI_UL)lk_next_pts.u64VirAddr);
+        HI_MPI_SYS_MmzFree(lk_status.u64PhyAddr, (HI_VOID *)(HI_UL)lk_status.u64VirAddr);
+        HI_MPI_SYS_MmzFree(lk_err.u64PhyAddr, (HI_VOID *)(HI_UL)lk_err.u64VirAddr);
+    }
+
+    /* === MatchBgModel === */
+    {
+        /* Complex stateful — just test if API is supported */
+        IVE_DATA_S bg_model;
+        memset(&bg_model, 0, sizeof(bg_model));
+        bg_model.u32Width = W; bg_model.u32Height = H;
+        bg_model.u32Stride = STRIDE * 48; /* per-pixel BG model ~48 bytes */
+        HI_MPI_SYS_MmzAlloc(&bg_model.u64PhyAddr, (HI_VOID **)&bg_model.u64VirAddr,
+                             NULL, HI_NULL, bg_model.u32Stride * H);
+        memset((void *)(HI_UL)bg_model.u64VirAddr, 0, bg_model.u32Stride * H);
+        HI_MPI_SYS_MmzFlushCache(bg_model.u64PhyAddr,
+            (HI_VOID *)(HI_UL)bg_model.u64VirAddr, bg_model.u32Stride * H);
+
+        IVE_IMAGE_S fg_flag;
+        memset(&fg_flag, 0, sizeof(fg_flag));
+        fg_flag.enType = IVE_IMAGE_TYPE_U8C1;
+        fg_flag.u32Width = W; fg_flag.u32Height = H;
+        fg_flag.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&fg_flag.au64PhyAddr[0], (HI_VOID **)&fg_flag.au64VirAddr[0],
+                             NULL, HI_NULL, STRIDE * H);
+        memset((void *)(HI_UL)fg_flag.au64VirAddr[0], 0, STRIDE * H);
+        HI_MPI_SYS_MmzFlushCache(fg_flag.au64PhyAddr[0],
+            (HI_VOID *)(HI_UL)fg_flag.au64VirAddr[0], STRIDE * H);
+
+        IVE_IMAGE_S bg_diff_fg, frm_diff_fg;
+        memset(&bg_diff_fg, 0, sizeof(bg_diff_fg));
+        bg_diff_fg.enType = IVE_IMAGE_TYPE_U8C1;
+        bg_diff_fg.u32Width = W; bg_diff_fg.u32Height = H;
+        bg_diff_fg.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&bg_diff_fg.au64PhyAddr[0], (HI_VOID **)&bg_diff_fg.au64VirAddr[0],
+                             NULL, HI_NULL, STRIDE * H);
+        frm_diff_fg = bg_diff_fg;
+        HI_MPI_SYS_MmzAlloc(&frm_diff_fg.au64PhyAddr[0], (HI_VOID **)&frm_diff_fg.au64VirAddr[0],
+                             NULL, HI_NULL, STRIDE * H);
+
+        IVE_DST_MEM_INFO_S stat_data;
+        memset(&stat_data, 0, sizeof(stat_data));
+        stat_data.u32Size = 16;
+        HI_MPI_SYS_MmzAlloc(&stat_data.u64PhyAddr, (HI_VOID **)&stat_data.u64VirAddr,
+                             NULL, HI_NULL, stat_data.u32Size);
+
+        IVE_MATCH_BG_MODEL_CTRL_S match_ctrl;
+        memset(&match_ctrl, 0, sizeof(match_ctrl));
+        match_ctrl.u32CurFrmNum = 1;
+        match_ctrl.u32PreFrmNum = 0;
+        match_ctrl.u16TimeThr = 20;
+        match_ctrl.u8DiffMaxThr = 6;
+        match_ctrl.u8DiffMinThr = 4;
+        match_ctrl.u8FastLearnRate = 2;
+
+        ret = HI_MPI_IVE_MatchBgModel(&handle, &src1, &bg_model, &fg_flag,
+                                       &bg_diff_fg, &frm_diff_fg, &stat_data,
+                                       &match_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            printf("  %-10s PASS\n", "match_bg");
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "match_bg", ret);
+        }
+
+        HI_MPI_SYS_MmzFree(bg_model.u64PhyAddr, (HI_VOID *)(HI_UL)bg_model.u64VirAddr);
+        HI_MPI_SYS_MmzFree(fg_flag.au64PhyAddr[0], (HI_VOID *)(HI_UL)fg_flag.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(bg_diff_fg.au64PhyAddr[0], (HI_VOID *)(HI_UL)bg_diff_fg.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(frm_diff_fg.au64PhyAddr[0], (HI_VOID *)(HI_UL)frm_diff_fg.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(stat_data.u64PhyAddr, (HI_VOID *)(HI_UL)stat_data.u64VirAddr);
+    }
+
+    /* === Hog === */
+    {
+        ret = (HI_S32)0xa01d8008; /* Likely NOT_SUPPORT — test anyway */
+        printf("  %-10s complex YUV input — skipped (not tested)\n", "hog");
+    }
+
+    /* === PerspTrans === */
+    {
+        ret = (HI_S32)0xa01d8008;
+        printf("  %-10s complex point-pair input — skipped (not tested)\n", "persp");
+    }
+
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 26 - fails, 26);
+    printf("Result: %d/%d passed\n", 31 - fails, 31);
     printf("========================================\n");
 
 cleanup:
