@@ -184,34 +184,80 @@ int main(int argc, char **argv) {
             memset((void *)(uintptr_t)frm_v + y_sz, 128, uv_sz);
             HI_MPI_SYS_MmzFlushCache(frm_p, (void *)(uintptr_t)frm_v, y_sz + uv_sz);
 
-            /* Build forward_slice ioctl buffer (2416 bytes) */
+            /* Allocate output buffer in MMZ for detection results */
+            uint64_t out_p, out_v;
+            uint32_t out_size = 65536;
+            ret = HI_MPI_SYS_MmzAlloc(&out_p, (void **)&out_v, "OUT", NULL, out_size);
+            if (ret != 0) out_p = out_v = 0;
+            else memset((void *)(uintptr_t)out_v, 0, out_size);
+
+            /* Build forward_slice ioctl buffer (2416 bytes)
+             *
+             * Layout from kernel RE (ive_xnn_forward_data_slice):
+             *   +0x000: handle (out)
+             *   +0x008: src_blobs[16] (48B each) — input
+             *   +0x308: roi_info
+             *   +0x338: model_id
+             *   +0x340: dst_blobs_template[16] (48B each) — kernel copies to internal
+             *   +0x640: dst_blobs_out[16] (48B each) — output destination
+             *   +0x940: u64 tmp_phys
+             *   +0x948: u64 tmp_virt (used for report/output virt addr base)
+             *   +0x950: u32 tmp_size
+             *   +0x958: ctrl {u32 src_num, u32 dst_num}
+             *   +0x960: u32 has_roi (0=picture)
+             *   +0x968: u32 is_instant (1=sync)
+             */
             uint8_t fwd[2416];
             memset(fwd, 0, sizeof(fwd));
 
-            /* src_blob at +0x008 (48 bytes) */
-            *(uint32_t *)(fwd + 0x008) = 2;         /* type = YVU420SP */
-            *(uint32_t *)(fwd + 0x00C) = stride;    /* stride */
-            *(uint64_t *)(fwd + 0x010) = frm_v;     /* virt */
-            *(uint64_t *)(fwd + 0x018) = frm_p;     /* phys */
-            *(uint32_t *)(fwd + 0x020) = 1;         /* num */
-            *(uint32_t *)(fwd + 0x028) = in_w;      /* width */
-            *(uint32_t *)(fwd + 0x02C) = in_h;      /* height */
-            *(uint32_t *)(fwd + 0x030) = in_c;      /* channels */
+            /* src_blob[0] at +0x008 (IVE_BLOB_S, 48 bytes) */
+            *(uint32_t *)(fwd + 0x008) = 2;         /* enType = YVU420SP */
+            *(uint32_t *)(fwd + 0x00C) = stride;    /* u32Stride */
+            *(uint64_t *)(fwd + 0x010) = frm_v;     /* u64VirAddr */
+            *(uint64_t *)(fwd + 0x018) = frm_p;     /* u64PhyAddr */
+            *(uint32_t *)(fwd + 0x020) = 1;         /* u32Num */
+            *(uint32_t *)(fwd + 0x028) = in_w;      /* u32Width */
+            *(uint32_t *)(fwd + 0x02C) = in_h;      /* u32Height */
+            *(uint32_t *)(fwd + 0x030) = in_c;      /* u32Chn */
 
             /* model_id at +0x338 */
             *(uint32_t *)(fwd + 0x338) = 0;
+
+            /* dst_blobs_template[0] at +0x340 — kernel uses this for CPU preproc path.
+             * The kernel validates stride against model's dst_node dimensions.
+             * stride must be >= max(align16(output_w * type_size), 48). */
+            uint32_t out_stride = ((10 * 4 + 15) / 16) * 16;  /* 48 for 10 values */
+            if (out_stride < 48) out_stride = 48;
+            *(uint32_t *)(fwd + 0x340) = 7;         /* enType = S8 */
+            *(uint32_t *)(fwd + 0x344) = out_stride; /* u32Stride */
+            *(uint64_t *)(fwd + 0x348) = out_v;     /* u64VirAddr */
+            *(uint64_t *)(fwd + 0x350) = out_p;     /* u64PhyAddr */
+            *(uint32_t *)(fwd + 0x358) = 1;         /* u32Num */
+            *(uint32_t *)(fwd + 0x360) = 10;        /* u32Width */
+            *(uint32_t *)(fwd + 0x364) = 1;         /* u32Height */
+            *(uint32_t *)(fwd + 0x368) = 1;         /* u32Chn */
+
+            /* dst_blobs_out[0] at +0x640 — same as template */
+            memcpy(fwd + 0x640, fwd + 0x340, 48);
 
             /* tmp_buf at +0x940 */
             *(uint64_t *)(fwd + 0x940) = tmp_mem.phys;
             *(uint64_t *)(fwd + 0x948) = tmp_mem.virt;
             *(uint32_t *)(fwd + 0x950) = tmp_size;
 
-            /* ctrl at +0x958: src_num=1, dst_num=1 */
-            *(uint32_t *)(fwd + 0x958) = 1;
-            *(uint32_t *)(fwd + 0x95C) = 1;
+            /* ctrl starts at +0x958. From kernel: a5[1]=src_num, a5[3]=dst_num
+             * a5[0] = +0x958, a5[1] = +0x95C, a5[2] = +0x960, a5[3] = +0x964 */
+            *(uint32_t *)(fwd + 0x95C) = 1;  /* a5[1] = src_num */
+            *(uint32_t *)(fwd + 0x964) = 1;  /* a5[3] = dst_num */
 
-            /* instant at +0x968 */
-            *(uint32_t *)(fwd + 0x968) = 1;
+            /* has_roi: from decompiled, checked at a1[600] = buf+0x960
+             * But a1[600] = 600*4 = 2400 = 0x960. Overlaps with ctrl!
+             * Actually, the ctrl area and has_roi/instant are separate:
+             * a1[600] = 0x960 (has_roi) is a5[2] in the ctrl view */
+            *(uint32_t *)(fwd + 0x960) = 0;  /* a5[2] / has_roi = 0 */
+
+            /* is_instant: a1[602] = 602*4 = 2408 = 0x968 */
+            *(uint32_t *)(fwd + 0x968) = 1;  /* synchronous */
 
             /* Find IVE fd */
             int ive_fd = -1;
@@ -224,6 +270,13 @@ int main(int argc, char **argv) {
 
             if (ive_fd >= 0) {
                 fprintf(stderr, "\nRunning forward (fd=%d, %ux%u)...\n", ive_fd, in_w, in_h);
+                /* Verify buffer before ioctl */
+                fprintf(stderr, "  fwd+0x958: src=%u dst=%u\n",
+                        *(uint32_t *)(fwd + 0x958), *(uint32_t *)(fwd + 0x95C));
+                fprintf(stderr, "  fwd+0x960: roi=%u instant=%u\n",
+                        *(uint32_t *)(fwd + 0x960), *(uint32_t *)(fwd + 0x968));
+                fprintf(stderr, "  fwd+0x340 dst_tpl: type=%u stride=%u\n",
+                        *(uint32_t *)(fwd + 0x340), *(uint32_t *)(fwd + 0x344));
                 ret = ioctl(ive_fd, 0xc9704638, fwd);
                 fprintf(stderr, "  ioctl ret=%d\n", ret);
 
@@ -244,6 +297,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "  tmp_buf total nonzero: %d/%u\n", nz2, tmp_size);
             }
 
+            if (out_p) HI_MPI_SYS_MmzFree(out_p, (void *)(uintptr_t)out_v);
             HI_MPI_SYS_MmzFree(frm_p, (void *)(uintptr_t)frm_v);
         }
 
