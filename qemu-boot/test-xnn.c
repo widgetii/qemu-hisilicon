@@ -144,12 +144,21 @@ int ioctl(int fd, unsigned long request, ...) {
         if (nr == 0x36) { /* loadmodel */
             fprintf(stderr, "\n[XNN-HOOK] ioctl LOADMODEL (cmd=0x%x, size=%u)\n", cmd, sz);
             dump_xnn_loadmodel(arg);
+            int r = real_ioctl(fd, request, arg);
+            fprintf(stderr, "[XNN-HOOK] LOADMODEL returned %d\n", r);
+            hexdump("model_params AFTER kernel fill", (uint8_t *)arg + 40, 128);
+            return r;
         } else if (nr == 0x38) { /* forward_slice — the one actually used */
             static int fwd_count = 0;
-            if (fwd_count < 3) { /* dump first 3 calls only */
+            if (fwd_count < 2) {
                 fprintf(stderr, "\n[XNN-HOOK] ioctl FORWARD_SLICE #%d (cmd=0x%x, size=%u)\n",
                         fwd_count, cmd, sz);
-                hexdump("forward_slice buffer", arg, sz < 512 ? sz : 512);
+                hexdump("forward_slice BEFORE", arg, 128);
+                int r = real_ioctl(fd, request, arg);
+                fprintf(stderr, "[XNN-HOOK] FORWARD_SLICE returned %d\n", r);
+                hexdump("forward_slice AFTER", arg, 128);
+                fwd_count++;
+                return r;
             }
             fwd_count++;
         } else if (nr == 0x3a) { /* forward */
@@ -157,6 +166,18 @@ int ioctl(int fd, unsigned long request, ...) {
             dump_xnn_forward(arg, sz);
         } else if (nr == 0x3b) { /* svp_init */
             fprintf(stderr, "\n[XNN-HOOK] ioctl SVP_INIT (cmd=0x%x, size=%u)\n", cmd, sz);
+            hexdump("svp_init BEFORE", arg, 16);
+            int r = real_ioctl(fd, request, arg);
+            fprintf(stderr, "[XNN-HOOK] SVP_INIT returned %d\n", r);
+            hexdump("svp_init AFTER", arg, 16);
+            return r;
+        } else if (nr == 0xc8) { /* open_dev */
+            fprintf(stderr, "\n[XNN-HOOK] ioctl OPEN_DEV (cmd=0x%x, size=%u)\n", cmd, sz);
+            hexdump("open BEFORE", arg, sz);
+            int r = real_ioctl(fd, request, arg);
+            fprintf(stderr, "[XNN-HOOK] OPEN_DEV returned %d\n", r);
+            hexdump("open AFTER", arg, sz);
+            return r;
         } else if (nr >= 0x30) {
             fprintf(stderr, "\n[XNN-HOOK] ioctl IVE cmd=0x%x nr=0x%x size=%u\n", cmd, nr, sz);
         }
