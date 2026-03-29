@@ -45,10 +45,11 @@ typedef struct {
     HI_U64 u64VirAddr;     /* +0x08: virtual address */
     HI_U64 u64PhyAddr;     /* +0x10: physical address */
     HI_U32 u32Num;         /* +0x18: batch count [1, 32] */
-    HI_U32 u32Width;       /* +0x1C: width in pixels */
-    HI_U32 u32Height;      /* +0x20: height in pixels */
-    HI_U32 u32Chn;         /* +0x24: channels */
-    HI_U32 pad[2];         /* +0x28: alignment padding to 48 bytes */
+    HI_U32 reserved;       /* +0x1C: padding (always 0 in captures) */
+    HI_U32 u32Width;       /* +0x20: width in pixels */
+    HI_U32 u32Height;      /* +0x24: height in pixels */
+    HI_U32 u32Chn;         /* +0x28: channels */
+    HI_U32 pad;            /* +0x2C: alignment padding */
 } IVE_XNN_BLOB_S; /* sizeof = 0x30 = 48 bytes */
 
 /* IVE_BLOB_TYPE_E */

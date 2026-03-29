@@ -150,17 +150,18 @@ int ioctl(int fd, unsigned long request, ...) {
             return r;
         } else if (nr == 0x38) { /* forward_slice — the one actually used */
             static int fwd_count = 0;
-            if (fwd_count < 2) {
-                fprintf(stderr, "\n[XNN-HOOK] ioctl FORWARD_SLICE #%d (cmd=0x%x, size=%u)\n",
-                        fwd_count, cmd, sz);
-                hexdump("forward_slice BEFORE", arg, 128);
-                int r = real_ioctl(fd, request, arg);
-                fprintf(stderr, "[XNN-HOOK] FORWARD_SLICE returned %d\n", r);
-                hexdump("forward_slice AFTER", arg, 128);
-                fwd_count++;
-                return r;
+            int r = real_ioctl(fd, request, arg);
+            if (fwd_count == 0) {
+                fprintf(stderr, "\n[IOCTL-FWDSLICE] ret=%d, dumping key offsets:\n", r);
+                hexdump("+0x338 model_id", (uint8_t *)arg + 0x338, 16);
+                hexdump("+0x640 dst_out[0]", (uint8_t *)arg + 0x640, 48);
+                hexdump("+0x940 tmp/report/ctrl", (uint8_t *)arg + 0x940, 48);
+                /* Save full buffer for replay */
+                FILE *d = fopen("/utils/fwd_slice.bin", "wb");
+                if (d) { fwrite(arg, 1, 2416, d); fclose(d); fprintf(stderr, "Saved fwd_slice.bin\n"); }
             }
             fwd_count++;
+            return r;
         } else if (nr == 0x3a) { /* forward */
             fprintf(stderr, "\n[XNN-HOOK] ioctl FORWARD (cmd=0x%x, size=%u)\n", cmd, sz);
             dump_xnn_forward(arg, sz);
@@ -214,21 +215,21 @@ int mpi_ive_xnn_forward_slice(void *handle, void *src, void *dst,
     if (call_count < 2) {
         fprintf(stderr, "\n[FWD-SLICE #%d] args: %p %p %p %p | %p %p %p %p\n",
                 call_count, handle, src, dst, model, arg4, arg5, arg6, arg7);
-
-        if (src) hexdump("src (r1)", src, 48);
-        if (dst) hexdump("dst (r2)", dst, 48);
-        if (model) hexdump("model (r3, first 64B)", model, 64);
-        if (arg4) hexdump("arg4 [sp+0]", arg4, 64);
-        if (arg5) hexdump("arg5 [sp+4]", arg5, 64);
-        if (arg6) hexdump("arg6 [sp+8]", arg6, 64);
-        if (arg7) hexdump("arg7 [sp+12]", arg7, 64);
     }
 
     int ret = real_fn(handle, src, dst, model, arg4, arg5, arg6, arg7);
 
     if (call_count < 2) {
-        fprintf(stderr, "[FWD-SLICE #%d] returned %d\n", call_count, ret);
-        if (ret == 0 && dst) hexdump("dst AFTER", dst, 48);
+        fprintf(stderr, "[FWD-SLICE #%d] returned %d, handle=%d\n",
+                call_count, ret, handle ? *(int32_t *)handle : -1);
+        /* After a successful call, dump the ioctl buffer that was built
+         * internally by mpi_ive_xnn_forward_slice. We can't access it
+         * directly, but we can dump the output blobs. */
+        if (ret == 0 && dst) {
+            hexdump("dst_blob AFTER (first 48B)", dst, 48);
+            /* Also dump the report/arg5 output blob */
+            if (arg5) hexdump("report AFTER (48B)", arg5, 48);
+        }
     }
 
     call_count++;
