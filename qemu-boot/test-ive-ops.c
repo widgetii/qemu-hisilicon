@@ -32,8 +32,12 @@
 #define IVE_STRIDES_0   0x0128
 #define IVE_STRIDES_1   0x012C
 #define IVE_THRESH_VAL  0x0138
+#define IVE_THRESH_HI   0x0140
+#define IVE_THRESH_MIN  0x0144
+#define IVE_THRESH_MID  0x0148
 #define IVE_THRESH_MAX  0x014C
 #define IVE_CCL_CFG0    0x0160
+#define IVE_EXT_MODE    0x0484
 
 /* Op types (matching hisi-ive.c) */
 #define OP_DMA      0
@@ -53,6 +57,9 @@
 #define OP_INTEG    14
 #define OP_MAP      15
 #define OP_NCC      16
+#define OP_THRESH_S16    18
+#define OP_THRESH_U16    19
+#define OP_16BIT_TO_8BIT 20
 
 #define W 64
 #define H 64
@@ -304,27 +311,119 @@ int main(int argc, char **argv) {
     fails += run_test("erode", OP_ERODE,
         ({void f(void){sw_erode(va_dst,va_src1,W,H);} f;}));
 
-    /* Phase 4: Integ */
-    memset(va_dst, 0, 4096);
-    if (sw_mode) {
-        sw_integ((uint32_t *)va_dst, va_src1, W, H);
-    } else {
-        setup_ive(OP_INTEG, W, H);
-        ive_fire();
-    }
+    /* Phase 4: Integ — use 32×32 to fit U32 output in one page (32×32×4=4096) */
     {
+        int IW = 32, IH = 32, ISZ = 32 * 32;
+        memset(va_dst, 0, 4096);
+        if (sw_mode) {
+            sw_integ((uint32_t *)va_dst, va_src1, IW, IH);
+        } else {
+            setup_ive(OP_INTEG, IW, IH);
+            ive_fire();
+        }
         uint32_t *ig = (uint32_t *)va_dst;
-        int ok = (ig[W*H-1] > 0); /* bottom-right should be total sum */
         uint32_t expected_sum = 0;
-        for (int i = 0; i < SZ; i++) expected_sum += va_src1[i];
-        ok = (ig[W*H-1] == expected_sum);
-        printf("  %-10s sum=%u (expect %u)  %s\n", "integ", ig[W*H-1], expected_sum,
+        for (int i = 0; i < ISZ; i++) expected_sum += va_src1[i];
+        int ok = (ig[ISZ-1] == expected_sum);
+        printf("  %-10s sum=%u (expect %u)  %s\n", "integ", ig[ISZ-1], expected_sum,
+               ok ? "PASS" : "FAIL");
+        fails += !ok;
+    }
+
+    /* ── 16-bit ops: Thresh_S16, Thresh_U16, 16BitTo8Bit ── */
+    /* Use half-height (64×32 = 2048 pixels) so S16 data fits in one page.
+     * Reset buffers after integ test (which overflows va_dst with U32 data). */
+    memset(va_src1, 0, 4096);
+    memset(va_dst, 0, 4096);
+    /* Reset strides to default (W bytes) */
+    if (!sw_mode) ive_w(IVE_STRIDES_0, (W << 16) | W);
+    printf("--- 16-bit ops ---\n");
+    {
+        int W16 = W, H16 = H / 2, SZ16 = W * (H / 2); /* 64×32 = 2048 */
+        int16_t *s16_src = (int16_t *)va_src1; /* 2048 * 2 = 4096 bytes = 1 page */
+
+        /* Write S16 test data: values -200, -100, -50, 0, 50, 100, 150, 200 repeating */
+        int16_t test_vals[] = {-200, -100, -50, 0, 50, 100, 150, 200};
+        for (int i = 0; i < SZ16; i++) s16_src[i] = test_vals[i % 8];
+
+        /* Thresh_S16: mode=2 (S16→U8 min/mid/max), lo=-50, hi=100 */
+        if (sw_mode) {
+            for (int i = 0; i < SZ16; i++) {
+                int16_t v = s16_src[i];
+                va_dst[i] = (v < -50) ? 0 : (v > 100) ? 255 : 128;
+            }
+        } else {
+            ive_w(IVE_EXT_MODE, 2);
+            ive_w(IVE_THRESH_VAL, (uint16_t)(-50));
+            ive_w(IVE_THRESH_HI, 100);
+            ive_w(IVE_THRESH_MIN, 0);
+            ive_w(IVE_THRESH_MID, 128);
+            ive_w(IVE_THRESH_MAX, 255);
+            ive_w(IVE_STRIDES_0, ((W16*2) << 16) | W16);
+            setup_ive(OP_THRESH_S16, W16, H16);
+            ive_fire();
+        }
+        /* Boundary: -50 <= lo(-50) → min=0; 100 NOT > hi(100) → mid=128; 150 > hi(100) → max=255 */
+        int ok = (va_dst[0] == 0 && va_dst[1] == 0 && va_dst[2] == 0 &&
+                  va_dst[3] == 128 && va_dst[4] == 128 && va_dst[5] == 128 &&
+                  va_dst[6] == 255 && va_dst[7] == 255);
+        printf("  %-10s [%d,%d,%d,%d,%d,%d,%d,%d]  %s\n", "thresh_s16",
+               va_dst[0], va_dst[1], va_dst[2], va_dst[3],
+               va_dst[4], va_dst[5], va_dst[6], va_dst[7],
+               ok ? "PASS" : "FAIL");
+        fails += !ok;
+
+        /* Thresh_U16: mode=0 (min/mid/max), lo=50, hi=150 */
+        uint16_t *u16_src = (uint16_t *)va_src1;
+        for (int i = 0; i < SZ16; i++) u16_src[i] = (i * 7 + 13) % 256;
+        if (sw_mode) {
+            for (int i = 0; i < SZ16; i++) {
+                uint16_t v = u16_src[i];
+                va_dst[i] = (v < 50) ? 0 : (v > 150) ? 255 : 128;
+            }
+        } else {
+            ive_w(IVE_EXT_MODE, 0);
+            ive_w(IVE_THRESH_VAL, 50);
+            ive_w(IVE_THRESH_HI, 150);
+            ive_w(IVE_THRESH_MIN, 0);
+            ive_w(IVE_THRESH_MID, 128);
+            ive_w(IVE_THRESH_MAX, 255);
+            ive_w(IVE_STRIDES_0, ((W16*2) << 16) | W16);
+            setup_ive(OP_THRESH_U16, W16, H16);
+            ive_fire();
+        }
+        ok = (va_dst[0] == 0 && va_dst[7] == 128);
+        printf("  %-10s [%d,%d,%d,%d]  %s\n", "thresh_u16",
+               va_dst[0], va_dst[1], va_dst[2], va_dst[7],
+               ok ? "PASS" : "FAIL");
+        fails += !ok;
+
+        /* 16BitTo8Bit: mode=1 (S16→U8_ABS), numerator=1, denominator=1 */
+        for (int i = 0; i < SZ16; i++) s16_src[i] = test_vals[i % 8];
+        if (sw_mode) {
+            for (int i = 0; i < SZ16; i++) {
+                int v = abs((int)s16_src[i]);
+                va_dst[i] = v > 255 ? 255 : v;
+            }
+        } else {
+            ive_w(IVE_EXT_MODE, 1);
+            ive_w(IVE_THRESH_VAL, (1 << 8) | 1);
+            ive_w(IVE_THRESH_MIN, 0);
+            ive_w(IVE_STRIDES_0, ((W16*2) << 16) | W16);
+            setup_ive(OP_16BIT_TO_8BIT, W16, H16);
+            ive_fire();
+        }
+        ok = (va_dst[0] == 200 && va_dst[1] == 100 && va_dst[2] == 50 &&
+              va_dst[3] == 0 && va_dst[4] == 50 && va_dst[7] == 200);
+        printf("  %-10s [%d,%d,%d,%d,%d,%d,%d,%d]  %s\n", "16to8",
+               va_dst[0], va_dst[1], va_dst[2], va_dst[3],
+               va_dst[4], va_dst[5], va_dst[6], va_dst[7],
                ok ? "PASS" : "FAIL");
         fails += !ok;
     }
 
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 12 - fails, 12);
+    printf("Result: %d/%d passed\n", 15 - fails, 15);
     printf("========================================\n");
 
 done:

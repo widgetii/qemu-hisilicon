@@ -113,6 +113,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiIveState, HISI_IVE)
 #define IVE_OP_MAP      15
 #define IVE_OP_NCC      16
 #define IVE_OP_GMM2     17
+#define IVE_OP_THRESH_S16   18
+#define IVE_OP_THRESH_U16   19
+#define IVE_OP_16BIT_TO_8BIT 20
 
 /* CCL output structure matches hi_ive.h IVE_CCBLOB_S */
 #define IVE_MAX_REGION_NUM  254
@@ -532,6 +535,177 @@ static void ive_op_hist(HisiIveState *s)
     g_free(f1);
 }
 
+/* ── Phase 2b: 16-bit Threshold + Conversion ─────────────────── */
+
+static inline int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
+{
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+/* Read S16 frame from guest memory (src1, 2 bytes per pixel) */
+static int16_t *ive_read_frame_s16(HisiIveState *s, uint16_t *pw, uint16_t *ph)
+{
+    uint32_t dim = s->regs[IVE_DIMENSIONS / 4];
+    uint16_t w = dim & 0xFFF, h = (dim >> 16) & 0xFFF;
+    uint32_t src = s->regs[IVE_SRC1_ADDR / 4];
+    uint32_t strides0 = s->regs[IVE_STRIDES_0 / 4];
+    uint16_t stride = (strides0 >> 16) ? (strides0 >> 16) : (w * 2);
+    *pw = w; *ph = h;
+    int16_t *f = g_malloc(w * h * 2);
+    for (uint16_t y = 0; y < h; y++) {
+        dma_memory_read(&address_space_memory, src + (uint64_t)y * stride,
+                        f + y * w, w * 2, MEMTXATTRS_UNSPECIFIED);
+    }
+    return f;
+}
+
+/* Read U16 frame from guest memory */
+static uint16_t *ive_read_frame_u16(HisiIveState *s, uint16_t *pw, uint16_t *ph)
+{
+    return (uint16_t *)ive_read_frame_s16(s, pw, ph);
+}
+
+/*
+ * Thresh_S16: S16 input → U8 output
+ * Modes (from SDK hi_ive.h IVE_THRESH_S16_MODE_E):
+ *   0: S16→S8  min/mid/max
+ *   1: S16→S8  min/ori/max
+ *   2: S16→U8  min/mid/max  (most useful — binary threshold on S16)
+ *   3: S16→U8  min/ori/max
+ *
+ * Uses same threshold registers as Thresh:
+ *   IVE_THRESH_VAL bits[23:8]  = low threshold (signed, as int16)
+ *   IVE_THRESH_HI  bits[15:0]  = high threshold
+ *   IVE_THRESH_MIN = min output val
+ *   IVE_THRESH_MID = mid output val
+ *   IVE_THRESH_MAX = max output val
+ *   IVE_EXT_MODE   = mode (0-3)
+ */
+static void ive_op_thresh_s16(HisiIveState *s)
+{
+    uint16_t w, h;
+    int16_t *f = ive_read_frame_s16(s, &w, &h);
+    uint32_t mode = s->regs[IVE_EXT_MODE / 4] & 0xF;
+    int16_t lo_thr = (int16_t)(s->regs[IVE_THRESH_VAL / 4] & 0xFFFF);
+    int16_t hi_thr = (int16_t)(s->regs[IVE_THRESH_HI / 4] & 0xFFFF);
+    uint8_t minv = s->regs[IVE_THRESH_MIN / 4] & 0xFF;
+    uint8_t midv = s->regs[IVE_THRESH_MID / 4] & 0xFF;
+    uint8_t maxv = s->regs[IVE_THRESH_MAX / 4] & 0xFF;
+    if (!maxv) maxv = 255;
+
+    uint8_t *out = g_malloc(w * h);
+    for (int i = 0; i < w * h; i++) {
+        int16_t v = f[i];
+        switch (mode) {
+        case 0: /* S16→S8 min/mid/max */
+        case 2: /* S16→U8 min/mid/max */
+            out[i] = (v <= lo_thr) ? minv : (v > hi_thr) ? maxv : midv;
+            break;
+        case 1: /* S16→S8 min/ori/max */
+        case 3: /* S16→U8 min/ori/max */
+            if (v <= lo_thr) out[i] = minv;
+            else if (v > hi_thr) out[i] = maxv;
+            else out[i] = (mode <= 1) ? (int8_t)v : (uint8_t)clamp_i32(v, 0, 255);
+            break;
+        default:
+            out[i] = (v <= lo_thr) ? minv : (v > hi_thr) ? maxv : midv;
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f); g_free(out);
+}
+
+/*
+ * Thresh_U16: U16 input → U8 output
+ * Same logic as Thresh_S16 but unsigned input.
+ */
+static void ive_op_thresh_u16(HisiIveState *s)
+{
+    uint16_t w, h;
+    uint16_t *f = ive_read_frame_u16(s, &w, &h);
+    uint32_t mode = s->regs[IVE_EXT_MODE / 4] & 0xF;
+    uint16_t lo_thr = s->regs[IVE_THRESH_VAL / 4] & 0xFFFF;
+    uint16_t hi_thr = s->regs[IVE_THRESH_HI / 4] & 0xFFFF;
+    uint8_t minv = s->regs[IVE_THRESH_MIN / 4] & 0xFF;
+    uint8_t midv = s->regs[IVE_THRESH_MID / 4] & 0xFF;
+    uint8_t maxv = s->regs[IVE_THRESH_MAX / 4] & 0xFF;
+    if (!maxv) maxv = 255;
+
+    uint8_t *out = g_malloc(w * h);
+    for (int i = 0; i < w * h; i++) {
+        uint16_t v = f[i];
+        switch (mode) {
+        case 0: /* min/mid/max */
+            out[i] = (v < lo_thr) ? minv : (v > hi_thr) ? maxv : midv;
+            break;
+        case 1: /* min/ori/max */
+            if (v < lo_thr) out[i] = minv;
+            else if (v > hi_thr) out[i] = maxv;
+            else out[i] = (uint8_t)clamp_i32(v, 0, 255);
+            break;
+        default:
+            out[i] = (v < lo_thr) ? minv : (v > hi_thr) ? maxv : midv;
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f); g_free(out);
+}
+
+/*
+ * 16BitTo8Bit: S16/U16 input → U8 output with gain/bias
+ * Modes (from SDK hi_ive.h IVE_16BIT_TO_8BIT_MODE_E):
+ *   0: S16→S8:       out = (val * numerator / denominator) clamped to [-128,127]
+ *   1: S16→U8_ABS:   out = abs(val) * numerator / denominator, clamped to [0,255]
+ *   2: S16→U8_BIAS:  out = val * numerator / denominator + bias, clamped to [0,255]
+ *   3: U16→U8:       out = val * numerator / denominator, clamped to [0,255]
+ *
+ * Registers:
+ *   IVE_EXT_MODE      = mode (0-3)
+ *   IVE_THRESH_VAL[7:0]  = numerator (u8)
+ *   IVE_THRESH_VAL[23:8] = denominator (u16)
+ *   IVE_THRESH_MIN[7:0]  = bias (s8)
+ */
+static void ive_op_16bit_to_8bit(HisiIveState *s)
+{
+    uint16_t w, h;
+    int16_t *f = ive_read_frame_s16(s, &w, &h);
+    uint32_t mode = s->regs[IVE_EXT_MODE / 4] & 0xF;
+    uint32_t thr_reg = s->regs[IVE_THRESH_VAL / 4];
+    uint8_t numer = thr_reg & 0xFF;
+    uint16_t denom = (thr_reg >> 8) & 0xFFFF;
+    int8_t bias = (int8_t)(s->regs[IVE_THRESH_MIN / 4] & 0xFF);
+    if (denom == 0) denom = 1;
+    if (numer == 0) numer = 1;
+
+    uint8_t *out = g_malloc(w * h);
+    for (int i = 0; i < w * h; i++) {
+        int32_t v;
+        switch (mode) {
+        case 0: /* S16→S8 */
+            v = (int32_t)f[i] * numer / denom;
+            out[i] = (uint8_t)(int8_t)clamp_i32(v, -128, 127);
+            break;
+        case 1: /* S16→U8_ABS */
+            v = abs((int32_t)f[i]) * numer / denom;
+            out[i] = (uint8_t)clamp_i32(v, 0, 255);
+            break;
+        case 2: /* S16→U8_BIAS */
+            v = (int32_t)f[i] * numer / denom + bias;
+            out[i] = (uint8_t)clamp_i32(v, 0, 255);
+            break;
+        case 3: /* U16→U8 */
+            v = (int32_t)(uint16_t)f[i] * numer / denom;
+            out[i] = (uint8_t)clamp_i32(v, 0, 255);
+            break;
+        default:
+            v = abs((int32_t)f[i]) * numer / denom;
+            out[i] = (uint8_t)clamp_i32(v, 0, 255);
+        }
+    }
+    ive_write_frame(s, out, w, h);
+    g_free(f); g_free(out);
+}
+
 /* ── Phase 3: Convolution + Morphology ───────────────────────── */
 
 static void ive_op_filter(HisiIveState *s)
@@ -909,6 +1083,9 @@ static void ive_fire(HisiIveState *s)
     case IVE_OP_MAP:    ive_op_map(s); break;
     case IVE_OP_NCC:    ive_op_ncc(s); break;
     case IVE_OP_GMM2:   ive_op_gmm2(s); break;
+    case IVE_OP_THRESH_S16:    ive_op_thresh_s16(s); break;
+    case IVE_OP_THRESH_U16:    ive_op_thresh_u16(s); break;
+    case IVE_OP_16BIT_TO_8BIT: ive_op_16bit_to_8bit(s); break;
     default:
         qemu_log_mask(LOG_UNIMP, "hisi-ive: unimplemented op_type %d\n",
                       op_type);

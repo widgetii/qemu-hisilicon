@@ -342,8 +342,68 @@ int main(void) {
         fails += (ret != HI_SUCCESS);
     }
 
+    /* === THRESH_S16 (via 16BitTo8Bit with S16→U8_ABS mode) === */
+    {
+        /* Write S16 test data to Sobel's dst_h buffer (already allocated above) */
+        IVE_IMAGE_S s16_img;
+        memset(&s16_img, 0, sizeof(s16_img));
+        s16_img.enType = IVE_IMAGE_TYPE_S16C1;
+        s16_img.u32Width = W; s16_img.u32Height = H;
+        s16_img.au32Stride[0] = STRIDE * 2;
+        HI_MPI_SYS_MmzAlloc(&s16_img.au64PhyAddr[0],
+            (HI_VOID **)&s16_img.au64VirAddr[0], NULL, HI_NULL, STRIDE * 2 * H);
+
+        /* Fill with test values: -200, -100, -50, 0, 50, 100, 150, 200 repeating */
+        int16_t *s16_data = (int16_t *)(HI_UL)s16_img.au64VirAddr[0];
+        int16_t test_vals[] = {-200, -100, -50, 0, 50, 100, 150, 200};
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                s16_data[y * STRIDE + x] = test_vals[(y * W + x) % 8];
+        HI_MPI_SYS_MmzFlushCache(s16_img.au64PhyAddr[0],
+            (HI_VOID *)(HI_UL)s16_img.au64VirAddr[0], STRIDE * 2 * H);
+
+        /* 16BitTo8Bit: S16→U8_ABS (absolute value) */
+        IVE_16BIT_TO_8BIT_CTRL_S cvt_ctrl = {
+            .enMode = IVE_16BIT_TO_8BIT_MODE_S16_TO_U8_ABS,
+            .u16Denominator = 1, .u8Numerator = 1, .s8Bias = 0
+        };
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        ret = HI_MPI_IVE_16BitTo8Bit(&handle, &s16_img, &dst, &cvt_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        read_image(&dst, result, SZ);
+        /* Expected: abs(-200)=200, abs(-100)=100, abs(-50)=50, abs(0)=0,
+                     abs(50)=50, abs(100)=100, abs(150)=150, abs(200)=200 */
+        int ok_16to8 = (result[0] == 200 && result[1] == 100 && result[2] == 50 &&
+                        result[3] == 0 && result[4] == 50 && result[7] == 200);
+        printf("  %-10s [%d,%d,%d,%d,%d,%d,%d,%d]  %s\n", "16to8",
+               result[0], result[1], result[2], result[3],
+               result[4], result[5], result[6], result[7],
+               ok_16to8 ? "PASS" : "FAIL");
+        fails += !ok_16to8;
+
+        /* Thresh_S16: mode=S16_TO_U8_MIN_MID_MAX, lo=-50, hi=100 */
+        IVE_THRESH_S16_CTRL_S ts16_ctrl = {
+            .enMode = IVE_THRESH_S16_MODE_S16_TO_U8_MIN_MID_MAX,
+            .s16LowThr = -50, .s16HighThr = 100,
+            .un8MinVal = { .u8Val = 0 }, .un8MidVal = { .u8Val = 128 }, .un8MaxVal = { .u8Val = 255 }
+        };
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        ret = HI_MPI_IVE_Thresh_S16(&handle, &s16_img, &dst, &ts16_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        read_image(&dst, result, SZ);
+        int ok_ts16 = (result[0] == 0 && result[1] == 0 && result[3] == 128 &&
+                       result[4] == 128 && result[6] == 255 && result[7] == 255);
+        printf("  %-10s [%d,%d,%d,%d,%d,%d,%d,%d]  %s\n", "thresh_s16",
+               result[0], result[1], result[2], result[3],
+               result[4], result[5], result[6], result[7],
+               ok_ts16 ? "PASS" : "FAIL");
+        fails += !ok_ts16;
+
+        HI_MPI_SYS_MmzFree(s16_img.au64PhyAddr[0], (HI_VOID *)(HI_UL)s16_img.au64VirAddr[0]);
+    }
+
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 9 - fails, 9);
+    printf("Result: %d/%d passed\n", 11 - fails, 11);
     printf("========================================\n");
 
 cleanup:
