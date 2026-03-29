@@ -43,25 +43,42 @@ def crc32_oms(data: bytes) -> int:
 
 
 def make_preproc(input_h, input_w, input_c, out_tmp_offset, need_vgs=1):
-    """Build a 48-byte Preproc layer descriptor."""
+    """Build a 48-byte Preproc layer descriptor.
+
+    Uses the exact byte pattern from vendor v2001 32×32 model as reference,
+    with input dimensions and offsets patched. The Preproc descriptor has
+    many undocumented fields (stride constants, normalization params) that
+    must match the kernel's expectations.
+    """
+    # Reference: v2001 segment 2, Preproc for 32×32×3 VGS input
+    # 05 00 00 01 03 00 20 00 20 00 04 84 04 84 04 84
+    # 00 fe 00 fe 00 fe 20 00 00 04 00 00 e0 3f 02 00
+    # f0 ff ff ff 00 10 00 00 02 00 00 00 00 00 00 00
     d = bytearray(48)
-    d[0] = 5  # type = Preproc
-    d[4] = 3 if need_vgs else 0  # need_vgs (3 = VGS with specific mode)
+    d[0] = 5   # type = Preproc
+    d[1] = 0   # layer_index (filled by caller if needed)
+    d[2] = 0
+    d[3] = 1   # CRITICAL: must be 1 (unknown flag, validated by kernel)
+    d[4] = 3   # need_vgs = 3 (VGS mode with CSC)
+    d[5] = 0
     struct.pack_into('<H', d, 6, input_h)
     struct.pack_into('<H', d, 8, input_w)
-    # Preproc uses a special encoding for blob type + stride info
-    # Copy pattern from reference: bytes 0x0A..0x1F contain stride/format constants
-    # For VGS mode with YUV420SP input:
-    struct.pack_into('<H', d, 0x0A, 0x8404)  # stride constant from reference
+    # Stride/normalization constants (copied from reference)
+    struct.pack_into('<H', d, 0x0A, 0x8404)
     struct.pack_into('<H', d, 0x0C, 0x8404)
     struct.pack_into('<H', d, 0x0E, 0x8404)
     struct.pack_into('<H', d, 0x10, 0xFE00)
     struct.pack_into('<H', d, 0x12, 0xFE00)
     struct.pack_into('<H', d, 0x14, 0xFE00)
+    # Output stride
+    out_stride_w = align16(input_w)
     struct.pack_into('<H', d, 0x16, input_h)
-    struct.pack_into('<I', d, 0x18, align16(input_w) * input_c)
-    d[0x2C] = 2  # blob_type = YVU420SP
-    struct.pack_into('<I', d, 0x20, out_tmp_offset)
+    struct.pack_into('<I', d, 0x18, out_stride_w * input_c)  # out_stride_c
+    struct.pack_into('<I', d, 0x1C, out_tmp_offset)
+    # Additional params from reference (normalization offsets)
+    struct.pack_into('<I', d, 0x20, 0xFFFFFFF0)  # from v2001 reference
+    struct.pack_into('<I', d, 0x24, 0x1000)       # from v2001 reference
+    d[0x28] = 2  # blob_type = YVU420SP
     return bytes(d)
 
 
