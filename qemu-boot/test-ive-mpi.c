@@ -784,8 +784,155 @@ int main(void) {
         HI_MPI_SYS_MmzFree(rgb_dst.au64PhyAddr[0], (HI_VOID *)(HI_UL)rgb_dst.au64VirAddr[0]);
     }
 
+    /* === GMM2 (stateful Gaussian Mixture Model background subtraction) === */
+    {
+        int MODEL_NUM = 3;
+        int NFRAMES_BG = 20;  /* frames to learn background */
+        int NFRAMES_FG = 10;  /* frames with foreground object */
+
+        /* Allocate images */
+        IVE_IMAGE_S gmm_src, gmm_factor, gmm_fg, gmm_bg, gmm_match;
+        memset(&gmm_src, 0, sizeof(gmm_src));
+        memset(&gmm_factor, 0, sizeof(gmm_factor));
+        memset(&gmm_fg, 0, sizeof(gmm_fg));
+        memset(&gmm_bg, 0, sizeof(gmm_bg));
+        memset(&gmm_match, 0, sizeof(gmm_match));
+
+        /* Source: U8C1 64×64 */
+        gmm_src.enType = IVE_IMAGE_TYPE_U8C1;
+        gmm_src.u32Width = W; gmm_src.u32Height = H;
+        gmm_src.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&gmm_src.au64PhyAddr[0],
+            (HI_VOID **)&gmm_src.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+
+        /* Factor: U16C1 — low byte=sns factor, high byte=life update factor */
+        gmm_factor.enType = IVE_IMAGE_TYPE_U16C1;
+        gmm_factor.u32Width = W; gmm_factor.u32Height = H;
+        gmm_factor.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&gmm_factor.au64PhyAddr[0],
+            (HI_VOID **)&gmm_factor.au64VirAddr[0], NULL, HI_NULL, STRIDE * H * 2);
+        uint8_t *fv = (uint8_t *)(HI_UL)gmm_factor.au64VirAddr[0];
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                int off = y * STRIDE * 2 + x * 2;
+                fv[off]     = 8;  /* sensitivity factor */
+                fv[off + 1] = 4;  /* life update factor */
+            }
+        HI_MPI_SYS_MmzFlushCache(gmm_factor.au64PhyAddr[0], fv, STRIDE * H * 2);
+
+        /* Foreground, Background, MatchInfo: U8C1 */
+        gmm_fg.enType = IVE_IMAGE_TYPE_U8C1;
+        gmm_fg.u32Width = W; gmm_fg.u32Height = H;
+        gmm_fg.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&gmm_fg.au64PhyAddr[0],
+            (HI_VOID **)&gmm_fg.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+        gmm_bg = gmm_fg;
+        HI_MPI_SYS_MmzAlloc(&gmm_bg.au64PhyAddr[0],
+            (HI_VOID **)&gmm_bg.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+        gmm_match = gmm_fg;
+        HI_MPI_SYS_MmzAlloc(&gmm_match.au64PhyAddr[0],
+            (HI_VOID **)&gmm_match.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+
+        /* Model: zeroed, MODEL_NUM × 8 × W × H bytes */
+        IVE_MEM_INFO_S gmm_model;
+        memset(&gmm_model, 0, sizeof(gmm_model));
+        gmm_model.u32Size = MODEL_NUM * 8 * W * H;
+        HI_MPI_SYS_MmzAlloc(&gmm_model.u64PhyAddr, (HI_VOID **)&gmm_model.u64VirAddr,
+                             NULL, HI_NULL, gmm_model.u32Size);
+        memset((void *)(HI_UL)gmm_model.u64VirAddr, 0, gmm_model.u32Size);
+        HI_MPI_SYS_MmzFlushCache(gmm_model.u64PhyAddr,
+            (HI_VOID *)(HI_UL)gmm_model.u64VirAddr, gmm_model.u32Size);
+
+        /* Control parameters (vendor defaults) */
+        IVE_GMM2_CTRL_S gmm_ctrl;
+        memset(&gmm_ctrl, 0, sizeof(gmm_ctrl));
+        gmm_ctrl.u8ModelNum             = MODEL_NUM;
+        gmm_ctrl.u16VarRate             = 1;
+        gmm_ctrl.u9q7MaxVar             = (16 * 16) << 7;
+        gmm_ctrl.u9q7MinVar             = (8 * 8) << 7;
+        gmm_ctrl.u8GlbSnsFactor         = 8;
+        gmm_ctrl.u16FreqThr             = 12000;
+        gmm_ctrl.u16FreqInitVal         = 20000;
+        gmm_ctrl.u16FreqAddFactor       = 0xEF;
+        gmm_ctrl.u16FreqReduFactor      = 0xFF00;
+        gmm_ctrl.u16LifeThr             = 5000;
+        gmm_ctrl.u16GlbLifeUpdateFactor = 4;
+        gmm_ctrl.enSnsFactorMode        = IVE_GMM2_SNS_FACTOR_MODE_PIX;
+        gmm_ctrl.enLifeUpdateFactorMode = IVE_GMM2_LIFE_UPDATE_FACTOR_MODE_GLB;
+
+        int gmm_ok = 1;
+        uint8_t *sv = (uint8_t *)(HI_UL)gmm_src.au64VirAddr[0];
+
+        /* Phase 1: 20 frames of uniform gray background (128) */
+        for (int f = 0; f < NFRAMES_BG; f++) {
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++)
+                    sv[y * STRIDE + x] = 128;
+            HI_MPI_SYS_MmzFlushCache(gmm_src.au64PhyAddr[0], sv, STRIDE * H);
+
+            gmm_ctrl.u16GlbLifeUpdateFactor = 0xFFFF / (f + 1);
+            ret = HI_MPI_IVE_GMM2(&handle, &gmm_src, &gmm_factor, &gmm_fg,
+                                   &gmm_bg, &gmm_match, &gmm_model, &gmm_ctrl, HI_TRUE);
+            if (ret != HI_SUCCESS) {
+                printf("  %-10s GMM2 frame %d ret=0x%x — FAIL\n", "gmm2", f, ret);
+                gmm_ok = 0; break;
+            }
+            ive_wait(handle);
+        }
+
+        /* Phase 2: 10 frames with bright object at [24,24]-[40,40] */
+        if (gmm_ok) {
+            gmm_ctrl.u16GlbLifeUpdateFactor = 4;
+            for (int f = 0; f < NFRAMES_FG; f++) {
+                for (int y = 0; y < H; y++)
+                    for (int x = 0; x < W; x++)
+                        sv[y * STRIDE + x] = (x >= 24 && x < 40 && y >= 24 && y < 40) ? 255 : 128;
+                HI_MPI_SYS_MmzFlushCache(gmm_src.au64PhyAddr[0], sv, STRIDE * H);
+
+                ret = HI_MPI_IVE_GMM2(&handle, &gmm_src, &gmm_factor, &gmm_fg,
+                                       &gmm_bg, &gmm_match, &gmm_model, &gmm_ctrl, HI_TRUE);
+                if (ret != HI_SUCCESS) {
+                    printf("  %-10s GMM2 fg frame %d ret=0x%x — FAIL\n", "gmm2", f, ret);
+                    gmm_ok = 0; break;
+                }
+                ive_wait(handle);
+            }
+        }
+
+        /* Check foreground mask: bright region should be detected */
+        if (gmm_ok) {
+            HI_MPI_SYS_MmzFlushCache(gmm_fg.au64PhyAddr[0],
+                (HI_VOID *)(HI_UL)gmm_fg.au64VirAddr[0], STRIDE * H);
+            uint8_t *fgv = (uint8_t *)(HI_UL)gmm_fg.au64VirAddr[0];
+
+            /* Count FG pixels inside object region [24,24]-[40,40] */
+            int fg_inside = 0, fg_outside = 0;
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++) {
+                    if (fgv[y * STRIDE + x] > 0) {
+                        if (x >= 24 && x < 40 && y >= 24 && y < 40) fg_inside++;
+                        else fg_outside++;
+                    }
+                }
+            /* Object should be detected as foreground */
+            int ok = (fg_inside > 100); /* 16×16=256 pixels, expect majority */
+            printf("  %-10s fg_in=%d fg_out=%d  %s\n", "gmm2",
+                   fg_inside, fg_outside, ok ? "PASS" : "FAIL");
+            fails += !ok;
+        } else {
+            fails++;
+        }
+
+        HI_MPI_SYS_MmzFree(gmm_src.au64PhyAddr[0], (HI_VOID *)(HI_UL)gmm_src.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(gmm_factor.au64PhyAddr[0], (HI_VOID *)(HI_UL)gmm_factor.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(gmm_fg.au64PhyAddr[0], (HI_VOID *)(HI_UL)gmm_fg.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(gmm_bg.au64PhyAddr[0], (HI_VOID *)(HI_UL)gmm_bg.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(gmm_match.au64PhyAddr[0], (HI_VOID *)(HI_UL)gmm_match.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(gmm_model.u64PhyAddr, (HI_VOID *)(HI_UL)gmm_model.u64VirAddr);
+    }
+
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 23 - fails, 23);
+    printf("Result: %d/%d passed\n", 24 - fails, 24);
     printf("========================================\n");
 
 cleanup:
