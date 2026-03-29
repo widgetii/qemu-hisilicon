@@ -396,11 +396,15 @@ def build_fc_model(input_h, input_w, input_c, output_size,
     print(f'Weight blob: {weight_size} bytes ({w_q.nbytes} weights + {b_q.nbytes} bias)')
 
     # Compute tmp buffer size needed
-    # Preproc output + flatten output + FC output
+    # The VGS preproc uses significantly more tmp buffer than the raw
+    # pixel output — it needs working memory for resize, CSC, and
+    # intermediate normalization. The vendor's 32×32 model uses 147712.
+    # Use a generous allocation based on reference: ~144 * input_h * input_w.
     preproc_out = align16(input_w) * input_h * input_c
     flatten_out = align16(flat_size)
-    fc_out = align16(output_size * 4)  # int32 accumulation
-    tmp_buf_size = preproc_out + flatten_out + fc_out + 4096  # extra margin
+    fc_out = align16(output_size * 4)
+    vgs_overhead = input_h * input_w * 128  # VGS working memory
+    tmp_buf_size = preproc_out + flatten_out + fc_out + vgs_overhead + 65536
 
     # Tmp buffer offsets for each layer's input/output
     preproc_out_off = 0

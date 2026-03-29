@@ -109,7 +109,8 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Segment at offset 0x%x: %u layers, src=%u dst=%u size=%u tmp=%u\n",
             seg_off, layers, src_num, dst_num, seg_size, tmp_size);
 
-    /* Init MPI */
+    /* Init MPI — call Exit first to clean up any previous crashed session */
+    HI_MPI_SYS_Exit();
     int ret = HI_MPI_SYS_Init();
     if (ret != 0) { fprintf(stderr, "SYS_Init: 0x%x\n", ret); return 1; }
 
@@ -290,11 +291,65 @@ int main(int argc, char **argv) {
                 for (int i = 0; i < 32; i++) fprintf(stderr, "%02x ", (uint8_t)out[i]);
                 fprintf(stderr, "\n");
 
-                /* Also check last part of tmp_buf where FC output might be */
+                /* Scan full tmp_buf for output regions */
                 HI_MPI_SYS_MmzFlushCache(tmp_mem.phys, (void *)(uintptr_t)tmp_mem.virt, tmp_size);
                 int nz2 = 0;
                 for (uint32_t i = 0; i < tmp_size; i++) if (out[i] != 0) nz2++;
                 fprintf(stderr, "  tmp_buf total nonzero: %d/%u\n", nz2, tmp_size);
+
+                /* Find non-zero regions */
+                int rgn_start = -1;
+                for (uint32_t i = 0; i < tmp_size; i += 64) {
+                    uint32_t end = i + 64 < tmp_size ? i + 64 : tmp_size;
+                    int nz3 = 0;
+                    for (uint32_t j = i; j < end; j++) if (out[j]) nz3++;
+                    if (nz3 > 0 && rgn_start < 0) rgn_start = i;
+                    else if (nz3 == 0 && rgn_start >= 0) {
+                        fprintf(stderr, "  region: 0x%04x-0x%04x (%d bytes)\n",
+                                rgn_start, i, i - rgn_start);
+                        /* Dump first 32 bytes of each region */
+                        fprintf(stderr, "    data: ");
+                        for (int j = 0; j < 32 && rgn_start + j < (int)tmp_size; j++)
+                            fprintf(stderr, "%02x ", (uint8_t)out[rgn_start + j]);
+                        fprintf(stderr, "\n");
+                        rgn_start = -1;
+                    }
+                }
+                if (rgn_start >= 0)
+                    fprintf(stderr, "  region: 0x%04x-0x%04x (%d bytes)\n",
+                            rgn_start, tmp_size, tmp_size - rgn_start);
+
+                /* FC output at tmp+0x1800, Unpack output at tmp+0x1830 */
+                fprintf(stderr, "  tmp+0x1800 FC out (hex):    ");
+                for (int i = 0; i < 48; i++)
+                    fprintf(stderr, "%02x ", (uint8_t)out[0x1800 + i]);
+                fprintf(stderr, "\n");
+                /* Read as int32 (FC accumulation) */
+                fprintf(stderr, "  tmp+0x1800 as int32[10]:    ");
+                for (int i = 0; i < 10; i++)
+                    fprintf(stderr, "%d ", *(int32_t *)(out + 0x1800 + i * 4));
+                fprintf(stderr, "\n");
+                /* Read Unpack output */
+                fprintf(stderr, "  tmp+0x1830 Unpack out (hex):");
+                for (int i = 0; i < 32; i++)
+                    fprintf(stderr, " %02x", (uint8_t)out[0x1830 + i]);
+                fprintf(stderr, "\n");
+
+                /* Also check our allocated output buffer */
+                HI_MPI_SYS_MmzFlushCache(out_p, (void *)(uintptr_t)out_v, 256);
+                int8_t *outbuf = (int8_t *)(uintptr_t)out_v;
+                int out_nz = 0;
+                for (int i = 0; i < 256; i++) if (outbuf[i]) out_nz++;
+                fprintf(stderr, "  out_buf nonzero: %d/256\n", out_nz);
+                if (out_nz) {
+                    fprintf(stderr, "  out_buf first 32: ");
+                    for (int i = 0; i < 32; i++) fprintf(stderr, "%02x ", (uint8_t)outbuf[i]);
+                    fprintf(stderr, "\n");
+                    /* Print as signed int8 for FC output interpretation */
+                    fprintf(stderr, "  out_buf as int8:  ");
+                    for (int i = 0; i < 16; i++) fprintf(stderr, "%4d ", outbuf[i]);
+                    fprintf(stderr, "\n");
+                }
             }
 
             if (out_p) HI_MPI_SYS_MmzFree(out_p, (void *)(uintptr_t)out_v);
