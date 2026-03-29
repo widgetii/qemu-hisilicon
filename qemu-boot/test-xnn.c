@@ -185,3 +185,52 @@ int ioctl(int fd, unsigned long request, ...) {
 
     return real_ioctl(fd, request, arg);
 }
+
+/*
+ * Hook mpi_ive_xnn_forward_slice — the actual function exported from libive.so.
+ * This captures all 7 arguments including the preproc control struct.
+ *
+ * Signature (from RE):
+ *   mpi_ive_xnn_forward_slice(handle_ptr, src_blobs, dst_blobs,
+ *                              model_params, preproc_ctrl, instant, arg6)
+ */
+typedef int (*real_fwd_slice_t)(void *, void *, void *, void *, void *, void *, void *, void *);
+
+int mpi_ive_xnn_forward_slice(void *handle, void *src, void *dst,
+                               void *model, void *arg4, void *arg5,
+                               void *arg6, void *arg7)
+{
+    static real_fwd_slice_t real_fn = NULL;
+    static int call_count = 0;
+
+    if (!real_fn) {
+        real_fn = (real_fwd_slice_t)dlsym(RTLD_NEXT, "mpi_ive_xnn_forward_slice");
+        if (!real_fn) {
+            fprintf(stderr, "[XNN-HOOK] dlsym(mpi_ive_xnn_forward_slice) failed!\n");
+            return -1;
+        }
+    }
+
+    if (call_count < 2) {
+        fprintf(stderr, "\n[FWD-SLICE #%d] args: %p %p %p %p | %p %p %p %p\n",
+                call_count, handle, src, dst, model, arg4, arg5, arg6, arg7);
+
+        if (src) hexdump("src (r1)", src, 48);
+        if (dst) hexdump("dst (r2)", dst, 48);
+        if (model) hexdump("model (r3, first 64B)", model, 64);
+        if (arg4) hexdump("arg4 [sp+0]", arg4, 64);
+        if (arg5) hexdump("arg5 [sp+4]", arg5, 64);
+        if (arg6) hexdump("arg6 [sp+8]", arg6, 64);
+        if (arg7) hexdump("arg7 [sp+12]", arg7, 64);
+    }
+
+    int ret = real_fn(handle, src, dst, model, arg4, arg5, arg6, arg7);
+
+    if (call_count < 2) {
+        fprintf(stderr, "[FWD-SLICE #%d] returned %d\n", call_count, ret);
+        if (ret == 0 && dst) hexdump("dst AFTER", dst, 48);
+    }
+
+    call_count++;
+    return ret;
+}

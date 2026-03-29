@@ -98,17 +98,23 @@ static int read_y4m_frame(FILE *fp, uint8_t *buf, int frame_sz, int is_y4m) {
 /* Declare the private XNN functions from libive.a/libive.so */
 extern HI_S32 mpi_ive_xnn_loadmodel(void *model_mem, void *tmp_mem, void *model_params);
 /*
- * mpi_ive_xnn_forward_slice(handle_ptr, src_blobs, dst_blobs, model_params,
- *                           ctrl, instant, ???)
- * 7 args: r0-r3 + 3 on stack
+ * mpi_ive_xnn_forward_slice — 8 args (r0-r3 + 4 on stack):
+ *   r0: HI_S32 *handle        — IVE handle (output)
+ *   r1: xnn_blob_t *src       — input blob (48 bytes)
+ *   r2: xnn_blob_t *dst       — output blob (kernel fills)
+ *   r3: model_params *model   — loaded model (2160 bytes)
+ *  [sp+0]:  xnn_mem_t *tmp    — temp buffer (phys+virt+size)
+ *  [sp+4]:  xnn_blob_t *report— output report/detection blob
+ *  [sp+8]:  void *ctrl        — forward control (src_num, dst_num, src blob copy)
+ *  [sp+12]: HI_BOOL instant   — synchronous flag (1=wait for completion)
  */
 extern HI_S32 mpi_ive_xnn_forward_slice(HI_S32 *handle,
-                                          void *src_blobs,
-                                          void *dst_blobs,
-                                          void *model_params,
+                                          void *src, void *dst,
+                                          void *model,
+                                          void *tmp_buf,
+                                          void *report,
                                           void *ctrl,
-                                          HI_BOOL instant,
-                                          void *reserved);
+                                          HI_BOOL instant);
 extern HI_VOID mpi_ive_xnn_unloadmodel(void *model_params);
 extern HI_S32 mpi_ive_xnn_get_tmpbuf_size(void *model_params, HI_U32 *size);
 
@@ -340,6 +346,29 @@ int main(int argc, char **argv) {
     /* Fill UV with neutral chroma */
     memset((uint8_t *)(HI_UL)frame_virt + y_size, 0x80, uv_size);
 
+    /* Allocate output report blob in MMZ
+     * From captured forward_slice arg5: {type=0, size=0xa0=160, w=0x28=40, h=0x17=23, c=0x3f=63}
+     * Total output = w * h * c = 40 * 23 * 63 = 57960 bytes (round up to 64K) */
+    HI_U64 report_phys, report_virt;
+    HI_U32 report_size = 65536;
+    ret = HI_MPI_SYS_MmzAlloc(&report_phys, (HI_VOID **)&report_virt,
+        "XNN_REPORT", NULL, report_size);
+    if (ret != HI_SUCCESS) { fprintf(stderr, "MmzAlloc report: 0x%x\n", ret); goto cleanup; }
+    memset((void *)(HI_UL)report_virt, 0, report_size);
+
+    /* Build report blob (matching captured layout) */
+    xnn_blob_t report_blob;
+    memset(&report_blob, 0, sizeof(report_blob));
+    report_blob.blob_type = 0;
+    report_blob.width = 160;     /* 0xa0 — might be total size, not width */
+    report_blob.virt_addr = (uint32_t)report_virt;
+    report_blob.virt_hi = 0;
+    report_blob.phys_addr = report_phys;
+    report_blob.num = 1;
+    report_blob.stride = 40;     /* 0x28 */
+    report_blob.height = 23;     /* 0x17 */
+    report_blob.channels = 63;   /* 0x3f */
+
     uint8_t *frame_data = malloc(frame_sz);
     long long t_total = 0;
     int nframes = 0;
@@ -353,7 +382,7 @@ int main(int argc, char **argv) {
             memcpy(dst + y * stride, frame_data + y * W, W);
         HI_MPI_SYS_MmzFlushCache(frame_phys, (HI_VOID *)(HI_UL)frame_virt, y_size + uv_size);
 
-        /* Build src blob */
+        /* Build src blob (48 bytes, matches captured layout exactly) */
         xnn_blob_t src_blob;
         memset(&src_blob, 0, sizeof(src_blob));
         src_blob.blob_type = XNN_MP_BLOB_TYPE(&model1_params);
@@ -366,12 +395,25 @@ int main(int argc, char **argv) {
         src_blob.height = H;
         src_blob.channels = XNN_MP_INPUT_C(&model1_params);
 
-        /* Dst blob — output detection tensor (kernel fills the addresses) */
+        /* Dst blob — kernel fills during forward */
         xnn_blob_t dst_blob;
         memset(&dst_blob, 0, sizeof(dst_blob));
 
-        /* Control — from captured ioctl, just src_num and dst_num */
-        uint32_t ctrl[4] = {0};
+        /* Output report blob — detection results
+         * From captured arg5: type=0, size=160(0xa0), w=40(0x28), h=23(0x17), c=63(0x3f)
+         * This is the network's output tensor — pre-allocated in MMZ */
+
+        /* Forward control — from capture: starts with {src_num=1, dst_num=1, 0, 1}
+         * then contains a copy of the src blob. Total ~64+ bytes. */
+        uint8_t ctrl[128];
+        memset(ctrl, 0, sizeof(ctrl));
+        uint32_t *ctrl32 = (uint32_t *)ctrl;
+        ctrl32[0] = 1;  /* src_num */
+        ctrl32[1] = 1;  /* dst_num */
+        ctrl32[2] = 0;
+        ctrl32[3] = 1;  /* ??? (flags) */
+        /* Copy src blob into ctrl at offset 16 */
+        memcpy(ctrl + 16, &src_blob, sizeof(src_blob));
 
         HI_S32 handle = 0;
 
@@ -379,7 +421,10 @@ int main(int argc, char **argv) {
         ret = mpi_ive_xnn_forward_slice(&handle,
                                          &src_blob, &dst_blob,
                                          &model1_params,
-                                         ctrl, HI_TRUE, NULL);
+                                         &tmp_mem,      /* temp buffer */
+                                         &report_blob,  /* output report */
+                                         ctrl,          /* forward ctrl */
+                                         HI_TRUE);      /* instant */
         long long dt = usec_now() - t0;
         t_total += dt;
 
@@ -392,9 +437,21 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        if (nframes == 0)
+        if (nframes == 0) {
             fprintf(stderr, "FRAME 0: forward_slice OK, handle=%d (%.1f ms)\n",
                     handle, dt / 1000.0);
+            /* Dump output blobs to check if inference actually ran */
+            HI_MPI_SYS_MmzFlushCache(report_phys, (void *)(HI_UL)report_virt, 256);
+            fprintf(stderr, "  report blob first 64 bytes:\n  ");
+            uint8_t *rp = (uint8_t *)(HI_UL)report_virt;
+            for (int j = 0; j < 64; j++) fprintf(stderr, "%02x ", rp[j]);
+            fprintf(stderr, "\n  dst blob:\n  ");
+            /* Check dst_blob fields */
+            fprintf(stderr, "type=%u w=%u h=%u c=%u stride=%u phys=0x%llx\n",
+                    dst_blob.blob_type, dst_blob.width, dst_blob.height,
+                    dst_blob.channels, dst_blob.stride,
+                    (unsigned long long)dst_blob.phys_addr);
+        }
 
         nframes++;
         if (nframes >= 10) break; /* limit for initial test */
