@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    name: Build QEMU
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build meson pkg-config \
+            libglib2.0-dev libpixman-1-dev libfdt-dev zlib1g-dev \
+            python3 python3-venv git
+
+      - name: Build QEMU
+        run: bash qemu/setup.sh
+
+      - name: Verify machines
+        run: |
+          count=$(./qemu-src/build/qemu-system-arm -machine help | grep -cE '(hi35|gk7)')
+          echo "Registered machines: $count"
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '(hi35|gk7)'
+          [ "$count" -ge 21 ]
+
+      - name: Upload QEMU binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/qemu-system-arm
+          retention-days: 1
+
+  boot:
+    name: Boot ${{ matrix.name }}
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: hi3516cv100
+            soc: hi3516cv100
+            machine: hi3516cv100
+            mem: 64M
+            kernel: uImage.hi3516cv100
+            rootfs: rootfs.squashfs.hi3516cv100
+            append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            nic: "-nic user"
+
+          - name: hi3516cv200
+            soc: hi3516cv200
+            machine: hi3516cv200
+            mem: 64M
+            kernel: uImage.hi3516cv200
+            rootfs: rootfs.squashfs.hi3516cv200
+            append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            nic: "-nic user"
+
+          - name: hi3516av100
+            soc: hi3516av100
+            machine: hi3516av100
+            mem: 256M
+            kernel: uImage.hi3516av100
+            rootfs: rootfs.squashfs.hi3516av100
+            append: "console=ttyAMA0,115200 earlyprintk mem=256M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            nic: ""
+
+          - name: hi3516cv300
+            soc: hi3516cv300
+            machine: hi3516cv300
+            mem: 128M
+            kernel: uImage.hi3516cv300
+            rootfs: rootfs.squashfs.hi3516cv300
+            append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            nic: "-nic user"
+
+          - name: hi3516cv500
+            soc: hi3516cv500
+            machine: hi3516cv500
+            mem: 128M
+            kernel: uImage.hi3516cv500
+            rootfs: rootfs.squashfs.hi3516cv500
+            append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            nic: "-nic user"
+
+          - name: hi3519v101
+            soc: hi3519v101
+            machine: hi3519v101
+            mem: 256M
+            kernel: uImage.hi3519v101
+            rootfs: rootfs.squashfs.hi3519v101
+            append: "console=ttyAMA0,115200 earlyprintk mem=256M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            nic: ""
+
+          - name: hi3516ev300
+            soc: hi3516ev300
+            machine: hi3516ev300
+            mem: 128M
+            kernel: uImage.hi3516ev300
+            rootfs: rootfs.squashfs.hi3516ev300
+            append: "console=ttyAMA0,115200 earlyprintk mem=96M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data) mmz_allocator=hisi mmz=anonymous,0,0x46000000,32M"
+            nic: "-nic user"
+
+          - name: hi3516cv610
+            soc: hi3516cv610
+            machine: hi3516cv610
+            mem: 128M
+            kernel: kernel.hi3516cv610
+            rootfs: rootfs.squashfs.hi3516cv610
+            append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            nic: "-nic user"
+            dtb: cv610.dtb
+            fit: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download QEMU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/
+
+      - name: Make QEMU executable
+        run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Download firmware
+        run: |
+          cd qemu-boot
+          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.${{ matrix.soc }}-nor-lite.tgz" \
+              -o "openipc.${{ matrix.soc }}-nor-lite.tgz"
+          tar xzf "openipc.${{ matrix.soc }}-nor-lite.tgz"
+
+      - name: Extract FIT image
+        if: matrix.fit
+        run: |
+          sudo apt-get install -y --no-install-recommends u-boot-tools
+          cd qemu-boot
+          dumpimage -T flat_dt -p 0 -o cv610.dtb "firmware.bin.${{ matrix.soc }}"
+          dumpimage -T flat_dt -p 1 -o "kernel.${{ matrix.soc }}" "firmware.bin.${{ matrix.soc }}"
+          dd if="firmware.bin.${{ matrix.soc }}" of="rootfs.squashfs.${{ matrix.soc }}" bs=1 skip=$((0x2A0000))
+
+      - name: Boot test
+        timeout-minutes: 3
+        run: |
+          DTB_ARG=""
+          if [ -n "${{ matrix.dtb }}" ]; then
+            DTB_ARG="-dtb qemu-boot/${{ matrix.dtb }}"
+          fi
+
+          timeout 120 ./qemu-src/build/qemu-system-arm \
+            -M ${{ matrix.machine }} -m ${{ matrix.mem }} \
+            -kernel "qemu-boot/${{ matrix.kernel }}" \
+            -initrd "qemu-boot/${{ matrix.rootfs }}" \
+            $DTB_ARG \
+            -nographic -serial mon:stdio \
+            -append '${{ matrix.append }}' \
+            ${{ matrix.nic }} \
+            -d unimp,guest_errors -D qemu-boot/qemu.log \
+            2>&1 | tee boot-output.txt &
+          QEMU_PID=$!
+
+          # Wait for login prompt
+          for i in $(seq 1 120); do
+            if grep -q "login:" boot-output.txt 2>/dev/null; then
+              echo ""
+              echo "=== Boot successful: login prompt reached ==="
+              kill $QEMU_PID 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "=== TIMEOUT: login prompt not reached ==="
+          echo "--- Last 30 lines of output ---"
+          tail -30 boot-output.txt
+          kill $QEMU_PID 2>/dev/null || true
+          exit 1
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log-${{ matrix.name }}
+          path: |
+            boot-output.txt
+            qemu-boot/qemu.log
+          retention-days: 7
