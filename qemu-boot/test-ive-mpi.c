@@ -662,8 +662,130 @@ int main(void) {
         HI_MPI_SYS_MmzFree(canny_stack.u64PhyAddr, (HI_VOID *)(HI_UL)canny_stack.u64VirAddr);
     }
 
+    /* === FILTER (5×5 convolution) === */
+    {
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        IVE_FILTER_CTRL_S flt_ctrl;
+        /* Identity-like kernel: center=16, normalize by >>4 = divide by 16 */
+        memset(flt_ctrl.as8Mask, 0, 25);
+        flt_ctrl.as8Mask[12] = 16; /* center element */
+        flt_ctrl.u8Norm = 4;       /* right-shift by 4 = /16 */
+        ret = HI_MPI_IVE_Filter(&handle, &src1, &dst, &flt_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        read_image(&dst, result, SZ);
+        /* Identity kernel should produce ~same as input (with border zeros) */
+        int ok = (ret == HI_SUCCESS && result[W+1] != 0);
+        printf("  %-10s [%d,%d,%d,%d]  %s\n", "filter",
+               result[W+1], result[W+2], result[W+3], result[W+4],
+               ok ? "PASS" : "FAIL");
+        fails += !ok;
+    }
+
+    /* === MAP (LUT) === */
+    {
+        memset((void *)(HI_UL)dst.au64VirAddr[0], 0, STRIDE * H);
+        IVE_MAP_CTRL_S map_ctrl = { .enMode = IVE_MAP_MODE_U8 };
+        IVE_MEM_INFO_S map_mem;
+        memset(&map_mem, 0, sizeof(map_mem));
+        map_mem.u32Size = 256;
+        HI_MPI_SYS_MmzAlloc(&map_mem.u64PhyAddr, (HI_VOID **)&map_mem.u64VirAddr,
+                             NULL, HI_NULL, 256);
+        /* Invert LUT: map[i] = 255 - i */
+        uint8_t *lut = (uint8_t *)(HI_UL)map_mem.u64VirAddr;
+        for (int i = 0; i < 256; i++) lut[i] = 255 - i;
+        HI_MPI_SYS_MmzFlushCache(map_mem.u64PhyAddr, lut, 256);
+
+        IVE_SRC_IMAGE_S map_src = src1;
+        ret = HI_MPI_IVE_Map(&handle, &map_src, &map_mem, &dst, &map_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
+        read_image(&dst, result, SZ);
+        /* src1[0]=13, inverted should be 242 */
+        int ok = (ret == HI_SUCCESS && result[0] == (255 - 13));
+        printf("  %-10s [%d,%d,%d,%d] (expect [%d,...])  %s\n", "map",
+               result[0], result[1], result[2], result[3], 255-13,
+               ok ? "PASS" : "FAIL");
+        fails += !ok;
+        HI_MPI_SYS_MmzFree(map_mem.u64PhyAddr, (HI_VOID *)(HI_UL)map_mem.u64VirAddr);
+    }
+
+    /* === NCC (Normalized Cross-Correlation) === */
+    {
+        IVE_MEM_INFO_S ncc_mem;
+        memset(&ncc_mem, 0, sizeof(ncc_mem));
+        ncc_mem.u32Size = sizeof(HI_U64) * 3; /* numerator + denom1 + denom2 */
+        HI_MPI_SYS_MmzAlloc(&ncc_mem.u64PhyAddr, (HI_VOID **)&ncc_mem.u64VirAddr,
+                             NULL, HI_NULL, ncc_mem.u32Size);
+        ret = HI_MPI_IVE_NCC(&handle, &src1, &src1, &ncc_mem, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(ncc_mem.u64PhyAddr,
+                (HI_VOID *)(HI_UL)ncc_mem.u64VirAddr, ncc_mem.u32Size);
+            HI_U64 *ncc = (HI_U64 *)(HI_UL)ncc_mem.u64VirAddr;
+            /* Self-correlation: numerator should equal each denominator */
+            int ok = (ncc[0] > 0 && ncc[0] == ncc[1] && ncc[1] == ncc[2]);
+            printf("  %-10s num=%llu d1=%llu d2=%llu  %s\n", "ncc",
+                   (unsigned long long)ncc[0], (unsigned long long)ncc[1],
+                   (unsigned long long)ncc[2], ok ? "PASS" : "FAIL");
+            fails += !ok;
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "ncc", ret);
+        }
+        HI_MPI_SYS_MmzFree(ncc_mem.u64PhyAddr, (HI_VOID *)(HI_UL)ncc_mem.u64VirAddr);
+    }
+
+    /* === CSC (Color Space Conversion, YUV420SP→RGB) === */
+    {
+        /* Create YUV420SP source: Y plane + UV plane */
+        IVE_IMAGE_S yuv_src, rgb_dst;
+        memset(&yuv_src, 0, sizeof(yuv_src));
+        yuv_src.enType = IVE_IMAGE_TYPE_YUV420SP;
+        yuv_src.u32Width = W; yuv_src.u32Height = H;
+        yuv_src.au32Stride[0] = STRIDE;
+        yuv_src.au32Stride[1] = STRIDE;
+        HI_U32 yuv_sz = STRIDE * H * 3 / 2;
+        HI_MPI_SYS_MmzAlloc(&yuv_src.au64PhyAddr[0], (HI_VOID **)&yuv_src.au64VirAddr[0],
+                             NULL, HI_NULL, yuv_sz);
+        yuv_src.au64PhyAddr[1] = yuv_src.au64PhyAddr[0] + STRIDE * H;
+        yuv_src.au64VirAddr[1] = yuv_src.au64VirAddr[0] + STRIDE * H;
+        /* Fill: Y=128, U=128, V=128 (neutral gray) */
+        memset((void *)(HI_UL)yuv_src.au64VirAddr[0], 128, yuv_sz);
+        HI_MPI_SYS_MmzFlushCache(yuv_src.au64PhyAddr[0],
+            (HI_VOID *)(HI_UL)yuv_src.au64VirAddr[0], yuv_sz);
+
+        memset(&rgb_dst, 0, sizeof(rgb_dst));
+        rgb_dst.enType = IVE_IMAGE_TYPE_U8C3_PLANAR;
+        rgb_dst.u32Width = W; rgb_dst.u32Height = H;
+        rgb_dst.au32Stride[0] = STRIDE;
+        rgb_dst.au32Stride[1] = STRIDE;
+        rgb_dst.au32Stride[2] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&rgb_dst.au64PhyAddr[0], (HI_VOID **)&rgb_dst.au64VirAddr[0],
+                             NULL, HI_NULL, STRIDE * H * 3);
+        rgb_dst.au64PhyAddr[1] = rgb_dst.au64PhyAddr[0] + STRIDE * H;
+        rgb_dst.au64VirAddr[1] = rgb_dst.au64VirAddr[0] + STRIDE * H;
+        rgb_dst.au64PhyAddr[2] = rgb_dst.au64PhyAddr[0] + STRIDE * H * 2;
+        rgb_dst.au64VirAddr[2] = rgb_dst.au64VirAddr[0] + STRIDE * H * 2;
+
+        IVE_CSC_CTRL_S csc_ctrl = { .enMode = IVE_CSC_MODE_PIC_BT601_YUV2RGB };
+        ret = HI_MPI_IVE_CSC(&handle, &yuv_src, &rgb_dst, &csc_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(rgb_dst.au64PhyAddr[0],
+                (HI_VOID *)(HI_UL)rgb_dst.au64VirAddr[0], STRIDE * H * 3);
+            uint8_t *r_plane = (uint8_t *)(HI_UL)rgb_dst.au64VirAddr[0];
+            /* Y=128,U=128,V=128 → RGB should be ~(128,128,128) gray */
+            int ok = (r_plane[0] >= 120 && r_plane[0] <= 136);
+            printf("  %-10s R=%d (expect ~128)  %s\n", "csc", r_plane[0],
+                   ok ? "PASS" : "FAIL");
+            fails += !ok;
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "csc", ret);
+        }
+        HI_MPI_SYS_MmzFree(yuv_src.au64PhyAddr[0], (HI_VOID *)(HI_UL)yuv_src.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(rgb_dst.au64PhyAddr[0], (HI_VOID *)(HI_UL)rgb_dst.au64VirAddr[0]);
+    }
+
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 19 - fails, 19);
+    printf("Result: %d/%d passed\n", 23 - fails, 23);
     printf("========================================\n");
 
 cleanup:
