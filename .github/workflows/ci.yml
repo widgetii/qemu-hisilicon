@@ -19,10 +19,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential ninja-build meson pkg-config \
             libglib2.0-dev libpixman-1-dev libfdt-dev zlib1g-dev \
-            python3 python3-venv git
+            python3 python3-venv git gcc-arm-linux-gnueabi
 
       - name: Build QEMU
         run: bash qemu/setup.sh
+
+      - name: Build IVE test initramfs
+        run: |
+          arm-linux-gnueabi-gcc -static -O2 -o /tmp/test-ive-init \
+            qemu-boot/test-ive-ops.c
+          mkdir -p /tmp/initramfs
+          cp /tmp/test-ive-init /tmp/initramfs/init
+          (cd /tmp/initramfs && echo init | cpio -o -H newc) > qemu-boot/test-ive.cpio
 
       - name: Verify machines
         run: |
@@ -37,6 +45,78 @@ jobs:
           name: qemu-arm
           path: qemu-src/build/qemu-system-arm
           retention-days: 1
+
+      - name: Upload IVE test initramfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ive-test-cpio
+          path: qemu-boot/test-ive.cpio
+          retention-days: 1
+
+  ive-test:
+    name: IVE register tests (19 ops)
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0
+
+      - name: Download QEMU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/
+
+      - name: Download IVE test initramfs
+        uses: actions/download-artifact@v4
+        with:
+          name: ive-test-cpio
+          path: qemu-boot/
+
+      - name: Make QEMU executable
+        run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Download EV300 kernel
+        run: |
+          cd qemu-boot
+          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.hi3516ev300-nor-lite.tgz" \
+              -o openipc.hi3516ev300-nor-lite.tgz
+          tar xzf openipc.hi3516ev300-nor-lite.tgz
+
+      - name: Run IVE register-level tests
+        timeout-minutes: 2
+        run: |
+          timeout 60 ./qemu-src/build/qemu-system-arm \
+            -M hi3516ev300 -m 128M \
+            -kernel qemu-boot/uImage.hi3516ev300 \
+            -initrd qemu-boot/test-ive.cpio \
+            -nographic -serial mon:stdio \
+            -append "console=ttyAMA0,115200 mem=96M mmz_allocator=hisi mmz=anonymous,0,0x46000000,32M" \
+            2>&1 | tee ive-output.txt || true
+
+          echo ""
+          echo "=== IVE Test Results ==="
+          grep -E 'PASS|FAIL|Result' ive-output.txt
+
+          # Verify all 19 tests passed
+          if grep -q "Result: 19/19 passed" ive-output.txt; then
+            echo "=== All IVE tests passed ==="
+          else
+            echo "=== IVE test FAILURE ==="
+            exit 1
+          fi
+
+      - name: Upload IVE test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ive-test-log
+          path: ive-output.txt
+          retention-days: 7
 
   boot:
     name: Boot ${{ matrix.name }}

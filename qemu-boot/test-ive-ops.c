@@ -173,31 +173,33 @@ static void sw_sobel(uint8_t *dst, const uint8_t *src, int w, int h) {
         }
 }
 
+/* Bitwise OR morphology (matching real HW: dilate = OR(src & mask)) */
 static void sw_dilate(uint8_t *dst, const uint8_t *src, int w, int h) {
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
-            uint8_t mx = 0;
+            uint8_t result = 0;
             for (int ky=-2; ky<=2; ky++) for (int kx=-2; kx<=2; kx++) {
                 int sy=y+ky, sx=x+kx;
-                if (sy>=0 && sy<h && sx>=0 && sx<w) {
-                    uint8_t v=src[sy*w+sx]; if(v>mx) mx=v;
-                }
+                if (sy>=0 && sy<h && sx>=0 && sx<w)
+                    result |= (src[sy*w+sx] & 0xFF); /* mask=0xFF */
             }
-            dst[y*w+x] = mx;
+            dst[y*w+x] = result;
         }
 }
 
+/* Bitwise AND morphology (matching real HW: erode = AND(src | ~mask)) */
 static void sw_erode(uint8_t *dst, const uint8_t *src, int w, int h) {
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
-            uint8_t mn = 255;
+            uint8_t result = 0xFF;
             for (int ky=-2; ky<=2; ky++) for (int kx=-2; kx<=2; kx++) {
                 int sy=y+ky, sx=x+kx;
-                if (sy>=0 && sy<h && sx>=0 && sx<w) {
-                    uint8_t v=src[sy*w+sx]; if(v<mn) mn=v;
-                }
+                if (sy>=0 && sy<h && sx>=0 && sx<w)
+                    result &= (src[sy*w+sx] | 0x00); /* ~mask=0x00 */
+                else
+                    result = 0; /* border: out-of-bounds → 0 contribution */
             }
-            dst[y*w+x] = mn;
+            dst[y*w+x] = result;
         }
 }
 
@@ -355,6 +357,10 @@ int main(int argc, char **argv) {
         printf("  %-10s S16 h[5,1]=%d  %s\n", "sobel", gval, ok ? "PASS" : "FAIL");
         fails += !ok;
     }
+    /* Dilate/Erode need mask=0xFF×25 in OP_DESC register.
+     * Store mask at end of src2 buffer (offset 4064, 25 bytes). */
+    memset(va_src2 + SZ - 32, 0xFF, 25);
+    if (!sw_mode) ive_w(IVE_OP_DESC, pa_src2 + SZ - 32);
     fails += run_test("dilate", OP_DILATE,
         ({void f(void){sw_dilate(va_dst,va_src1,W,H);} f;}));
     fails += run_test("erode", OP_ERODE,
