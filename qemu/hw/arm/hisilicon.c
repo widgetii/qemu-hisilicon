@@ -62,9 +62,9 @@
  *        EV100*      ~2018   ARM9 @800MHz        H.265 1080P@20   1M
  *  V3A   3519V101    ~2017   A17@1.2G+A7@800M    H.265 4K@30+2M   4K
  *        AV200*      ~2017   A17@1.2G+A7@800M    H.265 5M@30      5M
- *  V3.5  CV500       2018Q4  Dual A7 @1GHz       H.265/264 1080P  2M
- *        AV300*      2018Q4  Dual A7 @1GHz       H.265/264 4K     4K
- *        DV300*      2018Q4  Dual A7 @1GHz       H.265/264 4M     4M
+ *  V3.5  CV500       2018    Dual A7 @900MHz      H.265/264 3M     3M
+ *        AV300*      2019    Dual A7 @900MHz      H.265/264 4K     4K
+ *        DV300*      2019    Dual A7 @900MHz      H.265/264 5M     5M
  *  V4    EV200       2018Q4  A7 @900MHz          H.265 3M@20      3M
  *        EV300       2018Q4  A7 @900MHz          H.265 5M@15      5M
  *        18EV300     2018Q4  A7 @900MHz          H.265 3M@20      3M
@@ -416,9 +416,10 @@ static const HisiSoCConfig hi3516cv300_soc = {
 };
 
 /*
- * Hi3516CV500 (V3.5): 2018 Q4, 2M mini-smart-vision.  Dual Cortex-A7 @1GHz.
- * Video: H.265/H.264 codec, 1080P@30fps.  "Mini-Smart Vision Platform."
- * Platform family: hi3516av300 (4K), hi3516dv300 (4M@30fps, same SDK).
+ * Hi3516CV500 (V3.5): 2018, 3M smart-vision.  Dual Cortex-A7 @900MHz.
+ * Video: H.265/H.264, 3M(2304x1296)@20fps / 1080P@30fps.  NPU: 0.5 TOPS.
+ * Memory: ext DDR3(L)/DDR4 up to 8Gbit.  280-pin TFBGA 12x12mm.
+ * Platform family: hi3516av300 (4K, 1.0 TOPS), hi3516dv300 (5M, 1.0 TOPS).
  *
  * Cortex-A7 + GICv2 (like V4), but unique peripheral address map distinct
  * from both V3 and V4.  RAM at 0x80000000 (like V1-V3), himciv200 MMC, 40 KB SRAM.
