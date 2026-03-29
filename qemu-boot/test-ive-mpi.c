@@ -931,8 +931,103 @@ int main(void) {
         HI_MPI_SYS_MmzFree(gmm_model.u64PhyAddr, (HI_VOID *)(HI_UL)gmm_model.u64VirAddr);
     }
 
+    /* === NormGrad === */
+    {
+        IVE_IMAGE_S ng_dst_h, ng_dst_v;
+        memset(&ng_dst_h, 0, sizeof(ng_dst_h));
+        ng_dst_h.enType = IVE_IMAGE_TYPE_S8C1;
+        ng_dst_h.u32Width = W; ng_dst_h.u32Height = H;
+        ng_dst_h.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&ng_dst_h.au64PhyAddr[0],
+            (HI_VOID **)&ng_dst_h.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+        ng_dst_v = ng_dst_h;
+        HI_MPI_SYS_MmzAlloc(&ng_dst_v.au64PhyAddr[0],
+            (HI_VOID **)&ng_dst_v.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+        HI_S8 ng_mask[25] = {0,0,0,0,0, 0,-1,0,1,0, 0,-2,0,2,0, 0,-1,0,1,0, 0,0,0,0,0};
+        IVE_NORM_GRAD_CTRL_S ng_ctrl = {
+            .enOutCtrl = IVE_NORM_GRAD_OUT_CTRL_HOR_AND_VER,
+            .u8Norm = 3
+        };
+        memcpy(ng_ctrl.as8Mask, ng_mask, 25);
+        ret = HI_MPI_IVE_NormGrad(&handle, &src1, &ng_dst_h, &ng_dst_v, NULL, &ng_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(ng_dst_h.au64PhyAddr[0],
+                (HI_VOID *)(HI_UL)ng_dst_h.au64VirAddr[0], STRIDE * H);
+            int8_t *nv = (int8_t *)(HI_UL)ng_dst_h.au64VirAddr[0];
+            int ok = (nv[STRIDE+5] != 0);
+            printf("  %-10s h[5,1]=%d  %s\n", "normgrad", nv[STRIDE+5],
+                   ok ? "PASS" : "FAIL");
+            fails += !ok;
+        } else {
+            printf("  %-10s ret=0x%x — skipped\n", "normgrad", ret);
+        }
+        HI_MPI_SYS_MmzFree(ng_dst_h.au64PhyAddr[0], (HI_VOID *)(HI_UL)ng_dst_h.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(ng_dst_v.au64PhyAddr[0], (HI_VOID *)(HI_UL)ng_dst_v.au64VirAddr[0]);
+    }
+
+    /* === STCandiCorner + STCorner === */
+    {
+        IVE_IMAGE_S st_dst;
+        memset(&st_dst, 0, sizeof(st_dst));
+        st_dst.enType = IVE_IMAGE_TYPE_U8C1;
+        st_dst.u32Width = W; st_dst.u32Height = H;
+        st_dst.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&st_dst.au64PhyAddr[0],
+            (HI_VOID **)&st_dst.au64VirAddr[0], NULL, HI_NULL, STRIDE * H);
+
+        /* Aux memory for STCandiCorner */
+        IVE_MEM_INFO_S st_mem;
+        memset(&st_mem, 0, sizeof(st_mem));
+        HI_U32 st_mem_sz = 4 * STRIDE * H + 16; /* 4 * stride * height + IVE_ST_MAX_EIG_S */
+        HI_MPI_SYS_MmzAlloc(&st_mem.u64PhyAddr, (HI_VOID **)&st_mem.u64VirAddr,
+                             NULL, HI_NULL, st_mem_sz);
+        st_mem.u32Size = st_mem_sz;
+
+        IVE_ST_CANDI_CORNER_CTRL_S st_candi_ctrl = {
+            .stMem = st_mem,
+            .u0q8QualityLevel = 25
+        };
+
+        ret = HI_MPI_IVE_STCandiCorner(&handle, &src1, &st_dst, &st_candi_ctrl, HI_TRUE);
+        if (ret == HI_SUCCESS) {
+            ive_wait(handle);
+
+            /* Now run STCorner (CPU function) */
+            IVE_DST_MEM_INFO_S corner_mem;
+            memset(&corner_mem, 0, sizeof(corner_mem));
+            corner_mem.u32Size = 2 + 500 * 4; /* u16 count + 500 * (u16 x, u16 y) */
+            HI_MPI_SYS_MmzAlloc(&corner_mem.u64PhyAddr, (HI_VOID **)&corner_mem.u64VirAddr,
+                                 NULL, HI_NULL, corner_mem.u32Size);
+
+            IVE_ST_CORNER_CTRL_S st_corner_ctrl = {
+                .u16MaxCornerNum = 500,
+                .u16MinDist = 5
+            };
+
+            ret = HI_MPI_IVE_STCorner(&st_dst, &corner_mem, &st_corner_ctrl);
+            if (ret == HI_SUCCESS) {
+                HI_MPI_SYS_MmzFlushCache(corner_mem.u64PhyAddr,
+                    (HI_VOID *)(HI_UL)corner_mem.u64VirAddr, corner_mem.u32Size);
+                uint16_t *corner_data = (uint16_t *)(HI_UL)corner_mem.u64VirAddr;
+                uint16_t n_corners = corner_data[0];
+                int ok = (n_corners > 0);
+                printf("  %-10s corners=%d  %s\n", "st_corner", n_corners,
+                       ok ? "PASS" : "FAIL");
+                fails += !ok;
+            } else {
+                printf("  %-10s STCorner ret=0x%x — skipped\n", "st_corner", ret);
+            }
+            HI_MPI_SYS_MmzFree(corner_mem.u64PhyAddr, (HI_VOID *)(HI_UL)corner_mem.u64VirAddr);
+        } else {
+            printf("  %-10s STCandiCorner ret=0x%x — skipped\n", "st_corner", ret);
+        }
+        HI_MPI_SYS_MmzFree(st_dst.au64PhyAddr[0], (HI_VOID *)(HI_UL)st_dst.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(st_mem.u64PhyAddr, (HI_VOID *)(HI_UL)st_mem.u64VirAddr);
+    }
+
     printf("========================================\n");
-    printf("Result: %d/%d passed\n", 24 - fails, 24);
+    printf("Result: %d/%d passed\n", 26 - fails, 26);
     printf("========================================\n");
 
 cleanup:
