@@ -252,7 +252,7 @@ Shinobi, or any system supporting ONVIF analytics events.
 
 ### QEMU Emulation Status (39 ops implemented)
 
-**Byte-identical to real EV300 hardware (22 ops, verified via full pixel capture):**
+**Byte-identical to real EV300 hardware (24 ops, verified via full pixel capture):**
 
 | Category | Ops | Pixels verified |
 |----------|-----|----------------|
@@ -264,6 +264,8 @@ Shinobi, or any system supporting ONVIF analytics events.
 | Histogram | Hist, EqualizeHist | 256/256 bins, 4096/4096 px |
 | Analysis | Integ (COMBINE: sqsum<<28\|sum), Map | 4096/4096 each |
 | Background | GMM2 (30-frame stateful test) | 256/256 fg pixels |
+| Block matching | SAD (U16 values + U8 threshold, 4×4 blocks) | 256/256 blocks |
+| Labeling | CCL (8-connected, IVE_CCBLOB_S output) | 18/18 regions |
 
 **Functionally correct, sub-pixel precision gap (2 ops):**
 
@@ -310,6 +312,8 @@ device (`/dev/ive`) is only used for the 39 pixel/image ops above.
 - **Sobel**: Outputs S16C1 (not U8 magnitude), uses configurable 5×5 mask
   with clamped border access for rows 1..H-2
 - **Integ COMBINE**: U64 = `(sqsum << 28) | sum` — 28-bit sum + 36-bit sqsum
+- **SAD**: Outputs U16 values (DST1) + U8 threshold (DST2), pixel stride convention
+- **CCL**: Only 8-connected supported; CCBLOB header is `u16+s8+u8` (4 bytes, not 8)
 
 ### Application coverage
 
@@ -343,7 +347,7 @@ Real board MPI test (test-ive-mpi.c):       34/34 pass
 - `docs/ive-registers.md` — hardware register map
 - `docs/ive-eval-methodology.md` — evaluation pipeline, metrics, reproducing results
 - `docs/meva-dataset-spec.md` — dataset download and indexing spec
-- `qemu/hw/misc/hisi-ive.c` — QEMU IVE implementation (39 ops, 22 byte-identical)
+- `qemu/hw/misc/hisi-ive.c` — QEMU IVE implementation (39 ops, 24 byte-identical)
 - `qemu-boot/test-ive-ops.c` — QEMU register-level test suite (19 tests)
 - `qemu-boot/test-ive-mpi.c` — real board MPI test suite (34 tests, incl. ML inference)
 - `qemu-boot/test-ive-video-mpi.c` — real board video pipeline (MD + abandoned + LPR)

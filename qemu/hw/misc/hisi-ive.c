@@ -138,7 +138,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiIveState, HISI_IVE)
 
 /* CCL output structure matches hi_ive.h IVE_CCBLOB_S */
 #define IVE_MAX_REGION_NUM  254
-#define CCBLOB_SIZE         (4 + 2 + 2 + IVE_MAX_REGION_NUM * 12)
+#define CCBLOB_SIZE         (4 + IVE_MAX_REGION_NUM * 12)
 
 #define IVE_MMIO_SIZE   0x10000
 #define IVE_NREGS       (IVE_MMIO_SIZE / 4)
@@ -194,30 +194,37 @@ static void ive_op_sad(HisiIveState *s)
 {
     uint32_t src1 = s->regs[IVE_SRC1_ADDR / 4];
     uint32_t src2 = s->regs[IVE_SRC2_ADDR / 4];
-    uint32_t dst  = s->regs[IVE_DST1_ADDR / 4];
+    uint32_t dst_sad = s->regs[IVE_DST1_ADDR / 4];
+    uint32_t dst_thr = s->regs[IVE_DST2_ADDR / 4];
     uint32_t strides0 = s->regs[IVE_STRIDES_0 / 4];
     uint32_t strides1 = s->regs[IVE_STRIDES_1 / 4];
+    uint32_t strides2 = s->regs[IVE_STRIDES_2 / 4];
     uint32_t dim = s->regs[IVE_DIMENSIONS / 4];
     uint32_t thresh_reg = s->regs[IVE_THRESH_VAL / 4];
-    uint16_t threshold = (thresh_reg >> 8) & 0xFF;  /* extract from packed */
+    uint16_t threshold = thresh_reg & 0xFFFF;
+    uint8_t min_val = (thresh_reg >> 16) & 0xFF;
+    uint8_t max_val = (thresh_reg >> 24) & 0xFF;
 
     uint16_t height = (dim >> 16) & 0xFFF;
     uint16_t width = dim & 0xFFF;
     uint16_t src1_stride = (strides0 >> 16) ? (strides0 >> 16) : width;
     uint16_t src2_stride = (strides1 >> 16) ? (strides1 >> 16) : width;
 
-    if (!src1 || !src2 || !dst || !width || !height) {
+    if (!src1 || !src2 || !width || !height) {
         return;
     }
 
-    /* SAD with 4×4 macro blocks, threshold output */
+    /* SAD with 4×4 macro blocks */
     uint16_t bw = width / 4;
     uint16_t bh = height / 4;
-    uint16_t dst_stride = bw;
+    /* Output strides: pixel-based, from strides2 register */
+    uint16_t sad_stride = (strides2 & 0xFFFF) ? (strides2 & 0xFFFF) : bw;
+    uint16_t thr_stride = (strides2 >> 16) ? (strides2 >> 16) : bw;
 
     uint8_t *frame1 = g_malloc(width * height);
     uint8_t *frame2 = g_malloc(width * height);
-    uint8_t *out = g_malloc0(bw * bh);
+    uint16_t *sad_out = g_malloc0(bw * bh * sizeof(uint16_t));
+    uint8_t *thr_out = g_malloc0(bw * bh);
 
     /* Read both frames */
     for (uint16_t y = 0; y < height; y++) {
@@ -246,22 +253,35 @@ static void ive_op_sad(HisiIveState *s)
                     }
                 }
             }
-            /* Threshold mode: binary output */
-            out[by * bw + bx] = (sad > threshold) ? 255 : 0;
+            sad_out[by * bw + bx] = (sad > 0xFFFF) ? 0xFFFF : sad;
+            thr_out[by * bw + bx] = (sad > threshold) ? max_val : min_val;
         }
     }
 
-    /* Write output */
-    for (uint16_t y = 0; y < bh; y++) {
-        dma_memory_write(&address_space_memory,
-                         dst + (uint64_t)y * dst_stride,
-                         out + y * bw, bw,
-                         MEMTXATTRS_UNSPECIFIED);
+    /* Write U16 SAD values */
+    if (dst_sad) {
+        for (uint16_t y = 0; y < bh; y++) {
+            dma_memory_write(&address_space_memory,
+                             dst_sad + (uint64_t)y * sad_stride * 2,
+                             sad_out + y * bw, bw * sizeof(uint16_t),
+                             MEMTXATTRS_UNSPECIFIED);
+        }
+    }
+
+    /* Write U8 threshold output */
+    if (dst_thr) {
+        for (uint16_t y = 0; y < bh; y++) {
+            dma_memory_write(&address_space_memory,
+                             dst_thr + (uint64_t)y * thr_stride,
+                             thr_out + y * bw, bw,
+                             MEMTXATTRS_UNSPECIFIED);
+        }
     }
 
     g_free(frame1);
     g_free(frame2);
-    g_free(out);
+    g_free(sad_out);
+    g_free(thr_out);
 }
 
 /* ── CCL operation (Connected Component Labeling) ─────────────── */
@@ -324,7 +344,7 @@ static void ive_op_ccl(HisiIveState *s)
         parent[i] = i;
     }
 
-    /* Pass 1: label and merge */
+    /* Pass 1: label and merge (8-connected) */
     for (uint16_t y = 0; y < height; y++) {
         for (uint16_t x = 0; x < width; x++) {
             if (img[y * width + x] == 0) {
@@ -332,14 +352,17 @@ static void ive_op_ccl(HisiIveState *s)
             }
             int16_t left = (x > 0) ? labels[y * width + x - 1] : 0;
             int16_t up   = (y > 0) ? labels[(y - 1) * width + x] : 0;
+            int16_t ul   = (x > 0 && y > 0) ? labels[(y - 1) * width + x - 1] : 0;
+            int16_t ur   = (x < width - 1 && y > 0) ? labels[(y - 1) * width + x + 1] : 0;
 
-            if (left && up) {
-                labels[y * width + x] = left;
-                UNION(left, up);
-            } else if (left) {
-                labels[y * width + x] = left;
-            } else if (up) {
-                labels[y * width + x] = up;
+            /* Find any non-zero neighbor label */
+            int16_t chosen = left ? left : up ? up : ul ? ul : ur;
+            if (chosen) {
+                labels[y * width + x] = chosen;
+                if (left && left != chosen) UNION(chosen, left);
+                if (up && up != chosen) UNION(chosen, up);
+                if (ul && ul != chosen) UNION(chosen, ul);
+                if (ur && ur != chosen) UNION(chosen, ur);
             } else {
                 if (next_label < IVE_MAX_REGION_NUM) {
                     labels[y * width + x] = next_label++;
@@ -382,15 +405,17 @@ static void ive_op_ccl(HisiIveState *s)
     #undef FIND
     #undef UNION
 
-    /* Build IVE_CCBLOB_S output */
+    /* Build IVE_CCBLOB_S: u16 curAreaThr + s8 labelStatus + u8 regionNum
+     * + IVE_REGION_S[254] at label-1 index */
     uint8_t blob[CCBLOB_SIZE];
     memset(blob, 0, sizeof(blob));
 
     uint8_t region_num = 0;
-    uint8_t *p = blob + 8;  /* skip header (8 bytes) */
 
-    for (int i = 1; i < next_label && region_num < IVE_MAX_REGION_NUM; i++) {
-        if (area[i] >= area_thr) {
+    for (int i = 1; i < next_label; i++) {
+        if (area[i] >= area_thr && region_num < IVE_MAX_REGION_NUM) {
+            /* Store at index = region_num (label-1 for sequential labels) */
+            uint8_t *p = blob + 4 + region_num * 12;
             /* u32 area */
             p[0] = area[i] & 0xFF;
             p[1] = (area[i] >> 8) & 0xFF;
@@ -399,29 +424,24 @@ static void ive_op_ccl(HisiIveState *s)
             /* u16 left */
             p[4] = left[i] & 0xFF;
             p[5] = (left[i] >> 8) & 0xFF;
-            /* u16 top */
-            p[6] = top[i] & 0xFF;
-            p[7] = (top[i] >> 8) & 0xFF;
             /* u16 right */
-            p[8] = right[i] & 0xFF;
-            p[9] = (right[i] >> 8) & 0xFF;
+            p[6] = right[i] & 0xFF;
+            p[7] = (right[i] >> 8) & 0xFF;
+            /* u16 top */
+            p[8] = top[i] & 0xFF;
+            p[9] = (top[i] >> 8) & 0xFF;
             /* u16 bottom */
             p[10] = bottom[i] & 0xFF;
             p[11] = (bottom[i] >> 8) & 0xFF;
-            p += 12;
             region_num++;
         }
     }
 
-    /* Header: u32 curAreaThr, s8 labelStatus, u8 regionNum, u16 reserved */
+    /* Header: u16 curAreaThr, s8 labelStatus, u8 regionNum */
     blob[0] = area_thr & 0xFF;
     blob[1] = (area_thr >> 8) & 0xFF;
-    blob[2] = (area_thr >> 16) & 0xFF;
-    blob[3] = (area_thr >> 24) & 0xFF;
-    blob[4] = 0;           /* s8LabelStatus = OK */
-    blob[5] = region_num;  /* u8RegionNum */
-    blob[6] = 0;           /* reserved */
-    blob[7] = 0;
+    blob[2] = 0;           /* s8LabelStatus = OK */
+    blob[3] = region_num;  /* u8RegionNum */
 
     dma_memory_write(&address_space_memory, dst,
                      blob, sizeof(blob), MEMTXATTRS_UNSPECIFIED);

@@ -306,6 +306,143 @@ int main() {
         HI_MPI_SYS_MmzFree(er.u64PhyAddr,(HI_VOID*)(HI_UL)er.u64VirAddr);
     }
 
+    /* === SAD (4×4 blocks, U16 output + U8 threshold) === */
+    {
+        /* SAD needs minimum 64×64 input — our src1/src2 are exactly 64×64 */
+        /* 4×4 blocks → output is 16×16 */
+        int bw = W / 4, bh = H / 4; /* 16×16 */
+        int sad_stride = (bw + 15) & ~15;     /* pixel stride, 16-aligned */
+        int thr_stride = (bw + 15) & ~15;     /* pixel stride, 16-aligned */
+
+        IVE_IMAGE_S sad_out, thr_out;
+        memset(&sad_out, 0, sizeof(sad_out));
+        sad_out.enType = IVE_IMAGE_TYPE_U16C1;
+        sad_out.u32Width = bw; sad_out.u32Height = bh;
+        sad_out.au32Stride[0] = sad_stride;
+        HI_MPI_SYS_MmzAlloc(&sad_out.au64PhyAddr[0], (HI_VOID**)&sad_out.au64VirAddr[0],
+                             NULL, NULL, sad_stride * bh * 2);
+
+        memset(&thr_out, 0, sizeof(thr_out));
+        thr_out.enType = IVE_IMAGE_TYPE_U8C1;
+        thr_out.u32Width = bw; thr_out.u32Height = bh;
+        thr_out.au32Stride[0] = thr_stride;
+        HI_MPI_SYS_MmzAlloc(&thr_out.au64PhyAddr[0], (HI_VOID**)&thr_out.au64VirAddr[0],
+                             NULL, NULL, thr_stride * bh);
+
+        IVE_SAD_CTRL_S sad_ctrl = {
+            .enMode = IVE_SAD_MODE_MB_4X4,
+            .enOutCtrl = IVE_SAD_OUT_CTRL_16BIT_BOTH,
+            .u16Thr = 200,
+            .u8MinVal = 0,
+            .u8MaxVal = 255
+        };
+
+        ret = HI_MPI_IVE_SAD(&handle, &src1, &src2, &sad_out, &thr_out, &sad_ctrl, HI_TRUE);
+        if (ret == 0) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(sad_out.au64PhyAddr[0],
+                (HI_VOID*)(HI_UL)sad_out.au64VirAddr[0], sad_stride * bh * 2);
+            HI_MPI_SYS_MmzFlushCache(thr_out.au64PhyAddr[0],
+                (HI_VOID*)(HI_UL)thr_out.au64VirAddr[0], thr_stride * bh);
+
+            uint16_t *sv = (uint16_t*)(HI_UL)sad_out.au64VirAddr[0];
+            uint8_t *tv = (uint8_t*)(HI_UL)thr_out.au64VirAddr[0];
+
+            /* Write U16 SAD values (bw×bh, row by row without stride padding) */
+            fwrite("SAD1", 4, 1, fp);
+            uint16_t bw16 = bw, bh16 = bh;
+            fwrite(&bw16, 2, 1, fp);
+            fwrite(&bh16, 2, 1, fp);
+            for (int y = 0; y < bh; y++)
+                fwrite(sv + y * sad_stride, sizeof(uint16_t), bw, fp);
+
+            /* Write U8 threshold output */
+            fwrite("SDT1", 4, 1, fp);
+            for (int y = 0; y < bh; y++)
+                fwrite(tv + y * thr_stride, 1, bw, fp);
+
+            fprintf(stderr, "sad done: sad[0,0]=%d thr[0,0]=%d\n", sv[0], tv[0]);
+        } else {
+            fprintf(stderr, "sad FAIL: ret=0x%x\n", ret);
+        }
+        HI_MPI_SYS_MmzFree(sad_out.au64PhyAddr[0], (HI_VOID*)(HI_UL)sad_out.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(thr_out.au64PhyAddr[0], (HI_VOID*)(HI_UL)thr_out.au64VirAddr[0]);
+    }
+
+    /* === CCL (connected component labeling on thresholded src1) === */
+    {
+        /* CCL needs binary input (0 or 255). Threshold src1 first. */
+        IVE_IMAGE_S ccl_in;
+        memset(&ccl_in, 0, sizeof(ccl_in));
+        ccl_in.enType = IVE_IMAGE_TYPE_U8C1;
+        ccl_in.u32Width = W; ccl_in.u32Height = H;
+        ccl_in.au32Stride[0] = STRIDE;
+        HI_MPI_SYS_MmzAlloc(&ccl_in.au64PhyAddr[0], (HI_VOID**)&ccl_in.au64VirAddr[0],
+                             NULL, NULL, STRIDE * H);
+
+        /* Threshold src1: pixels >= 128 → 255, else 0 */
+        IVE_THRESH_CTRL_S tc = {
+            .enMode = IVE_THRESH_MODE_BINARY,
+            .u8LowThr = 128, .u8MinVal = 0, .u8MaxVal = 255
+        };
+        ret = HI_MPI_IVE_Thresh(&handle, &src1, &ccl_in, &tc, HI_TRUE);
+        if (ret == 0) ive_wait(handle);
+        HI_MPI_SYS_MmzFlushCache(ccl_in.au64PhyAddr[0],
+            (HI_VOID*)(HI_UL)ccl_in.au64VirAddr[0], STRIDE * H);
+
+        /* Dump the binary input for reference */
+        uint8_t *cv = (uint8_t*)(HI_UL)ccl_in.au64VirAddr[0];
+        int nz = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                if (cv[y * STRIDE + x]) nz++;
+        fprintf(stderr, "ccl input: %d non-zero pixels\n", nz);
+
+        /* CCL blob output */
+        IVE_DST_MEM_INFO_S ccl_blob;
+        memset(&ccl_blob, 0, sizeof(ccl_blob));
+        ccl_blob.u32Size = sizeof(IVE_CCBLOB_S);
+        HI_MPI_SYS_MmzAlloc(&ccl_blob.u64PhyAddr, (HI_VOID**)&ccl_blob.u64VirAddr,
+                             NULL, NULL, ccl_blob.u32Size);
+        memset((void*)(HI_UL)ccl_blob.u64VirAddr, 0, ccl_blob.u32Size);
+        HI_MPI_SYS_MmzFlushCache(ccl_blob.u64PhyAddr,
+            (HI_VOID*)(HI_UL)ccl_blob.u64VirAddr, ccl_blob.u32Size);
+
+        IVE_CCL_CTRL_S ccl_ctrl = {
+            .enMode = IVE_CCL_MODE_8C,
+            .u16InitAreaThr = 4,
+            .u16Step = 2
+        };
+
+        ret = HI_MPI_IVE_CCL(&handle, &ccl_in, &ccl_blob, &ccl_ctrl, HI_TRUE);
+        if (ret == 0) {
+            ive_wait(handle);
+            HI_MPI_SYS_MmzFlushCache(ccl_blob.u64PhyAddr,
+                (HI_VOID*)(HI_UL)ccl_blob.u64VirAddr, ccl_blob.u32Size);
+
+            IVE_CCBLOB_S *blob = (IVE_CCBLOB_S*)(HI_UL)ccl_blob.u64VirAddr;
+            fwrite("CCL1", 4, 1, fp);
+            /* Write entire blob structure for byte-exact comparison */
+            fwrite(blob, 1, sizeof(IVE_CCBLOB_S), fp);
+
+            fprintf(stderr, "ccl done: areaThr=%d status=%d regions=%d\n",
+                    blob->u16CurAreaThr, blob->s8LabelStatus, blob->u8RegionNum);
+            /* Print first few regions */
+            for (int i = 0; i < 254 && i < 10; i++) {
+                if (blob->astRegion[i].u32Area > 0) {
+                    fprintf(stderr, "  region[%d]: area=%d bbox=(%d,%d)-(%d,%d)\n",
+                            i, blob->astRegion[i].u32Area,
+                            blob->astRegion[i].u16Left, blob->astRegion[i].u16Top,
+                            blob->astRegion[i].u16Right, blob->astRegion[i].u16Bottom);
+                }
+            }
+        } else {
+            fprintf(stderr, "ccl FAIL: ret=0x%x\n", ret);
+        }
+        HI_MPI_SYS_MmzFree(ccl_in.au64PhyAddr[0], (HI_VOID*)(HI_UL)ccl_in.au64VirAddr[0]);
+        HI_MPI_SYS_MmzFree(ccl_blob.u64PhyAddr, (HI_VOID*)(HI_UL)ccl_blob.u64VirAddr);
+    }
+
     fclose(fp);
     HI_MPI_SYS_MmzFree(src1.au64PhyAddr[0],(HI_VOID*)(HI_UL)src1.au64VirAddr[0]);
     HI_MPI_SYS_MmzFree(src2.au64PhyAddr[0],(HI_VOID*)(HI_UL)src2.au64VirAddr[0]);
