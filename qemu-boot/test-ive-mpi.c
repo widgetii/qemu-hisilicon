@@ -280,18 +280,18 @@ int main(void) {
         HI_S8 mask_v[25] = {0,0,0,0,0, 0,-1,-2,-1,0, 0,0,0,0,0, 0,1,2,1,0, 0,0,0,0,0};
         memcpy(ctrl.as8Mask, mask_h, 25);
 
-        /* Sobel outputs S16C1, need different image type */
+        /* Sobel outputs S16C1 — stride in PIXELS (not bytes), per SDK convention */
         IVE_DST_IMAGE_S dst_h, dst_v;
         memset(&dst_h, 0, sizeof(dst_h));
         memset(&dst_v, 0, sizeof(dst_v));
         dst_h.enType = IVE_IMAGE_TYPE_S16C1;
         dst_h.u32Width = W; dst_h.u32Height = H;
-        dst_h.au32Stride[0] = STRIDE * 2;
+        dst_h.au32Stride[0] = STRIDE; /* pixel stride, not byte stride */
         HI_MPI_SYS_MmzAlloc(&dst_h.au64PhyAddr[0], (HI_VOID **)&dst_h.au64VirAddr[0],
-                             NULL, HI_NULL, STRIDE * 2 * H);
+                             NULL, HI_NULL, STRIDE * H * sizeof(HI_S16));
         dst_v = dst_h;
         HI_MPI_SYS_MmzAlloc(&dst_v.au64PhyAddr[0], (HI_VOID **)&dst_v.au64VirAddr[0],
-                             NULL, HI_NULL, STRIDE * 2 * H);
+                             NULL, HI_NULL, STRIDE * H * sizeof(HI_S16));
 
         ret = HI_MPI_IVE_Sobel(&handle, &src1, &dst_h, &dst_v, &ctrl, HI_TRUE);
         if (ret == HI_SUCCESS) { ive_wait(handle); flush_cache(&dst); }
