@@ -319,14 +319,77 @@ int main(int argc, char **argv) {
             for (int i = 0; i < 64; i++) fprintf(stderr, "%02x ", (uint8_t)out[i]);
             fprintf(stderr, "\n");
 
-            /* Also check tmp_buf — kernel writes output to tmp_phys + offset */
-            HI_MPI_SYS_MmzFlushCache(tmp_mem.phys, (void *)(uintptr_t)tmp_mem.virt, 1024);
-            int8_t *tmp = (int8_t *)(uintptr_t)tmp_mem.virt;
-            int tmp_nz = 0;
-            for (int i = 0; i < 1024; i++) if (tmp[i] != 0) tmp_nz++;
-            fprintf(stderr, "  tmp_buf nonzero=%d/1024, first 64: ", tmp_nz);
-            for (int i = 0; i < 64; i++) fprintf(stderr, "%02x ", (uint8_t)tmp[i]);
+            /* Scan tmp_buf to find output regions.
+             * Kernel writes CNN output at tmp_phys + output_offset_table[dst_idx].
+             * Scan for non-zero regions to find the detection output. */
+            HI_MPI_SYS_MmzFlushCache(tmp_mem.phys, (void *)(uintptr_t)tmp_mem.virt, tmp_size);
+            uint8_t *tmp = (uint8_t *)(uintptr_t)tmp_mem.virt;
+
+            /* Find non-zero regions in tmp_buf */
+            int region_start = -1;
+            fprintf(stderr, "  tmp_buf scan (%.0f KB):\n", tmp_size / 1024.0);
+            for (uint32_t off = 0; off < tmp_size; off += 4096) {
+                int nz = 0;
+                uint32_t end = off + 4096 < tmp_size ? off + 4096 : tmp_size;
+                for (uint32_t j = off; j < end; j++) if (tmp[j] != 0) nz++;
+                if (nz > 0 && region_start < 0) {
+                    region_start = off;
+                } else if (nz == 0 && region_start >= 0) {
+                    fprintf(stderr, "    region: 0x%06x - 0x%06x (%d KB)\n",
+                            region_start, off, (off - region_start) / 1024);
+                    region_start = -1;
+                }
+            }
+            if (region_start >= 0)
+                fprintf(stderr, "    region: 0x%06x - 0x%06x (%d KB)\n",
+                        region_start, tmp_size, (tmp_size - region_start) / 1024);
+
+            /* The last region should be the detection output.
+             * Expected: 40*23*63 = 57960 bytes for a 40x23x63 tensor.
+             * Dump the last non-zero region's first bytes. */
+            fprintf(stderr, "  tmp_buf first 64: ");
+            for (int i = 0; i < 64; i++) fprintf(stderr, "%02x ", tmp[i]);
             fprintf(stderr, "\n");
+
+            /* Save detection output (last 58K of tmp_buf = 40x23x63 tensor).
+             * The output_offset is at model_ctx+0x3A0 in kernel — we can't read it.
+             * But from the captured dst_out blob: phyAddr=0x42080000, tmp_phys=0x42200000.
+             * offset = 0x42080000 - 0x42200000 would be negative — so the original IVP
+             * used a DIFFERENT tmp_buf base. The detection output is at the end of
+             * the intermediate activations.
+             *
+             * For a 40x23 grid with stride=160, the output tensor is:
+             *   stride * height * channels = 160 * 23 * 63 = 231840 bytes
+             * But the total tmp_buf is 2534400. The output offset for this model
+             * is stored in model_ctx+0x3A0 (kernel only).
+             *
+             * Alternative: dump the full tmp_buf to disk for offline analysis. */
+            {
+                FILE *tf = fopen("/utils/tmp_buf_frame0.bin", "wb");
+                if (tf) {
+                    fwrite(tmp, 1, tmp_size, tf);
+                    fclose(tf);
+                    fprintf(stderr, "  Saved tmp_buf (%u bytes) to /utils/tmp_buf_frame0.bin\n", tmp_size);
+                }
+            }
+
+            /* Also check the dst_out blob that kernel may have updated */
+            uint8_t *dst_out_buf = buf + FWD_DST_OUT;
+            uint64_t dst_phys = *(uint64_t *)(dst_out_buf + 0x10);
+            fprintf(stderr, "  dst_out.phyAddr after ioctl: 0x%llx\n",
+                    (unsigned long long)dst_phys);
+            /* If kernel updated dst_out.phyAddr to point into tmp_buf,
+             * we can compute the output offset */
+            if (dst_phys >= tmp_mem.phys && dst_phys < tmp_mem.phys + tmp_size) {
+                uint32_t det_off = (uint32_t)(dst_phys - tmp_mem.phys);
+                fprintf(stderr, "  detection at tmp_buf+0x%x (%u)\n", det_off, det_off);
+                fprintf(stderr, "  first 64 bytes of detection: ");
+                for (int i = 0; i < 64; i++)
+                    fprintf(stderr, "%02x ", tmp[det_off + i]);
+                fprintf(stderr, "\n");
+            } else {
+                fprintf(stderr, "  dst_out.phyAddr NOT in tmp_buf range\n");
+            }
 
             /* Also check dst_out blob in returned buffer */
             fprintf(stderr, "  dst_out after: type=%u stride=%u w=%u h=%u c=%u phys=0x%llx\n",
