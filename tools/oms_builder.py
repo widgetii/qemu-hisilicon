@@ -70,81 +70,158 @@ def make_preproc(input_h, input_w, input_c, out_tmp_offset, need_vgs=1):
     struct.pack_into('<H', d, 0x10, 0xFE00)
     struct.pack_into('<H', d, 0x12, 0xFE00)
     struct.pack_into('<H', d, 0x14, 0xFE00)
-    # Output stride
-    out_stride_w = align16(input_w)
-    struct.pack_into('<H', d, 0x16, input_h)
-    struct.pack_into('<I', d, 0x18, out_stride_w * input_c)  # out_stride_c
-    struct.pack_into('<I', d, 0x1C, out_tmp_offset)
-    # Additional params from reference (normalization offsets)
-    struct.pack_into('<I', d, 0x20, 0xFFFFFFF0)  # from v2001 reference
-    struct.pack_into('<I', d, 0x24, 0x1000)       # from v2001 reference
-    d[0x28] = 2  # blob_type = YVU420SP
+    # Bytes 10-47: stride/normalization constants
+    # These are architecture-dependent and computed by the vendor's model compiler.
+    # For 32×32×3 VGS input, use exact bytes from working v2001 reference:
+    ref_tail = bytes.fromhex(
+        '04 84 04 84 04 84'     # [10..15]: mean/norm constants
+        '00 fe 00 fe 00 fe'     # [16..21]: more norm constants
+        '20 00'                 # [22..23]: out_stride_w = 32
+        '00 04 00 00'           # [24..27]: out_stride_c = 1024
+        'e0 3f 02 00'           # [28..31]: total_output_size = 147424
+        'f0 ff ff ff'           # [32..35]: unknown (-16)
+        '00 10 00 00'           # [36..39]: unknown (4096)
+        '02 00 00 00'           # [40..43]: blob_type = 2 (YVU420SP)
+        '00 00 00 00'           # [44..47]: padding
+    )
+    d[10:48] = ref_tail
+    # Patch stride for actual dimensions if not 32×32
+    if input_w != 32 or input_h != 32:
+        out_stride_w = align16(input_w)
+        struct.pack_into('<H', d, 22, out_stride_w)
+        struct.pack_into('<I', d, 24, out_stride_w * input_h)
     return bytes(d)
 
 
 def make_flatten(in_c, in_h, in_w, in_tmp_offset, out_tmp_offset,
                  layer_index):
-    """Build a 48-byte Flatten layer descriptor."""
+    """Build a 48-byte Flatten layer descriptor.
+
+    Byte-packed format (from kernel ive_xnn_check_flatten_layer):
+      d[0]      = layer_type (1)
+      d[1..2]   = name_id (u16 LE)
+      d[3]      = out_fmt (must be 1 or 2)
+      d[4..5]   = reserved/flags (u16)
+      d[6..7]   = input_c (u16 LE, [1,1024])
+      d[8..9]   = input_h (u16 LE, [1,720])
+      d[10..11]  = input_w (u16 LE, [1,1280])
+      d[12..15]  = in_tmp_offset (u32, < tmp_buf_size)
+      d[16..19]  = out_tmp_offset (u32)
+      d[20..21]  = in_stride_w (u16, aligned to 16)
+      d[22..23]  = out_stride_w (u16)
+      d[24..27]  = in_stride_c (u32, = input_h * in_stride_w)
+    """
     d = bytearray(48)
     d[0] = 1  # type = Flatten
-    d[1] = layer_index & 0xFF  # layer index in chain
-    d[3] = 1  # unknown flag (always 1 in reference)
-    d[4] = 1  # out_fmt = 1
-    struct.pack_into('<H', d, 8, in_c)
-    struct.pack_into('<H', d, 10, in_h)
-    struct.pack_into('<H', d, 12, in_w)
-    struct.pack_into('<I', d, 0x10, in_tmp_offset)
-    struct.pack_into('<I', d, 0x14, out_tmp_offset)
-    out_total = in_c * in_h * in_w
+    struct.pack_into('<H', d, 1, layer_index)  # name_id
+    d[3] = 1  # out_fmt
+    struct.pack_into('<H', d, 6, in_c)
+    struct.pack_into('<H', d, 8, in_h)
+    struct.pack_into('<H', d, 10, in_w)
+    struct.pack_into('<I', d, 12, in_tmp_offset)
+    struct.pack_into('<I', d, 16, out_tmp_offset)
     in_stride_w = align16(in_w)
+    out_total = in_c * in_h * in_w
     out_stride_w = align16(out_total)
-    struct.pack_into('<H', d, 0x18, in_stride_w)
-    struct.pack_into('<H', d, 0x1A, out_stride_w)
-    struct.pack_into('<I', d, 0x1C, in_h * in_stride_w)  # in_stride_c
+    struct.pack_into('<H', d, 20, in_stride_w)
+    struct.pack_into('<H', d, 22, out_stride_w)
+    struct.pack_into('<I', d, 24, in_h * in_stride_w)
     return bytes(d)
 
 
 def make_fc(input_w, output_w, arg_len_cumulative, arg_offset,
             in_tmp_offset, out_tmp_offset, layer_index,
             af_mode=0, in_fmt=2, out_fmt=1):
-    """Build a 64-byte FC layer descriptor."""
+    """Build a 64-byte FC layer descriptor.
+
+    Byte-packed format (from kernel ive_xnn_check_fc_layer + parse):
+      d[0]      = layer_type (2)
+      d[1..2]   = name_id (u16 LE)
+      d[3]      = in_fmt ({0,2,4})
+      d[4]      = out_fmt ({1,2})
+      d[5]      = batch_num (must be 0)
+      d[6]      = af_mode ([0,3))
+      d[7]      = reserved
+      d[8..9]   = input_w (u16, [1,8192])
+      d[10..11]  = output_w (u16, [1,8192])
+      d[12..13]  = reserved
+      d[14..15]  = in_stride_w (u16, aligned to 16)
+      d[16..19]  = arg_len (u32, cumulative)
+      d[20..23]  = arg_offset (u32, offset into weight blob)
+      d[24..27]  = in_tmp_offset (u32, < tmp_buf_size)
+      d[28..31]  = out_tmp_offset (u32, < tmp_buf_size)
+      d[52]     = is_bott_from_usr (0 or 1)
+      d[53..54]  = input node name_id (u16, for cross-ref)
+    """
     d = bytearray(64)
     d[0] = 2  # type = FC
-    d[1] = layer_index & 0xFF
-    d[4] = in_fmt
-    d[5] = out_fmt
-    d[6] = 0  # batch_num
-    d[7] = af_mode
-    struct.pack_into('<H', d, 0x0A, input_w)
-    struct.pack_into('<H', d, 0x0C, output_w)
+    struct.pack_into('<H', d, 1, layer_index)  # name_id
+    d[3] = in_fmt
+    d[4] = out_fmt
+    d[5] = 1  # batch_num (must be 1)
+    d[6] = af_mode
+    struct.pack_into('<H', d, 8, input_w)
+    struct.pack_into('<H', d, 10, output_w)
     in_stride = align16(input_w)
-    out_stride = align16(output_w * 4)  # output in int32 for accumulation
-    struct.pack_into('<H', d, 0x0E, in_stride)
-    struct.pack_into('<H', d, 0x10, out_stride)
-    struct.pack_into('<I', d, 0x14, arg_len_cumulative)
-    struct.pack_into('<I', d, 0x18, arg_offset)
-    struct.pack_into('<I', d, 0x1C, in_tmp_offset)
-    struct.pack_into('<I', d, 0x20, out_tmp_offset)
+    # out_stride = align16((out_fmt_size * output_w) >> 3), minimum 16
+    # out_fmt=1 → size=1 byte; out_fmt=2 → size=4 bytes
+    out_fmt_sz = 1 if out_fmt == 1 else 4
+    out_stride = align16(max((out_fmt_sz * output_w) >> 3, 16))
+    struct.pack_into('<H', d, 12, in_stride)   # v178+14 reads from d[12..13]
+    struct.pack_into('<H', d, 14, out_stride)  # v178+16 reads from d[14..15]
+    struct.pack_into('<I', d, 16, arg_len_cumulative)
+    struct.pack_into('<I', d, 20, arg_offset)
+    struct.pack_into('<I', d, 24, in_tmp_offset)
+    struct.pack_into('<I', d, 28, out_tmp_offset)
+    d[52] = 1  # is_bott_from_usr (1 = reads from user input, sets InNode flag)
+    struct.pack_into('<H', d, 53, 0)  # src_node name_id (0 = matches preproc)
     return bytes(d)
 
 
 def make_unpack(out_c, out_h, out_w, in_tmp_offset, out_tmp_offset,
                 layer_index):
-    """Build a 64-byte Unpack layer descriptor."""
+    """Build a 64-byte Unpack layer descriptor.
+
+    Byte-packed format (same pattern as other layers):
+      d[0]     = layer_type (4)
+      d[1..2]  = name_id (u16)
+      d[3]     = in_fmt ({0,1})
+      d[4]     = out_fmt ({1,2})
+      d[5]     = reserved
+      d[6..7]  = output_c (u16, [1,1024])
+      d[8..9]  = output_h (u16, [1,720])
+      d[10..11] = output_w (u16, [1,1280])
+      d[12..13] = in_stride_w (u16)
+      d[14..15] = out_stride_w (u16)
+      d[16..19] = in_stride_c (u32)
+      d[20..23] = out_stride_c (u32)
+      d[24..27] = in_tmp_offset (u32)
+      d[28..31] = out_tmp_offset (u32)
+    """
     d = bytearray(64)
     d[0] = 4  # type = Unpack
-    d[1] = layer_index & 0xFF
-    d[4] = 1  # in_fmt
-    d[5] = 0  # out_fmt
-    struct.pack_into('<H', d, 8, out_c)
-    struct.pack_into('<H', d, 10, out_h)
-    struct.pack_into('<H', d, 12, out_w)
-    in_stride = align16(out_w)
-    out_stride = align16(out_w)
-    struct.pack_into('<H', d, 0x0E, in_stride)
-    struct.pack_into('<H', d, 0x10, out_stride)
-    struct.pack_into('<I', d, 0x1C, in_tmp_offset)
-    struct.pack_into('<I', d, 0x20, out_tmp_offset)
+    struct.pack_into('<H', d, 1, layer_index)  # name_id
+    d[3] = 1  # in_fmt
+    d[4] = 1  # out_fmt (must be {1,2})
+    struct.pack_into('<H', d, 6, out_c)
+    struct.pack_into('<H', d, 8, out_h)
+    struct.pack_into('<H', d, 10, out_w)
+    # in_stride: internal format (int8/int32), needs >= out_w * elem_size
+    in_stride = align16(max(out_w * 4, 16))
+    # out_stride: external format, computed as align16((out_fmt_sz * out_w) >> 3), min 16
+    # out_fmt=1 → 1 byte per elem → (1 * out_w) >> 3 → small; min is 16
+    out_stride = align16(max((out_w + 7) >> 3, 16))  # bit-level packing for output
+    struct.pack_into('<H', d, 12, in_stride)
+    struct.pack_into('<H', d, 14, out_stride)
+    struct.pack_into('<I', d, 16, out_h * in_stride)   # in_stride_c
+    struct.pack_into('<I', d, 20, out_h * out_stride)  # out_stride_c
+    struct.pack_into('<I', d, 24, in_tmp_offset)
+    struct.pack_into('<I', d, 28, out_tmp_offset)
+    # Unpack also needs arg_offset and arg_len (from parse: v178[13,14])
+    # v178[13] = *(u32*)(v174+48) → arg_len at d[48..51]
+    # v178[14] = *(u32*)(v174+52) → arg_offset at d[52..55]
+    struct.pack_into('<I', d, 48, 1)  # arg_len (minimal)
+    struct.pack_into('<I', d, 52, 1)  # arg_offset >= 1
     return bytes(d)
 
 
@@ -187,7 +264,7 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     v70 = 32 * dst_num + v61  # layer desc start
 
     layer_desc_end = v70 + len(layers_desc)
-    weight_data_off = align16(layer_desc_end + 16)  # align with padding
+    weight_data_off = max(align16(layer_desc_end + 16), 1)  # must be >= 1
     weight_data_end = weight_data_off + len(weight_data)
     name_table_off = align16(weight_data_end + 16)
     segment_end = name_table_off + len(name_entries)
@@ -203,7 +280,8 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     # +0x10..0x13: unknown flags
     struct.pack_into('<I', seg, 0x10, 0x04010201)  # from reference
     seg[20] = data_slice
-    seg[22] = roi_batch
+    seg[21] = 1   # unknown byte at +0x15, always 1 in working models
+    seg[22] = roi_batch if roi_batch else 32  # default to 32 like vendor
     # +0x18..0x1F: padding/unknown
     struct.pack_into('<I', seg, 0x18, 0x000780)  # from reference
     struct.pack_into('<I', seg, 0x1C, 0x000280)  # from reference
@@ -225,8 +303,8 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     # These are layer indices that the src nodes reference
     for i, name in enumerate(src_names):
         struct.pack_into('<H', seg, 80 + i * 2, 0)  # typically 0
-    # Dst node name IDs
-    dst_name_off = 80 + align16(src_num * 2)
+    # Dst node name IDs — immediately after src_node name IDs (no alignment)
+    dst_name_off = 80 + 2 * src_num
     for i, name in enumerate(dst_names):
         struct.pack_into('<H', seg, dst_name_off + i * 2, total_layers - 1)
 
@@ -312,8 +390,8 @@ def build_fc_model(input_h, input_w, input_c, output_size,
     print(f'Weight range: [{w_q.min()}, {w_q.max()}]')
     print(f'Bias range: [{b_q.min()}, {b_q.max()}]')
 
-    # Pack weights: int8 weights (row-major) + int32 bias
-    weight_blob = w_q.tobytes() + b_q.tobytes()
+    # Pack weights: 1 byte padding (arg_offset must be >= 1) + int8 weights + int32 bias
+    weight_blob = b'\x00' + w_q.tobytes() + b_q.tobytes()
     weight_size = len(weight_blob)
     print(f'Weight blob: {weight_size} bytes ({w_q.nbytes} weights + {b_q.nbytes} bias)')
 
@@ -346,7 +424,7 @@ def build_fc_model(input_h, input_w, input_c, output_size,
     # Layer 2: FC (flat_size → output_size)
     layers += make_fc(flat_size, output_size,
                      arg_len_cumulative=weight_size,
-                     arg_offset=0,  # weights at start of weight blob
+                     arg_offset=1,  # weights at offset 1 (kernel requires >= 1)
                      in_tmp_offset=fc_in_off,
                      out_tmp_offset=fc_out_off,
                      layer_index=2)
