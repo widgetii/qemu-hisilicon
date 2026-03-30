@@ -29,6 +29,7 @@
 #include "hw/intc/arm_gic_common.h"
 #include "hw/intc/arm_gic.h"
 #include "hw/arm/hisilicon.h"
+#include "hw/misc/hisi-fastboot.h"
 #include "hw/arm/machines-qom.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
@@ -1686,8 +1687,19 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
+    /* Fastboot mode: when no -kernel is given and a serial backend exists,
+     * emulate the boot ROM download protocol on UART0 instead of creating
+     * PL011 immediately.  The hisi-fastboot device will hand the chardev
+     * off to a newly-created PL011 after firmware upload completes. */
+    bool fastboot_mode = !machine->kernel_filename && serial_hd(0);
+    qemu_irq uart0_irq = NULL;
+
     /* UARTs */
     for (n = 0; n < c->num_uarts; n++) {
+        if (n == 0 && fastboot_mode) {
+            uart0_irq = pic[c->uart_irqs[0]];
+            continue;   /* UART0 PL011 created later by fastboot device */
+        }
         pl011_create(c->uart_bases[n], pic[c->uart_irqs[n]], serial_hd(n));
     }
 
@@ -1883,31 +1895,31 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
-    /* Patch appended DTB before loading the kernel */
-    char *patched_kernel = NULL;
-    if (machine->kernel_filename) {
-        patched_kernel = hisilicon_patch_appended_dtb(
-            machine->kernel_filename, c->ram_base + 0x8000, c);
-        if (patched_kernel) {
-            machine->kernel_filename = patched_kernel;
+    if (fastboot_mode) {
+        /* Boot ROM fastboot: halt CPU and wait for serial firmware upload */
+        DeviceState *fb = qdev_new(TYPE_HISI_FASTBOOT);
+        qdev_prop_set_chr(fb, "chardev", serial_hd(0));
+        hisi_fastboot_setup(fb, CPU(cpu), serial_hd(0),
+                            c->uart_bases[0], uart0_irq);
+        qdev_realize(fb, NULL, &error_fatal);
+
+        CPUState *cs = CPU(cpu);
+        cs->halted = 1;
+    } else {
+        /* Normal boot path: patch DTB and load kernel */
+        char *patched_kernel = NULL;
+        if (machine->kernel_filename) {
+            patched_kernel = hisilicon_patch_appended_dtb(
+                machine->kernel_filename, c->ram_base + 0x8000, c);
+            if (patched_kernel) {
+                machine->kernel_filename = patched_kernel;
+            }
         }
+
+        hisilicon_binfo.ram_size = machine->ram_size;
+        hisilicon_binfo.loader_start = c->ram_base;
+        arm_load_kernel(cpu, machine, &hisilicon_binfo);
     }
-
-    /* Boot */
-    hisilicon_binfo.ram_size = machine->ram_size;
-    hisilicon_binfo.loader_start = c->ram_base;
-    arm_load_kernel(cpu, machine, &hisilicon_binfo);
-
-    /*
-     * Patch the appended DTB in the kernel file: add /chosen with
-     * stdout-path and padding for the kernel's atags_to_fdt().
-     * Creates a temp file that is used instead of the original.
-     * This must happen BEFORE arm_load_kernel() so the patched
-     * payload is what gets loaded into guest RAM.
-     *
-     * (Handled above by patching before arm_load_kernel.)
-     */
-
 }
 
 /* ── Sensor property accessors ─────────────────────────────────────── */
