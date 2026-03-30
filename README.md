@@ -78,6 +78,7 @@ qemu/
 ├── hw/misc/hisi-himci.c         # DW MMC (himciv200) SD/MMC controller
 ├── hw/misc/hisi-regbank.c       # Generic RAM-backed register bank
 ├── hw/misc/hisi-ive.c           # IVE: 18 ops (SAD, CCL, Sub, Thresh, Erode...)
+├── hw/misc/hisi-fastboot.c      # Boot ROM fastboot serial protocol (defib compat)
 ├── hw/misc/hisi-vedu.c          # Video encoder stub (VEDU + JPGE)
 ├── hw/misc/hisi-mipi-rx.c       # MIPI RX controller stub
 ├── hw/misc/hisi-rtc.c           # SPI-bridge RTC device
@@ -101,7 +102,9 @@ qemu-boot/
 ├── test-ive-video-mpi.c         # IVE video processing for real board (MPI API, 352×288)
 ├── test-ive.c                   # IVE test (standalone)
 ├── test-ive-video.c             # IVE motion detection on video frames (QEMU)
-└── test-ive-abandoned.c         # IVE abandoned object detection (QEMU)
+├── test-ive-abandoned.c         # IVE abandoned object detection (QEMU)
+├── test-fastboot.sh             # End-to-end fastboot test (QEMU + defib)
+└── test-fastboot-protocol.py    # Protocol-level fastboot test (no defib)
 demo/
 ├── generate_scene.py            # Synthetic CCTV scene generator
 ├── generate_abandoned.py        # Synthetic abandoned bag scene generator
@@ -403,6 +406,50 @@ evaluation methodology.
 See `docs/ive-applications.md` for a roadmap of 9 CV applications
 (tamper detection, line crossing, zone intrusion, loitering, etc.)
 that can be built with the existing IVE operations.
+
+## Fastboot Protocol (Serial Boot ROM Emulation)
+
+When QEMU is started **without** `-kernel`, the machine emulates the HiSilicon
+boot ROM serial download protocol. The [defib](https://github.com/OpenIPC/defib)
+tool can then load firmware over UART — the same way real hardware is recovered.
+
+```bash
+# Terminal 1: start QEMU in fastboot mode (no -kernel)
+qemu-system-arm -M hi3516ev300 -m 64M -nographic \
+    -chardev socket,id=ser0,path=/tmp/qemu-hisi.sock,server=on,wait=off \
+    -serial chardev:ser0
+
+# Terminal 2: load firmware via defib
+defib burn -c hi3516ev300 -p socket:///tmp/qemu-hisi.sock
+```
+
+Defib auto-downloads OpenIPC U-Boot for the chip. To use a local file:
+
+```bash
+defib burn -c hi3516ev300 -p socket:///tmp/qemu-hisi.sock -f u-boot.bin
+```
+
+The protocol implements three sequential transfers (DDR init → SPL → U-Boot)
+with CRC-16/CCITT validation on every frame. After the final transfer, QEMU
+hands the serial port to a PL011 UART and starts the CPU at the U-Boot entry
+point — U-Boot output appears on the same connection.
+
+Supported chips: all Standard protocol SoCs (Hi3516CV300, Hi3516EV200/EV300,
+Hi3518EV300, GK7205V200/V300, and others). V500 and CV6xx protocols are not
+yet implemented.
+
+### Automated test
+
+```bash
+# Protocol-level test (no defib needed)
+qemu-system-arm -M hi3516ev300 -m 64M -display none -monitor none \
+    -chardev socket,id=ser0,path=/tmp/hisi-fb,server=on,wait=on \
+    -serial chardev:ser0 -d unimp &
+python3 qemu-boot/test-fastboot-protocol.py /tmp/hisi-fb
+
+# End-to-end test with defib
+bash qemu-boot/test-fastboot.sh
+```
 
 ## References
 
