@@ -4,7 +4,6 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
 
 jobs:
   build:
@@ -133,7 +132,6 @@ jobs:
             kernel: uImage.hi3516cv100
             rootfs: rootfs.squashfs.hi3516cv100
             append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            allow_failure: true  # vendor modules block login prompt
 
           - name: hi3516cv200
             soc: hi3516cv200
@@ -142,8 +140,7 @@ jobs:
             kernel: uImage.hi3516cv200
             rootfs: rootfs.squashfs.hi3516cv200
             append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            allow_failure: true  # vendor modules block login prompt
-
+            allow_failure: true  # hi3518e_sys.ko rejects chip ID, crashes ISP module
 
           - name: hi3516av100
             soc: hi3516av100
