@@ -389,13 +389,24 @@ static void hisi_fastboot_boot(HisiFastbootState *s)
         timer_del(s->handshake_timer);
     }
 
-    /* Release chardev from fastboot */
+    /*
+     * Hand off chardev to a fresh PL011.
+     *
+     * We must deinit fastboot's frontend FIRST, then let pl011_create
+     * claim the same chardev backend.  The chardev backend (e.g. a
+     * socket) keeps its connection state — so if a client is still
+     * connected, the PL011 can write to it immediately.
+     */
     qemu_chr_fe_deinit(&s->chr, false);
-
-    /* Create PL011 for UART0 now */
     pl011_create(s->uart0_base, s->uart0_irq, s->chardev_backend);
 
-    /* Start CPU at U-Boot entry point */
+    /* Kick the chardev to re-send OPENED event to the new PL011 frontend,
+     * so it knows a client is connected and can accept writes. */
+    if (s->chardev_backend->be_open) {
+        qemu_chr_be_event(s->chardev_backend, CHR_EVENT_OPENED);
+    }
+
+    /* Start CPU at the loaded entry point */
     cpu_set_pc(cs, s->entry_addr);
     cs->halted = 0;
     cpu_resume(cs);
