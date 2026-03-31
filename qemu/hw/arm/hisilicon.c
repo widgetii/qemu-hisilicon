@@ -714,6 +714,8 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .wdt_irq            = 2,
     .wdt_freq           = 3000000,
 
+    .gzip_base          = 0x11310000,
+
     .num_regbanks       = 1,
     .regbanks           = {
         { "hisi-ive",    0x11320000, 0x10000 },
@@ -1584,6 +1586,75 @@ static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
 
 static struct arm_boot_info hisilicon_binfo;
 
+/* ARM instruction encoding helpers for boot ROM generation */
+static inline uint32_t arm_movw(int rd, uint16_t imm16)
+{
+    /* MOVW Rd, #imm16 (ARMv7): Rd[15:0] = imm16, Rd[31:16] = 0 */
+    return 0xe3000000 | ((imm16 >> 12) << 16) | (rd << 12) | (imm16 & 0xfff);
+}
+
+static inline uint32_t arm_movt(int rd, uint16_t imm16)
+{
+    /* MOVT Rd, #imm16 (ARMv7): Rd[31:16] = imm16, Rd[15:0] unchanged */
+    return 0xe3400000 | ((imm16 >> 12) << 16) | (rd << 12) | (imm16 & 0xfff);
+}
+
+/*
+ * Write a boot ROM at address 0 that emulates the HiSilicon boot ROM:
+ * copies U-Boot from the SPI NOR flash memory window to DDR and jumps to it.
+ *
+ * Real HiSilicon boot ROMs (e.g. Hi3516CV500) do a two-stage load:
+ *   1) 24 KB from flash to SRAM (contains DDR init + BSBM header)
+ *   2) 512 KB from flash+0x6000 to DDR
+ * Since QEMU DDR is already available, we simplify to a single copy
+ * of the boot partition (256 KB) from flash window to DDR base.
+ */
+static void hisilicon_write_bootrom(MemoryRegion *sysmem,
+                                     const HisiSoCConfig *c)
+{
+    hwaddr flash_src = c->fmc_mem_base;         /* e.g. 0x14000000 */
+    hwaddr ram_dst   = c->ram_base;             /* e.g. 0x40000000 */
+    uint32_t copy_sz = 0x40000;                 /* 256 KB boot partition */
+
+    uint32_t rom[] = {
+        /* Set SVC mode, disable IRQ/FIQ */
+        cpu_to_le32(0xe321f0d3),                /* msr cpsr_c, #0xD3      */
+
+        /* r0 = flash source address */
+        cpu_to_le32(arm_movw(0, flash_src & 0xffff)),
+        cpu_to_le32(arm_movt(0, flash_src >> 16)),
+
+        /* r1 = DDR destination address */
+        cpu_to_le32(arm_movw(1, ram_dst & 0xffff)),
+        cpu_to_le32(arm_movt(1, ram_dst >> 16)),
+
+        /* r2 = byte count */
+        cpu_to_le32(arm_movw(2, copy_sz & 0xffff)),
+        cpu_to_le32(arm_movt(2, copy_sz >> 16)),
+
+        /* r3 = end pointer */
+        cpu_to_le32(0xe0813002),                /* add r3, r1, r2         */
+
+        /* copy_loop: */
+        cpu_to_le32(0xe4904004),                /* ldr r4, [r0], #4       */
+        cpu_to_le32(0xe4814004),                /* str r4, [r1], #4       */
+        cpu_to_le32(0xe1510003),                /* cmp r1, r3             */
+        cpu_to_le32(0x1afffffb),                /* bne copy_loop          */
+
+        /* Jump to DDR (reload r1 since it was used as pointer) */
+        cpu_to_le32(arm_movw(1, ram_dst & 0xffff)),
+        cpu_to_le32(arm_movt(1, ram_dst >> 16)),
+        cpu_to_le32(0xe12fff11),                /* bx r1                  */
+    };
+
+    MemoryRegion *bootrom = g_new(MemoryRegion, 1);
+    memory_region_init_rom(bootrom, NULL, "hisilicon.bootrom",
+                           0x1000, &error_fatal);
+    memory_region_add_subregion(sysmem, 0, bootrom);
+    address_space_write_rom(&address_space_memory, 0,
+                            MEMTXATTRS_UNSPECIFIED, rom, sizeof(rom));
+}
+
 static void hisilicon_common_init(MachineState *machine,
                                   const HisiSoCConfig *c)
 {
@@ -1593,22 +1664,7 @@ static void hisilicon_common_init(MachineState *machine,
     qemu_irq pic[256];
     int num_pic = 0;
     int n;
-
-    /*
-     * Trap page at address 0 — U-Boot driver model may call through NULL
-     * function pointers for absent hardware.  Place "mov r0, #0; bx lr"
-     * so those calls harmlessly return 0 instead of executing garbage.
-     */
-    {
-        MemoryRegion *trap = g_new(MemoryRegion, 1);
-        memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
-                               0x1000, &error_fatal);
-        memory_region_add_subregion(sysmem, 0, trap);
-        uint32_t insn[2] = { cpu_to_le32(0xe3a00000),   /* mov r0, #0 */
-                             cpu_to_le32(0xe12fff1e) };  /* bx lr      */
-        address_space_write_rom(&address_space_memory, 0,
-                                MEMTXATTRS_UNSPECIFIED, insn, 8);
-    }
+    bool flash_boot = false;  /* true when booting from SPI NOR flash dump */
 
     /* SRAM */
     {
@@ -1627,6 +1683,31 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_mmio_map(fmcbus, 0, c->fmc_ctrl_base);
         sysbus_mmio_map(fmcbus, 1, c->fmc_mem_base);
 
+        /* Check if flash-file was set (via -global hisi-fmc.flash-file=...) */
+        if (!machine->kernel_filename) {
+            char *ff = object_property_get_str(OBJECT(fmc), "flash-file", NULL);
+            if (ff && ff[0]) {
+                flash_boot = true;
+            }
+            g_free(ff);
+        }
+    }
+
+    /*
+     * Address 0 page — either a boot ROM (for flash boot) or a trap page
+     * (for normal -kernel boot where NULL function pointers must be safe).
+     */
+    if (flash_boot) {
+        hisilicon_write_bootrom(sysmem, c);
+    } else {
+        MemoryRegion *trap = g_new(MemoryRegion, 1);
+        memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
+                               0x1000, &error_fatal);
+        memory_region_add_subregion(sysmem, 0, trap);
+        uint32_t insn[2] = { cpu_to_le32(0xe3a00000),   /* mov r0, #0 */
+                             cpu_to_le32(0xe12fff1e) };  /* bx lr      */
+        address_space_write_rom(&address_space_memory, 0,
+                                MEMTXATTRS_UNSPECIFIED, insn, 8);
     }
 
     /* RAM */
@@ -1719,11 +1800,14 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
-    /* Fastboot mode: when no -kernel is given and a serial backend exists,
-     * emulate the boot ROM download protocol on UART0 instead of creating
-     * PL011 immediately.  The hisi-fastboot device will hand the chardev
-     * off to a newly-created PL011 after firmware upload completes. */
-    bool fastboot_mode = !machine->kernel_filename && serial_hd(0);
+    /* Fastboot mode: when no -kernel is given, no flash-file, and a serial
+     * backend exists, emulate the boot ROM download protocol on UART0
+     * instead of creating PL011 immediately.  The hisi-fastboot device will
+     * hand the chardev off to a newly-created PL011 after firmware upload
+     * completes.  Flash boot skips fastboot — the boot ROM runs U-Boot
+     * from flash directly. */
+    bool fastboot_mode = !machine->kernel_filename && !flash_boot
+                         && serial_hd(0);
     qemu_irq uart0_irq = NULL;
 
     /* UARTs */
@@ -1882,6 +1966,14 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
+    /* Hardware GZIP decompressor (used by U-Boot hw_compressed first stage) */
+    if (c->gzip_base) {
+        DeviceState *gzip = qdev_new("hisi-gzip");
+        SysBusDevice *busdev = SYS_BUS_DEVICE(gzip);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->gzip_base);
+    }
+
     /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */
     for (n = 0; n < c->num_regbanks; n++) {
         if (c->regbanks[n].base) {
@@ -1949,7 +2041,10 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
-    if (fastboot_mode) {
+    if (flash_boot) {
+        /* Boot from SPI NOR flash dump: boot ROM at 0x0 copies U-Boot from
+         * flash window to DDR and jumps to it.  CPU starts at reset vector. */
+    } else if (fastboot_mode) {
         /* Boot ROM fastboot: halt CPU and wait for serial firmware upload */
         DeviceState *fb = qdev_new(TYPE_HISI_FASTBOOT);
         qdev_prop_set_chr(fb, "chardev", serial_hd(0));
