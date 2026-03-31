@@ -50,6 +50,11 @@ cp qemu/hw/net/hisi-femac.c         "$QEMU_DIR/hw/net/"
 cp qemu/hw/i2c/hisi-i2c.c          "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-imx335.c       "$QEMU_DIR/hw/i2c/"
 
+# Apply patches to upstream QEMU files
+for p in qemu/patches/*.patch; do
+    [ -f "$p" ] && (cd "$QEMU_DIR" && git apply --check "../$p" 2>/dev/null && git apply "../$p") || true
+done
+
 # ── 3. Patch build system ──────────────────────────────────────────────
 echo "Patching build system..."
 

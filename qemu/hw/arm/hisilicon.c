@@ -1483,13 +1483,13 @@ static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
      * poll hardware status registers that cause hangs on regbank stubs.
      */
     {
-        const char *nand_paths[] = {
+        const char *disable_paths[] = {
             "/soc/spi_nand_controller",
             "/soc/nand_controller",
             NULL
         };
-        for (int i = 0; nand_paths[i]; i++) {
-            int node = fdt_path_offset(dtb, nand_paths[i]);
+        for (int i = 0; disable_paths[i]; i++) {
+            int node = fdt_path_offset(dtb, disable_paths[i]);
             if (node >= 0) {
                 fdt_setprop_string(dtb, node, "status", "disabled");
             }
@@ -1573,6 +1573,7 @@ static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
     return tmppath;
 }
 
+
 /* ── Shared machine init ───────────────────────────────────────────── */
 
 /* PPI numbers — same for all GICv2 HiSilicon SoCs */
@@ -1625,6 +1626,7 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_realize_and_unref(fmcbus, &error_fatal);
         sysbus_mmio_map(fmcbus, 0, c->fmc_ctrl_base);
         sysbus_mmio_map(fmcbus, 1, c->fmc_mem_base);
+
     }
 
     /* RAM */
@@ -1916,6 +1918,17 @@ static void hisilicon_common_init(MachineState *machine,
                                   c->regbanks[n].base + 0x0C, 0x01,
                                   MEMTXATTRS_UNSPECIFIED, NULL);
             }
+            /*
+             * VICAP/ISP: pre-set PT_INTF_MOD (offset 0x4000) so the
+             * ISP driver's init doesn't poll a zero-valued register.
+             * Also set ISP interrupt status at 0x41F8 to indicate
+             * "frame done" so ISP init completes immediately.
+             */
+            if (!strcmp(c->regbanks[n].name, "hisi-viu")) {
+                address_space_stl(&address_space_memory,
+                                  c->regbanks[n].base + 0x41F8, 0xFFFFFFFF,
+                                  MEMTXATTRS_UNSPECIFIED, NULL);
+            }
         }
     }
 
@@ -1957,7 +1970,22 @@ static void hisilicon_common_init(MachineState *machine,
             }
         }
 
+        /*
+         * Limit initrd placement to the kernel-visible RAM region.
+         * When mem=NM is smaller than -m (e.g., mem=64M with -m 128M
+         * to leave room for MMZ), QEMU must place the initrd within
+         * the kernel's addressable range, not at the top of all RAM.
+         */
         hisilicon_binfo.ram_size = machine->ram_size;
+        if (machine->kernel_cmdline) {
+            const char *memarg = strstr(machine->kernel_cmdline, "mem=");
+            if (memarg) {
+                unsigned long mem_mb = strtoul(memarg + 4, NULL, 10);
+                if (mem_mb > 0 && mem_mb * MiB < machine->ram_size) {
+                    hisilicon_binfo.ram_size = mem_mb * MiB;
+                }
+            }
+        }
         hisilicon_binfo.loader_start = c->ram_base;
         arm_load_kernel(cpu, machine, &hisilicon_binfo);
     }
