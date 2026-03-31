@@ -4,7 +4,6 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
 
 jobs:
   build:
@@ -19,7 +18,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential ninja-build meson pkg-config \
             libglib2.0-dev libpixman-1-dev libfdt-dev zlib1g-dev \
-            python3 python3-venv git gcc-arm-linux-gnueabi
+            python3 python3-venv git gcc-arm-linux-gnueabi libc6-dev-armel-cross
 
       - name: Build QEMU
         run: bash qemu/setup.sh
