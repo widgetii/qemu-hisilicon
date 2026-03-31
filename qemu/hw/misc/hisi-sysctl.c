@@ -21,12 +21,12 @@
 OBJECT_DECLARE_SIMPLE_TYPE(HisiSysctlState, HISI_SYSCTL)
 
 /*
- * Register space is 4K for V3/V4, but the media subsystem DTS on V2
- * maps 64K (0x20050000 size 0x10000).  We use 4K for the actual
- * register window and let ignore_memory_transaction_failures handle
- * any accesses beyond.
+ * Register space is 64K to cover the full range mapped by firmware.
+ * V2 DTS maps 0x20050000 size 0x10000; vendor modules do write-then-read
+ * cycles across the full range — a 4K window loses writes beyond 0x1000
+ * and causes poll loops to hang.
  */
-#define HISI_SYSCTL_MMIO_SIZE   0x1000
+#define HISI_SYSCTL_MMIO_SIZE   0x10000
 
 /* Number of 32-bit general-purpose storage words */
 #define HISI_SYSCTL_NREGS       (HISI_SYSCTL_MMIO_SIZE / 4)

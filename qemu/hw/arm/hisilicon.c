@@ -47,6 +47,7 @@
 #include "hw/loader.h"
 #include <zlib.h>  /* crc32() for uImage header fixup */
 
+
 /* ── SoC configuration tables ──────────────────────────────────────── */
 
 /*
@@ -136,8 +137,9 @@ static const HisiSoCConfig hi3516cv100_soc = {
     .timer_irqs         = { 3, 4 },
     .timer_freq         = 50000000,     /* 50 MHz (AXI 100MHz / prescale 2) */
 
-    /* No PL022 SPI controllers on V1 */
-    .num_spis           = 0,
+    .num_spis           = 2,
+    .spi_bases          = { 0x200C0000, 0x200E0000 },
+    .spi_irqs           = { 6, 7 },
 
     .fmc_ctrl_base      = 0x10010000,
     .fmc_mem_base       = 0x58000000,
@@ -182,12 +184,13 @@ static const HisiSoCConfig hi3516cv100_soc = {
      * hardware during init.  Without mapped regions, reads return 0
      * from QEMU's "unimplemented" handler, causing poll loops to hang.
      */
-    .num_regbanks       = 8,
+    .num_regbanks       = 9,
     .regbanks           = {
         { "hisi-misc",   0x20120000, 0x10000 },
         { "hisi-ddr",    0x20110000, 0x10000 },
         { "hisi-pwm",    0x20130000, 0x10000 },
         { "hisi-nandc",  0x10000000, 0x10000 },
+        { "hisi-i2c-v1", 0x200D0000, 0x1000 },
         { "hisi-viu",    0x20580000, 0x40000 },
         { "hisi-vpss",   0x20600000, 0x10000 },
         { "hisi-vedu",   0x20620000, 0x10000 },
@@ -1900,6 +1903,17 @@ static void hisilicon_common_init(MachineState *machine,
             if (!strcmp(c->regbanks[n].name, "hisi-nandc")) {
                 address_space_stl(&address_space_memory,
                                   c->regbanks[n].base + 0x20, 0x01,
+                                  MEMTXATTRS_UNSPECIFIED, NULL);
+            }
+            /*
+             * V1 I2C controller: pre-set I2C_OVER_INTR (bit 0) in the
+             * status register (offset 0x0C) so poll loops in the vendor
+             * hi_i2c.ko module exit immediately instead of spinning
+             * through 4096-iteration timeouts per I2C probe address.
+             */
+            if (!strcmp(c->regbanks[n].name, "hisi-i2c-v1")) {
+                address_space_stl(&address_space_memory,
+                                  c->regbanks[n].base + 0x0C, 0x01,
                                   MEMTXATTRS_UNSPECIFIED, NULL);
             }
         }
