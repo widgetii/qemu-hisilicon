@@ -22,6 +22,7 @@
 #include "hw/qdev-properties.h"
 #include "qemu/log.h"
 #include "system/dma.h"
+#include <sys/stat.h>
 
 /* ── Register offsets ────────────────────────────────────────────────── */
 
@@ -98,7 +99,8 @@
 /* NOR flash identity: Winbond W25Q64 (8 MiB) */
 #define NOR_JEDEC_0         0xEF    /* Winbond */
 #define NOR_JEDEC_1         0x40
-#define NOR_JEDEC_2         0x17    /* 64Mbit = 8 MiB */
+#define NOR_JEDEC_2_8M      0x17    /* 64Mbit = 8 MiB (W25Q64) */
+#define NOR_JEDEC_2_16M     0x18    /* 128Mbit = 16 MiB (W25Q128) */
 #define NOR_FLASH_SIZE      (8 * 1024 * 1024)
 #define NOR_SECTOR_SIZE     (64 * 1024)
 #define NOR_PAGE_SIZE       256
@@ -117,7 +119,7 @@
 
 #define IOBUF_SIZE          256
 #define CTRL_REG_SIZE       0x1000
-#define MEM_WINDOW_SIZE     0x10000
+#define MEM_WINDOW_SIZE     0x1000000   /* 16 MiB — covers full SPI NOR flash */
 
 /* ── Device state ────────────────────────────────────────────────────── */
 
@@ -130,8 +132,9 @@ struct HisiFmcState {
     MemoryRegion ctrl_iomem;
     MemoryRegion mem_iomem;
 
-    /* Configuration property */
+    /* Configuration properties */
     uint32_t flash_type;          /* 0=NOR, 1=NAND */
+    char    *flash_file;          /* optional: path to flash dump to load */
 
     /* Control registers */
     uint32_t cfg;
@@ -165,6 +168,7 @@ struct HisiFmcState {
     uint8_t  nand_feature_config;  /* feature reg 0xB0 */
 
     /* Register-mode I/O buffer (shared via memory window) */
+    bool     iobuf_valid;         /* true after reg-mode op, cleared on next read */
     uint8_t  iobuf[IOBUF_SIZE];
 };
 
@@ -205,7 +209,8 @@ static void hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
     case SPI_CMD_READ_ID:
         s->iobuf[0] = NOR_JEDEC_0;
         s->iobuf[1] = NOR_JEDEC_1;
-        s->iobuf[2] = NOR_JEDEC_2;
+        s->iobuf[2] = (s->flash_size > NOR_FLASH_SIZE)
+                       ? NOR_JEDEC_2_16M : NOR_JEDEC_2_8M;
         if (len > 3) {
             memset(&s->iobuf[3], 0, len - 3);
         }
@@ -554,6 +559,7 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
     case FMC_DMA_SADDRH_OOB: s->dma_saddrh_oob = value; break;
 
     case FMC_OP:
+        s->iobuf_valid = false;
         if (value & FMC_OP_REG_OP_START) {
             if (value & FMC_OP_READ_STATUS_EN) {
                 /* Hardware reads SPI status register directly into FMC_STATUS */
@@ -562,11 +568,13 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
                 hisi_fmc_exec_reg_op(s);
             }
             s->fmc_int |= FMC_INT_OP_DONE;
+            s->iobuf_valid = true;
         }
         break;
 
     case FMC_OP_CTRL:
         s->op_ctrl = value;
+        s->iobuf_valid = false;
         if (value & FMC_OP_CTRL_DMA_OP_READY) {
             hisi_fmc_exec_dma_op(s);
         }
@@ -594,12 +602,28 @@ static uint64_t hisi_fmc_mem_read(void *opaque, hwaddr offset, unsigned size)
 {
     HisiFmcState *s = HISI_FMC(opaque);
 
-    if (offset < IOBUF_SIZE) {
+    /* After a register-mode SPI operation, the result is in iobuf.
+     * U-Boot/kernel reads the result from low offsets of the memory window.
+     * The flag stays set until the next FMC_OP write clears it. */
+    if (s->iobuf_valid && offset < IOBUF_SIZE) {
         if (size == 4 && (offset & 3) == 0) {
             return ldl_le_p(&s->iobuf[offset]);
         }
         return s->iobuf[offset];
     }
+
+    /* Direct flash read — memory-mapped XIP access used by boot ROM and
+     * U-Boot to read flash contents from the FMC memory window. */
+    if (s->flash && offset < s->flash_size) {
+        if (size == 4 && (offset & 3) == 0) {
+            return ldl_le_p(&s->flash[offset]);
+        }
+        if (size == 2 && (offset & 1) == 0) {
+            return lduw_le_p(&s->flash[offset]);
+        }
+        return s->flash[offset];
+    }
+
     return 0;
 }
 
@@ -646,6 +670,40 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
         memset(s->flash, 0xFF, NOR_FLASH_SIZE);
         /* FMC_CFG defaults to 0 (SPI_NOR) */
     }
+
+    /* Load flash contents from file if specified */
+    if (s->flash_file && s->flash_file[0]) {
+        struct stat st;
+        if (stat(s->flash_file, &st) != 0) {
+            error_setg(errp, "hisi-fmc: cannot stat flash file '%s'",
+                       s->flash_file);
+            return;
+        }
+        uint32_t file_size = (uint32_t)st.st_size;
+        if (file_size > s->flash_size) {
+            /* Re-allocate to fit the larger dump */
+            g_free(s->flash);
+            s->flash_size = file_size;
+            s->flash = g_malloc(file_size);
+            memset(s->flash, 0xFF, file_size);
+        }
+        FILE *f = fopen(s->flash_file, "rb");
+        if (!f) {
+            error_setg(errp, "hisi-fmc: cannot open flash file '%s'",
+                       s->flash_file);
+            return;
+        }
+        size_t nread = fread(s->flash, 1, file_size, f);
+        fclose(f);
+        if (nread != file_size) {
+            error_setg(errp, "hisi-fmc: short read from '%s' "
+                       "(got %zu, expected %u)", s->flash_file,
+                       nread, file_size);
+            return;
+        }
+        qemu_log("hisi-fmc: loaded %u bytes from '%s'\n",
+                 file_size, s->flash_file);
+    }
 }
 
 static void hisi_fmc_init(Object *obj)
@@ -672,6 +730,7 @@ static void hisi_fmc_finalize(Object *obj)
 static const Property hisi_fmc_properties[] = {
     DEFINE_PROP_UINT32("flash-type", HisiFmcState, flash_type,
                        FLASH_TYPE_SPI_NOR),
+    DEFINE_PROP_STRING("flash-file", HisiFmcState, flash_file),
 };
 
 static void hisi_fmc_class_init(ObjectClass *klass, const void *data)

@@ -125,6 +125,9 @@ typedef struct HisiSoCConfig {
     int             wdt_irq;        /* -1 = no IRQ */
     uint32_t        wdt_freq;       /* clock frequency in Hz */
 
+    /* Hardware GZIP decompressor */
+    hwaddr          gzip_base;      /* 0 = no GZIP engine */
+
     /* CRG register defaults (mimics U-Boot clock init before kernel boot) */
     int             num_crg_defaults;
     struct { uint32_t offset; uint32_t value; } crg_defaults[HISI_MAX_CRG_DEFAULTS];
