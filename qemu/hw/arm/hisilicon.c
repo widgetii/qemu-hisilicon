@@ -177,10 +177,21 @@ static const HisiSoCConfig hi3516cv100_soc = {
         { 0x14, (3 << 12) | 25 },           /* CRG5: refdiv=3, fbdiv=25 */
     },
 
-    /* NANDC stub — U-Boot probes NAND before SPI flash */
-    .num_regbanks       = 1,
+    /*
+     * Register bank stubs — vendor .ko modules access video/peripheral
+     * hardware during init.  Without mapped regions, reads return 0
+     * from QEMU's "unimplemented" handler, causing poll loops to hang.
+     */
+    .num_regbanks       = 8,
     .regbanks           = {
+        { "hisi-misc",   0x20120000, 0x10000 },
+        { "hisi-ddr",    0x20110000, 0x10000 },
+        { "hisi-pwm",    0x20130000, 0x10000 },
         { "hisi-nandc",  0x10000000, 0x10000 },
+        { "hisi-viu",    0x20580000, 0x40000 },
+        { "hisi-vpss",   0x20600000, 0x10000 },
+        { "hisi-vedu",   0x20620000, 0x10000 },
+        { "hisi-aiao",   0x20650000, 0x10000 },
     },
 };
 
@@ -260,6 +271,22 @@ static const HisiSoCConfig hi3516cv200_soc = {
         { 0xc0, (1 << 1) },            /* FMC clk enable */
         { 0xec, (1 << 1) },            /* ETH clk enable */
         { 0xc4, (1 << 1) | (1 << 9) }, /* MMC0 + MMC1 clk enable */
+    },
+
+    /*
+     * Register bank stubs — vendor .ko modules access video/peripheral
+     * hardware during init.  Without mapped regions, reads return 0
+     * from QEMU's "unimplemented" handler, causing poll loops to hang.
+     */
+    .num_regbanks       = 7,
+    .regbanks           = {
+        { "hisi-misc",   0x20120000, 0x10000 },
+        { "hisi-ddr",    0x20110000, 0x10000 },
+        { "hisi-pwm",    0x20130000, 0x10000 },
+        { "hisi-nandc",  0x10000000, 0x10000 },
+        { "hisi-viu",    0x20580000, 0x40000 },
+        { "hisi-vpss",   0x20600000, 0x10000 },
+        { "hisi-aiao",   0x20650000, 0x10000 },
     },
 };
 
