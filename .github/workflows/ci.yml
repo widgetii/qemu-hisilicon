@@ -159,7 +159,7 @@ jobs:
           retention-days: 7
 
   net-test-cv300:
-    name: CV300 network (Linux ping)
+    name: CV300 network (U-Boot + Linux ping)
     needs: build
     runs-on: ubuntu-24.04
     steps:
@@ -185,6 +185,46 @@ jobs:
           curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.hi3516cv300-nor-lite.tgz" \
               -o openipc.hi3516cv300-nor-lite.tgz
           tar xzf openipc.hi3516cv300-nor-lite.tgz
+
+      - name: Download U-Boot
+        run: |
+          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/u-boot-hi3516cv300-universal.bin" \
+              -o /tmp/u-boot-cv300.bin
+
+      - name: Build flash image
+        run: |
+          FLASH=/tmp/flash_cv300.bin
+          dd if=/dev/zero of=$FLASH bs=1M count=8 2>/dev/null
+          dd if=/tmp/u-boot-cv300.bin of=$FLASH bs=1 conv=notrunc 2>/dev/null
+          dd if=qemu-boot/uImage.hi3516cv300 of=$FLASH bs=1 seek=$((0x50000)) conv=notrunc 2>/dev/null
+          dd if=qemu-boot/rootfs.squashfs.hi3516cv300 of=$FLASH bs=1 seek=$((0x350000)) conv=notrunc 2>/dev/null
+
+      - name: "Test: CV300 U-Boot ping"
+        timeout-minutes: 2
+        run: |
+          QEMU=./qemu-src/build/qemu-system-arm
+          {
+            sleep 1; printf '\x03\n\x03\n'; sleep 3
+            echo "setenv ipaddr 10.0.2.15"
+            echo "setenv serverip 10.0.2.2"
+            echo "setenv gatewayip 10.0.2.2"
+            echo "setenv netmask 255.255.255.0"
+            sleep 1
+            echo "ping 10.0.2.2"
+            sleep 15
+          } | timeout 30 $QEMU -M hi3516cv300 -m 256M \
+                -global hisi-fmc.flash-file=/tmp/flash_cv300.bin \
+                -nographic -serial mon:stdio -nic user \
+                2>&1 | tee /tmp/uboot-cv300-net.txt
+
+          echo ""
+          echo "=== CV300 U-Boot ping result ==="
+          if grep -q "is alive" /tmp/uboot-cv300-net.txt; then
+            echo "PASS: CV300 U-Boot ping succeeded"
+          else
+            echo "FAIL: CV300 U-Boot ping failed"
+            exit 1
+          fi
 
       - name: "Test: CV300 Linux ping"
         timeout-minutes: 3
