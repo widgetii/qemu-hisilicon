@@ -238,45 +238,44 @@ jobs:
         timeout-minutes: 4
         run: |
           QEMU=./qemu-src/build/qemu-system-arm
-          mkfifo /tmp/qemu-in
+
+          # Use QEMU's -serial pipe: for reliable interactive serial I/O
+          mkfifo /tmp/ser.in /tmp/ser.out
           $QEMU \
             -M ${{ matrix.machine }} -m ${{ matrix.mem }} \
             -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
             -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
-            -nographic -serial mon:stdio \
+            -nographic -serial pipe:/tmp/ser \
             -append '${{ matrix.append }}' \
             -nic user \
-            < /tmp/qemu-in 2>&1 | tee /tmp/linux-ping.txt &
+            -monitor none &
           QEMU_PID=$!
 
-          # Keep FIFO open for writing (background cat holds it)
-          exec 3>/tmp/qemu-in
+          # Drain serial output to file in background
+          cat /tmp/ser.out > /tmp/linux-ping.txt &
 
           # Wait for login prompt (up to 120s)
           for i in $(seq 1 120); do
-            if grep -q "login:" /tmp/linux-ping.txt 2>/dev/null; then
-              break
-            fi
+            if grep -q "login:" /tmp/linux-ping.txt 2>/dev/null; then break; fi
             sleep 1
           done
 
           # Login and ping
-          echo "root" >&3; sleep 2
-          echo "12345" >&3; sleep 3
-          echo "ping -c 3 10.0.2.2" >&3
+          echo "root" > /tmp/ser.in
+          sleep 2
+          echo "12345" > /tmp/ser.in
+          sleep 3
+          echo "ping -c 3 10.0.2.2" > /tmp/ser.in
 
           # Wait for ping result (up to 30s)
           for i in $(seq 1 30); do
-            if grep -q "packet loss" /tmp/linux-ping.txt 2>/dev/null; then
-              break
-            fi
+            if grep -q "packet loss" /tmp/linux-ping.txt 2>/dev/null; then break; fi
             sleep 1
           done
 
-          exec 3>&-
           kill $QEMU_PID 2>/dev/null || true
-          wait $QEMU_PID 2>/dev/null || true
-          rm -f /tmp/qemu-in
+          wait 2>/dev/null || true
+          rm -f /tmp/ser.in /tmp/ser.out
 
           echo ""
           if grep -q "0% packet loss" /tmp/linux-ping.txt; then
@@ -302,30 +301,30 @@ jobs:
           dd if=qemu-boot/uImage.${{ matrix.soc }} of=$FLASH bs=1 seek=$((0x50000)) conv=notrunc 2>/dev/null
           dd if=qemu-boot/rootfs.squashfs.${{ matrix.soc }} of=$FLASH bs=1 seek=$((0x350000)) conv=notrunc 2>/dev/null
 
-          mkfifo /tmp/uboot-in
+          mkfifo /tmp/ub.in /tmp/ub.out
           $QEMU \
             -M ${{ matrix.machine }} -m ${{ matrix.flash_mem || matrix.mem }} \
             -global hisi-fmc.flash-file=$FLASH \
-            -nographic -serial mon:stdio -nic user \
-            < /tmp/uboot-in 2>&1 | tee /tmp/uboot-ping.txt &
+            -nographic -serial pipe:/tmp/ub -nic user \
+            -monitor none &
           QEMU_PID=$!
-          exec 3>/tmp/uboot-in
+          cat /tmp/ub.out > /tmp/uboot-ping.txt &
 
           # Interrupt autoboot (spam Ctrl-C until we see the prompt)
           for i in $(seq 1 20); do
-            printf '\x03\n' >&3
+            printf '\x03\n' > /tmp/ub.in
             if grep -q "OpenIPC #\|hisilicon #\|=> " /tmp/uboot-ping.txt 2>/dev/null; then
               break
             fi
             sleep 0.5
           done
 
-          echo "setenv ipaddr 10.0.2.15" >&3
-          echo "setenv serverip 10.0.2.2" >&3
-          echo "setenv gatewayip 10.0.2.2" >&3
-          echo "setenv netmask 255.255.255.0" >&3
+          echo "setenv ipaddr 10.0.2.15" > /tmp/ub.in
+          echo "setenv serverip 10.0.2.2" > /tmp/ub.in
+          echo "setenv gatewayip 10.0.2.2" > /tmp/ub.in
+          echo "setenv netmask 255.255.255.0" > /tmp/ub.in
           sleep 1
-          echo "ping 10.0.2.2" >&3
+          echo "ping 10.0.2.2" > /tmp/ub.in
 
           # Wait for ping result (up to 30s)
           for i in $(seq 1 30); do
@@ -335,10 +334,9 @@ jobs:
             sleep 1
           done
 
-          exec 3>&-
           kill $QEMU_PID 2>/dev/null || true
-          wait $QEMU_PID 2>/dev/null || true
-          rm -f /tmp/uboot-in
+          wait 2>/dev/null || true
+          rm -f /tmp/ub.in /tmp/ub.out
 
           echo ""
           if grep -q "is alive" /tmp/uboot-ping.txt; then
