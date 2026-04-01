@@ -169,7 +169,7 @@ struct HisiFmcState {
 
     /* SPI flash state */
     uint8_t  sr;
-    uint8_t  sr2;                 /* Status Register-2 (QE bit, etc.) */
+    uint8_t  sr2;                 /* Status Register-2 (QE bit at bit 1) */
     uint8_t  sr3;                 /* Status Register-3 */
     uint8_t *flash;
     uint32_t flash_size;
@@ -731,6 +731,10 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
         s->flash = g_malloc(NOR_FLASH_SIZE);
         memset(s->flash, 0xFF, NOR_FLASH_SIZE);
         /* FMC_CFG defaults to 0 (SPI_NOR) */
+        /* Many NOR flash chips ship with QE (Quad Enable) bit set in SR2.
+         * XM firmware expects to read SR2 and find QE=1, then disables it.
+         * Default 0x02 matches common factory programming. */
+        s->sr2 = 0x02;
     }
 
     /* Load flash contents from file if specified */
