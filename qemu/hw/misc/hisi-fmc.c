@@ -93,10 +93,19 @@
 #define NAND_FEATURE_FEATURE  0xB0
 #define NAND_FEATURE_STATUS   0xC0
 
+/* SPI NOR additional commands */
+#define SPI_CMD_WRITE_DISABLE 0x04
+#define SPI_CMD_WRITE_STATUS1 0x01
+#define SPI_CMD_READ_STATUS2  0x35
+#define SPI_CMD_WRITE_STATUS2 0x31
+#define SPI_CMD_READ_STATUS3  0x15
+#define SPI_CMD_WRITE_STATUS3 0x11
+#define SPI_CMD_READ_SFDP     0x5A
+
 /* SPI status register bits */
 #define SPI_SR_WEL          BIT(1)
 
-/* NOR flash identity: Winbond W25Q64 (8 MiB) */
+/* NOR flash identity defaults: Winbond W25Q64 (8 MiB) */
 #define NOR_JEDEC_0         0xEF    /* Winbond */
 #define NOR_JEDEC_1         0x40
 #define NOR_JEDEC_2_8M      0x17    /* 64Mbit = 8 MiB (W25Q64) */
@@ -135,6 +144,7 @@ struct HisiFmcState {
     /* Configuration properties */
     uint32_t flash_type;          /* 0=NOR, 1=NAND */
     char    *flash_file;          /* optional: path to flash dump to load */
+    uint32_t flash_jedec;         /* optional: JEDEC ID override (e.g. 0xEF4018) */
 
     /* Control registers */
     uint32_t cfg;
@@ -159,6 +169,8 @@ struct HisiFmcState {
 
     /* SPI flash state */
     uint8_t  sr;
+    uint8_t  sr2;                 /* Status Register-2 (QE bit, etc.) */
+    uint8_t  sr3;                 /* Status Register-3 */
     uint8_t *flash;
     uint32_t flash_size;
 
@@ -207,10 +219,18 @@ static void hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
 
     switch (spi_cmd) {
     case SPI_CMD_READ_ID:
-        s->iobuf[0] = NOR_JEDEC_0;
-        s->iobuf[1] = NOR_JEDEC_1;
-        s->iobuf[2] = (s->flash_size > NOR_FLASH_SIZE)
-                       ? NOR_JEDEC_2_16M : NOR_JEDEC_2_8M;
+        if (s->flash_jedec) {
+            /* User-specified JEDEC ID (e.g. 0x0B4018 for XTX XT25F128B) */
+            s->iobuf[0] = (s->flash_jedec >> 16) & 0xFF;
+            s->iobuf[1] = (s->flash_jedec >> 8) & 0xFF;
+            s->iobuf[2] = s->flash_jedec & 0xFF;
+        } else {
+            /* Default: Winbond, size derived from flash */
+            s->iobuf[0] = NOR_JEDEC_0;
+            s->iobuf[1] = NOR_JEDEC_1;
+            s->iobuf[2] = (s->flash_size > NOR_FLASH_SIZE)
+                           ? NOR_JEDEC_2_16M : NOR_JEDEC_2_8M;
+        }
         if (len > 3) {
             memset(&s->iobuf[3], 0, len - 3);
         }
@@ -218,6 +238,28 @@ static void hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
 
     case SPI_CMD_READ_STATUS:
         s->iobuf[0] = s->sr;
+        break;
+
+    case SPI_CMD_READ_STATUS2:
+        s->iobuf[0] = s->sr2;
+        break;
+
+    case SPI_CMD_WRITE_STATUS2:
+        if (s->sr & SPI_SR_WEL) {
+            s->sr2 = s->iobuf[0];
+            s->sr &= ~SPI_SR_WEL;
+        }
+        break;
+
+    case SPI_CMD_READ_STATUS3:
+        s->iobuf[0] = s->sr3;
+        break;
+
+    case SPI_CMD_WRITE_STATUS3:
+        if (s->sr & SPI_SR_WEL) {
+            s->sr3 = s->iobuf[0];
+            s->sr &= ~SPI_SR_WEL;
+        }
         break;
 
     case SPI_CMD_READ:
@@ -232,6 +274,22 @@ static void hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
 
     case SPI_CMD_WRITE_ENABLE:
         s->sr |= SPI_SR_WEL;
+        break;
+
+    case SPI_CMD_WRITE_DISABLE:
+        s->sr &= ~SPI_SR_WEL;
+        break;
+
+    case SPI_CMD_WRITE_STATUS1:
+        if (s->sr & SPI_SR_WEL) {
+            s->sr = (s->iobuf[0] & ~SPI_SR_WEL);
+        }
+        break;
+
+    case SPI_CMD_READ_SFDP:
+    case 0x98: /* Global Block Unlock / Resume from Suspend */
+        /* Not implemented — return 0xFF (empty/no-op) */
+        memset(s->iobuf, 0xFF, len);
         break;
 
     case SPI_CMD_PAGE_PROGRAM:
@@ -735,6 +793,7 @@ static const Property hisi_fmc_properties[] = {
     DEFINE_PROP_UINT32("flash-type", HisiFmcState, flash_type,
                        FLASH_TYPE_SPI_NOR),
     DEFINE_PROP_STRING("flash-file", HisiFmcState, flash_file),
+    DEFINE_PROP_UINT32("flash-jedec", HisiFmcState, flash_jedec, 0),
 };
 
 static void hisi_fmc_class_init(ObjectClass *klass, const void *data)
