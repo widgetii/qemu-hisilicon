@@ -284,13 +284,28 @@ static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
     case SPI_CMD_WRITE_STATUS1:
         if (s->sr & SPI_SR_WEL) {
             s->sr = (s->iobuf[0] & ~SPI_SR_WEL);
+            /* 2-byte write: cmd 0x01 with data_num>=2 writes SR1+SR2 */
+            if (len >= 2) {
+                s->sr2 = s->iobuf[1];
+            }
         }
         break;
 
     case SPI_CMD_READ_SFDP:
-    case 0x98: /* Global Block Unlock / Resume from Suspend */
-        /* Not implemented — return 0xFF (empty/no-op) */
+        /* SFDP not implemented — return 0xFF (empty) */
         memset(s->iobuf, 0xFF, len);
+        break;
+
+    /* Winbond WPS (Write Protection Scheme) per-block lock commands */
+    case 0x36: /* Individual Block/Sector Lock */
+    case 0x39: /* Individual Block/Sector Unlock */
+    case 0x7E: /* Global Block/Sector Lock */
+    case 0x98: /* Global Block/Sector Unlock */
+        /* No-op: flash is always fully writable in emulation */
+        break;
+
+    case 0x3D: /* Read Block/Sector Lock status */
+        s->iobuf[0] = 0x00; /* 0 = unlocked */
         break;
 
     case SPI_CMD_PAGE_PROGRAM:
@@ -618,7 +633,7 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
     case FMC_OP_CFG:        s->op_cfg = value;        break;
     case FMC_SPI_OP_ADDR:   s->spi_op_addr = value;   break;
     case FMC_DATA_NUM:      s->data_num = value;      break;
-    case FMC_DMA_LEN:       s->dma_len = value;       break;
+    case FMC_DMA_LEN:       s->dma_len = value & 0x0FFFFFFF; break;
     case FMC_DMA_AHB_CTRL:  s->dma_ahb_ctrl = value;  break;
     case FMC_DMA_SADDR_D0:  s->dma_saddr = value;     break;
     case FMC_DMA_SADDR_OOB: s->dma_saddr_oob = value; break;
