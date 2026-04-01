@@ -207,7 +207,8 @@ static void hisi_fmc_nand_decode_addr(HisiFmcState *s,
 
 /* ── SPI NOR command execution (register mode) ──────────────────────── */
 
-static void hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
+/* Returns true if the command wrote results to iobuf */
+static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
 {
     uint8_t spi_cmd = s->cmd & 0xFF;
     uint32_t addr = s->addrl;
@@ -330,8 +331,9 @@ static void hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
     default:
         qemu_log_mask(LOG_UNIMP,
                       "hisi-fmc: NOR unhandled SPI command 0x%02x\n", spi_cmd);
-        break;
+        return false;
     }
+    return true;
 }
 
 /* ── SPI NAND command execution (register mode) ─────────────────────── */
@@ -426,14 +428,16 @@ static void hisi_fmc_exec_nand_reg_op(HisiFmcState *s)
 
 /* ── Register-mode dispatch ──────────────────────────────────────────── */
 
-static void hisi_fmc_exec_reg_op(HisiFmcState *s)
+/* Returns true if the command wrote results to iobuf */
+static bool hisi_fmc_exec_reg_op(HisiFmcState *s)
 {
+    bool wrote_iobuf = true;
     if (s->flash_type == FLASH_TYPE_SPI_NAND &&
         hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NAND) {
         hisi_fmc_exec_nand_reg_op(s);
     } else if (s->flash_type == FLASH_TYPE_SPI_NOR &&
                hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NOR) {
-        hisi_fmc_exec_nor_reg_op(s);
+        wrote_iobuf = hisi_fmc_exec_nor_reg_op(s);
     } else {
         /* Wrong flash selected — no chip responds, return 0x00 ID */
         uint32_t len = s->data_num & 0x3FFF;
@@ -443,6 +447,7 @@ static void hisi_fmc_exec_reg_op(HisiFmcState *s)
         memset(s->iobuf, 0x00, len);
     }
     s->fmc_int |= FMC_INT_OP_DONE;
+    return wrote_iobuf;
 }
 
 /* ── DMA command execution ───────────────────────────────────────────── */
@@ -626,11 +631,15 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
             if (value & FMC_OP_READ_STATUS_EN) {
                 /* Hardware reads SPI status register directly into FMC_STATUS */
                 s->status = s->sr;
+                s->iobuf_valid = true;
             } else {
-                hisi_fmc_exec_reg_op(s);
+                /* Only mark iobuf valid if the command actually wrote to it.
+                 * Unknown commands (block lock, etc.) must NOT set iobuf_valid
+                 * or subsequent memory-window reads return stale iobuf data
+                 * instead of actual flash content. */
+                s->iobuf_valid = hisi_fmc_exec_reg_op(s);
             }
             s->fmc_int |= FMC_INT_OP_DONE;
-            s->iobuf_valid = true;
         }
         break;
 
