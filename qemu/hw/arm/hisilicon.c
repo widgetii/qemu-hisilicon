@@ -1629,37 +1629,94 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
     hwaddr flash_src = c->fmc_mem_base;         /* e.g. 0x14000000 */
     hwaddr ram_dst   = c->ram_base;             /* e.g. 0x40000000 */
     uint32_t copy_sz = 0x40000;                 /* 256 KB boot partition */
+    bool armv7 = c->use_gic;  /* ARM926 SoCs use VIC, Cortex-A7+ use GIC */
 
-    uint32_t rom[] = {
-        /* Set SVC mode, disable IRQ/FIQ */
-        cpu_to_le32(0xe321f0d3),                /* msr cpsr_c, #0xD3      */
+    /*
+     * Build a small boot ROM that copies U-Boot from the SPI NOR flash
+     * memory window to DDR and jumps to it.
+     *
+     * ARMv7 (Cortex-A7) uses movw/movt for 32-bit immediates.
+     * ARMv5 (ARM926) uses PC-relative ldr from a literal pool appended
+     * after the code (it lacks movw/movt instructions).
+     */
+    uint32_t rom[32];
+    int n = 0;
 
-        /* r0 = flash source address */
-        cpu_to_le32(arm_movw(0, flash_src & 0xffff)),
-        cpu_to_le32(arm_movt(0, flash_src >> 16)),
+    /* Set SVC mode, disable IRQ/FIQ */
+    rom[n++] = cpu_to_le32(0xe321f0d3);        /* msr cpsr_c, #0xD3      */
 
-        /* r1 = DDR destination address */
-        cpu_to_le32(arm_movw(1, ram_dst & 0xffff)),
-        cpu_to_le32(arm_movt(1, ram_dst >> 16)),
-
-        /* r2 = byte count */
-        cpu_to_le32(arm_movw(2, copy_sz & 0xffff)),
-        cpu_to_le32(arm_movt(2, copy_sz >> 16)),
+    if (armv7) {
+        /* ARMv7: use movw/movt for 32-bit immediates */
+        rom[n++] = cpu_to_le32(arm_movw(0, flash_src & 0xffff));
+        rom[n++] = cpu_to_le32(arm_movt(0, flash_src >> 16));
+        rom[n++] = cpu_to_le32(arm_movw(1, ram_dst & 0xffff));
+        rom[n++] = cpu_to_le32(arm_movt(1, ram_dst >> 16));
+        rom[n++] = cpu_to_le32(arm_movw(2, copy_sz & 0xffff));
+        rom[n++] = cpu_to_le32(arm_movt(2, copy_sz >> 16));
 
         /* r3 = end pointer */
-        cpu_to_le32(0xe0813002),                /* add r3, r1, r2         */
+        rom[n++] = cpu_to_le32(0xe0813002);     /* add r3, r1, r2         */
 
         /* copy_loop: */
-        cpu_to_le32(0xe4904004),                /* ldr r4, [r0], #4       */
-        cpu_to_le32(0xe4814004),                /* str r4, [r1], #4       */
-        cpu_to_le32(0xe1510003),                /* cmp r1, r3             */
-        cpu_to_le32(0x1afffffb),                /* bne copy_loop          */
+        rom[n++] = cpu_to_le32(0xe4904004);     /* ldr r4, [r0], #4       */
+        rom[n++] = cpu_to_le32(0xe4814004);     /* str r4, [r1], #4       */
+        rom[n++] = cpu_to_le32(0xe1510003);     /* cmp r1, r3             */
+        rom[n++] = cpu_to_le32(0x1afffffb);     /* bne copy_loop          */
 
-        /* Jump to DDR (reload r1 since it was used as pointer) */
-        cpu_to_le32(arm_movw(1, ram_dst & 0xffff)),
-        cpu_to_le32(arm_movt(1, ram_dst >> 16)),
-        cpu_to_le32(0xe12fff11),                /* bx r1                  */
-    };
+        /* Jump to DDR */
+        rom[n++] = cpu_to_le32(arm_movw(1, ram_dst & 0xffff));
+        rom[n++] = cpu_to_le32(arm_movt(1, ram_dst >> 16));
+        rom[n++] = cpu_to_le32(0xe12fff11);     /* bx r1                  */
+    } else {
+        /*
+         * ARMv5 (ARM926): no movw/movt.  Use PC-relative loads from a
+         * literal pool placed after the branch instruction.
+         *
+         * Layout (n starts at 1 after msr):
+         *   [1] ldr r0, [pc, #20]   -> pool[0] = flash_src
+         *   [2] ldr r1, [pc, #20]   -> pool[1] = ram_dst
+         *   [3] ldr r2, [pc, #20]   -> pool[2] = copy_sz
+         *   [4] add r3, r1, r2
+         *   [5] ldr r4, [r0], #4    (copy_loop)
+         *   [6] str r4, [r1], #4
+         *   [7] cmp r1, r3
+         *   [8] bne copy_loop
+         *   [9] ldr r1, [pc, #4]    -> pool[1] = ram_dst
+         *  [10] bx r1
+         *  [11] pool[0] = flash_src
+         *  [12] pool[1] = ram_dst
+         *  [13] pool[2] = copy_sz
+         *
+         * PC-relative offset = target_addr - (insn_addr + 8)
+         * For insn at index i: addr = i*4, pc_val = i*4 + 8
+         * pool[j] at index (11+j): addr = (11+j)*4
+         * offset for insn[i] -> pool[j] = (11+j)*4 - (i*4+8)
+         */
+        /* insn[1]: ldr r0, [pc, #offset_to_pool0]
+         * pool[0] at word 11, insn at word 1: offset = (11-1-2)*4 = 32 */
+        rom[n++] = cpu_to_le32(0xe59f0000 | 32);  /* ldr r0, [pc, #32] */
+        /* insn[2]: pool[1] at word 12: offset = (12-2-2)*4 = 32 */
+        rom[n++] = cpu_to_le32(0xe59f1000 | 32);  /* ldr r1, [pc, #32] */
+        /* insn[3]: pool[2] at word 13: offset = (13-3-2)*4 = 32 */
+        rom[n++] = cpu_to_le32(0xe59f2000 | 32);  /* ldr r2, [pc, #32] */
+
+        rom[n++] = cpu_to_le32(0xe0813002);     /* add r3, r1, r2         */
+        rom[n++] = cpu_to_le32(0xe4904004);     /* ldr r4, [r0], #4       */
+        rom[n++] = cpu_to_le32(0xe4814004);     /* str r4, [r1], #4       */
+        rom[n++] = cpu_to_le32(0xe1510003);     /* cmp r1, r3             */
+        rom[n++] = cpu_to_le32(0x1afffffb);     /* bne copy_loop          */
+
+        /* insn[9]: ldr r1, [pc, #offset_to_pool1]
+         * pool[1] at word 12: offset = (12-9-2)*4 = 4 */
+        rom[n++] = cpu_to_le32(0xe59f1000 | 4); /* ldr r1, [pc, #4]  */
+        rom[n++] = cpu_to_le32(0xe12fff11);     /* bx r1                  */
+
+        /* Literal pool at word 11 */
+        assert(n == 11);
+        rom[n++] = cpu_to_le32(flash_src);
+        rom[n++] = cpu_to_le32(ram_dst);
+        rom[n++] = cpu_to_le32(copy_sz);
+    }
 
     MemoryRegion *bootrom = g_new(MemoryRegion, 1);
     memory_region_init_rom(bootrom, NULL, "hisilicon.bootrom",
