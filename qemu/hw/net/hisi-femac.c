@@ -388,10 +388,12 @@ static uint64_t hisi_femac_read(void *opaque, hwaddr offset, unsigned size)
          * Return 0 to indicate TX queue is empty (complete). */
         return 0;
     case REG_ADDRQ_STAT:
-        /* TX_CNT (bits 5:0) = 0 (instant completion),
-         * BIT_TX_READY (bit 24) always set,
-         * BIT_RX_READY (bit 25) set if ring has room for buffers */
+        /* TX_CNT_INUSE (bits 5:0) = 0 (instant completion),
+         * RX_PKT_CNT   (bits 13:8) = pending RX descriptors in FIFO,
+         * BIT_TX_READY  (bit 24) always set,
+         * BIT_RX_READY  (bit 25) set if ring has room for buffers */
         return ADDRQ_TX_READY |
+               ((s->iqfrm_des_count & 0x3F) << 8) |
                ((s->rx_ring_count < RX_RING_SIZE) ? (1 << 25) : 0);
     case REG_RX_COE_CTRL:
         return s->rx_coe_ctrl;
