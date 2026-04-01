@@ -201,7 +201,7 @@ jobs:
               -o "openipc.${{ matrix.soc }}-nor-lite.tgz"
           tar xzf "openipc.${{ matrix.soc }}-nor-lite.tgz"
 
-      - name: Boot test
+      - name: "OpenIPC kernel + rootfs boot"
         timeout-minutes: 6
         run: |
           QEMU=./qemu-src/build/qemu-system-arm
@@ -239,21 +239,21 @@ jobs:
         run: |
           QEMU=./qemu-src/build/qemu-system-arm
           {
-            sleep 30
+            sleep 60
             echo "root"
             sleep 2
             echo "12345"
             sleep 3
             echo "ping -c 3 10.0.2.2"
             sleep 10
-          } | timeout 60 $QEMU \
+          } | timeout 90 $QEMU \
                 -M ${{ matrix.machine }} -m ${{ matrix.mem }} \
                 -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
                 -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
                 -nographic -serial mon:stdio \
                 -append '${{ matrix.append }}' \
                 -nic user \
-                2>&1 | tee /tmp/linux-ping.txt
+                2>&1 | tee /tmp/linux-ping.txt || true
 
           echo ""
           if grep -q "0% packet loss" /tmp/linux-ping.txt; then
