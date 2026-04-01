@@ -52,218 +52,6 @@ jobs:
           path: qemu-boot/test-ive.cpio
           retention-days: 1
 
-  net-test:
-    name: EV300 network (U-Boot + Linux ping)
-    needs: build
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
-
-      - name: Download QEMU binary
-        uses: actions/download-artifact@v4
-        with:
-          name: qemu-arm
-          path: qemu-src/build/
-
-      - name: Make QEMU executable
-        run: chmod +x qemu-src/build/qemu-system-arm
-
-      - name: Download firmware
-        run: |
-          cd qemu-boot
-          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.hi3516ev300-nor-lite.tgz" \
-              -o openipc.hi3516ev300-nor-lite.tgz
-          tar xzf openipc.hi3516ev300-nor-lite.tgz
-
-      - name: Download U-Boot
-        run: |
-          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/u-boot-hi3516ev300-universal.bin" \
-              -o /tmp/u-boot-ev300.bin
-
-      - name: Build flash image
-        run: |
-          FLASH=/tmp/flash_ev300.bin
-          dd if=/dev/zero of=$FLASH bs=1M count=8 2>/dev/null
-          dd if=/tmp/u-boot-ev300.bin of=$FLASH bs=1 conv=notrunc 2>/dev/null
-          dd if=qemu-boot/uImage.hi3516ev300 of=$FLASH bs=1 seek=$((0x50000)) conv=notrunc 2>/dev/null
-          dd if=qemu-boot/rootfs.squashfs.hi3516ev300 of=$FLASH bs=1 seek=$((0x350000)) conv=notrunc 2>/dev/null
-
-      - name: "Test: EV300 U-Boot ping"
-        timeout-minutes: 2
-        run: |
-          QEMU=./qemu-src/build/qemu-system-arm
-          {
-            sleep 1; printf '\x03\n\x03\n'; sleep 3
-            echo "setenv ipaddr 10.0.2.15"
-            echo "setenv serverip 10.0.2.2"
-            echo "setenv gatewayip 10.0.2.2"
-            echo "setenv netmask 255.255.255.0"
-            sleep 1
-            echo "ping 10.0.2.2"
-            sleep 8
-          } | timeout 30 $QEMU -M hi3516ev300 -m 128M \
-                -global hisi-fmc.flash-file=/tmp/flash_ev300.bin \
-                -nographic -serial mon:stdio -nic user \
-                2>&1 | tee /tmp/uboot-ev300-net.txt
-
-          echo ""
-          echo "=== EV300 U-Boot ping result ==="
-          if grep -q "is alive" /tmp/uboot-ev300-net.txt; then
-            echo "PASS: EV300 U-Boot ping succeeded"
-          else
-            echo "FAIL: EV300 U-Boot ping failed"
-            exit 1
-          fi
-
-      - name: "Test: EV300 Linux ping"
-        timeout-minutes: 3
-        run: |
-          QEMU=./qemu-src/build/qemu-system-arm
-          {
-            sleep 60
-            echo "root"
-            sleep 2
-            echo "12345"
-            sleep 3
-            echo 'killall udhcpc 2>/dev/null; ip addr flush dev eth0; ip addr add 10.0.2.15/24 dev eth0; ip link set eth0 up; ip route add default via 10.0.2.2; ping -c 3 10.0.2.2'
-            sleep 10
-          } | timeout 90 $QEMU -M hi3516ev300 -m 128M \
-                -kernel qemu-boot/uImage.hi3516ev300 \
-                -initrd qemu-boot/rootfs.squashfs.hi3516ev300 \
-                -nographic -serial mon:stdio \
-                -append "console=ttyAMA0,115200 earlyprintk mem=96M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data) mmz_allocator=hisi mmz=anonymous,0,0x46000000,32M" \
-                -nic user \
-                2>&1 | tee /tmp/linux-ev300-net.txt
-
-          echo ""
-          echo "=== EV300 Linux ping result ==="
-          if grep -q "0% packet loss" /tmp/linux-ev300-net.txt; then
-            echo "PASS: EV300 Linux ping succeeded"
-          else
-            echo "FAIL: EV300 Linux ping failed"
-            cat /tmp/linux-ev300-net.txt | grep -E "PING|bytes from|packet loss|sendto"
-            exit 1
-          fi
-
-      - name: Upload network test logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: net-test-logs-ev300
-          path: /tmp/*-ev300-net.txt
-          retention-days: 7
-
-  net-test-cv300:
-    name: CV300 network (U-Boot + Linux ping)
-    needs: build
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
-
-      - name: Download QEMU binary
-        uses: actions/download-artifact@v4
-        with:
-          name: qemu-arm
-          path: qemu-src/build/
-
-      - name: Make QEMU executable
-        run: chmod +x qemu-src/build/qemu-system-arm
-
-      - name: Download firmware
-        run: |
-          cd qemu-boot
-          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.hi3516cv300-nor-lite.tgz" \
-              -o openipc.hi3516cv300-nor-lite.tgz
-          tar xzf openipc.hi3516cv300-nor-lite.tgz
-
-      - name: Download U-Boot
-        run: |
-          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/u-boot-hi3516cv300-universal.bin" \
-              -o /tmp/u-boot-cv300.bin
-
-      - name: Build flash image
-        run: |
-          FLASH=/tmp/flash_cv300.bin
-          dd if=/dev/zero of=$FLASH bs=1M count=8 2>/dev/null
-          dd if=/tmp/u-boot-cv300.bin of=$FLASH bs=1 conv=notrunc 2>/dev/null
-          dd if=qemu-boot/uImage.hi3516cv300 of=$FLASH bs=1 seek=$((0x50000)) conv=notrunc 2>/dev/null
-          dd if=qemu-boot/rootfs.squashfs.hi3516cv300 of=$FLASH bs=1 seek=$((0x350000)) conv=notrunc 2>/dev/null
-
-      - name: "Test: CV300 U-Boot ping"
-        timeout-minutes: 2
-        run: |
-          QEMU=./qemu-src/build/qemu-system-arm
-          {
-            sleep 1; printf '\x03\n\x03\n'; sleep 3
-            echo "setenv ipaddr 10.0.2.15"
-            echo "setenv serverip 10.0.2.2"
-            echo "setenv gatewayip 10.0.2.2"
-            echo "setenv netmask 255.255.255.0"
-            sleep 1
-            echo "ping 10.0.2.2"
-            sleep 15
-          } | timeout 30 $QEMU -M hi3516cv300 -m 256M \
-                -global hisi-fmc.flash-file=/tmp/flash_cv300.bin \
-                -nographic -serial mon:stdio -nic user \
-                2>&1 | tee /tmp/uboot-cv300-net.txt
-
-          echo ""
-          echo "=== CV300 U-Boot ping result ==="
-          if grep -q "is alive" /tmp/uboot-cv300-net.txt; then
-            echo "PASS: CV300 U-Boot ping succeeded"
-          else
-            echo "FAIL: CV300 U-Boot ping failed"
-            exit 1
-          fi
-
-      - name: "Test: CV300 Linux ping"
-        timeout-minutes: 3
-        run: |
-          QEMU=./qemu-src/build/qemu-system-arm
-          {
-            sleep 30
-            echo "root"
-            sleep 2
-            echo "12345"
-            sleep 3
-            echo "ping -c 3 10.0.2.2"
-            sleep 10
-          } | timeout 60 $QEMU -M hi3516cv300 -m 128M \
-                -kernel qemu-boot/uImage.hi3516cv300 \
-                -initrd qemu-boot/rootfs.squashfs.hi3516cv300 \
-                -nographic -serial mon:stdio \
-                -append "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)" \
-                -nic user \
-                2>&1 | tee /tmp/linux-cv300-net.txt
-
-          echo ""
-          echo "=== CV300 Linux ping result ==="
-          if grep -q "0% packet loss" /tmp/linux-cv300-net.txt; then
-            echo "PASS: CV300 Linux ping succeeded"
-          else
-            echo "FAIL: CV300 Linux ping failed"
-            strings /tmp/linux-cv300-net.txt | grep -E "PING|bytes from|packet loss|sendto"
-            exit 1
-          fi
-
-      - name: Upload network test logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: net-test-logs-cv300
-          path: /tmp/*-cv300-net.txt
-          retention-days: 7
-
   ive-test:
     name: IVE register tests (19 ops)
     needs: build
@@ -341,62 +129,49 @@ jobs:
             soc: hi3516cv100
             machine: hi3516cv100
             mem: 64M
-            kernel: uImage.hi3516cv100
-            rootfs: rootfs.squashfs.hi3516cv100
             append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
 
           - name: hi3516cv200
             soc: hi3516cv200
             machine: hi3516cv200
             mem: 64M
-            kernel: uImage.hi3516cv200
-            rootfs: rootfs.squashfs.hi3516cv200
             append: "console=ttyAMA0,115200 mem=32M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
 
           - name: hi3516av100
             soc: hi3516av100
             machine: hi3516av100
             mem: 256M
-            kernel: uImage.hi3516av100
-            rootfs: rootfs.squashfs.hi3516av100
             append: "console=ttyAMA0,115200 earlyprintk mem=256M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-
 
           - name: hi3516cv300
             soc: hi3516cv300
             machine: hi3516cv300
             mem: 128M
-            kernel: uImage.hi3516cv300
-            rootfs: rootfs.squashfs.hi3516cv300
             append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-
+            ping_linux: true
+            uboot_bin: u-boot-hi3516cv300-universal.bin
+            flash_mem: 256M
 
           - name: hi3516cv500
             soc: hi3516cv500
             machine: hi3516cv500
             mem: 128M
-            kernel: uImage.hi3516cv500
-            rootfs: rootfs.squashfs.hi3516cv500
             append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-
 
           - name: hi3519v101
             soc: hi3519v101
             machine: hi3519v101
             mem: 256M
-            kernel: uImage.hi3519v101
-            rootfs: rootfs.squashfs.hi3519v101
             append: "console=ttyAMA0,115200 earlyprintk mem=256M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-
 
           - name: hi3516ev300
             soc: hi3516ev300
             machine: hi3516ev300
             mem: 128M
-            kernel: uImage.hi3516ev300
-            rootfs: rootfs.squashfs.hi3516ev300
             append: "console=ttyAMA0,115200 earlyprintk mem=96M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data) mmz_allocator=hisi mmz=anonymous,0,0x46000000,32M"
-
+            ping_linux: true
+            uboot_bin: u-boot-hi3516ev300-universal.bin
+            flash_mem: 128M
 
           # hi3516cv610 (V5) excluded: no OpenIPC firmware release yet
 
@@ -426,15 +201,17 @@ jobs:
               -o "openipc.${{ matrix.soc }}-nor-lite.tgz"
           tar xzf "openipc.${{ matrix.soc }}-nor-lite.tgz"
 
-      - name: Boot test
+      - name: "OpenIPC kernel + rootfs boot"
         timeout-minutes: 6
         run: |
-          timeout 300 ./qemu-src/build/qemu-system-arm \
+          QEMU=./qemu-src/build/qemu-system-arm
+          timeout 300 $QEMU \
             -M ${{ matrix.machine }} -m ${{ matrix.mem }} \
-            -kernel "qemu-boot/${{ matrix.kernel }}" \
-            -initrd "qemu-boot/${{ matrix.rootfs }}" \
+            -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
+            -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
             -nographic -serial mon:stdio \
             -append '${{ matrix.append }}' \
+            -nic user \
             -d unimp,guest_errors -D qemu-boot/qemu.log \
             2>&1 | tee boot-output.txt &
           QEMU_PID=$!
@@ -456,6 +233,119 @@ jobs:
           kill $QEMU_PID 2>/dev/null || true
           exit 1
 
+      - name: "Linux ping test"
+        if: matrix.ping_linux
+        timeout-minutes: 4
+        run: |
+          QEMU=./qemu-src/build/qemu-system-arm
+
+          # Use QEMU's -serial pipe: for reliable interactive serial I/O
+          mkfifo /tmp/ser.in /tmp/ser.out
+          $QEMU \
+            -M ${{ matrix.machine }} -m ${{ matrix.mem }} \
+            -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
+            -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
+            -nographic -serial pipe:/tmp/ser \
+            -append '${{ matrix.append }}' \
+            -nic user \
+            -monitor none &
+          QEMU_PID=$!
+
+          # Drain serial output to file in background
+          cat /tmp/ser.out > /tmp/linux-ping.txt &
+
+          # Wait for login prompt (up to 120s)
+          for i in $(seq 1 120); do
+            if grep -q "login:" /tmp/linux-ping.txt 2>/dev/null; then break; fi
+            sleep 1
+          done
+
+          # Login and ping
+          echo "root" > /tmp/ser.in
+          sleep 2
+          echo "12345" > /tmp/ser.in
+          sleep 3
+          echo "ping -c 3 10.0.2.2" > /tmp/ser.in
+
+          # Wait for ping result (up to 30s)
+          for i in $(seq 1 30); do
+            if grep -q "packet loss" /tmp/linux-ping.txt 2>/dev/null; then break; fi
+            sleep 1
+          done
+
+          kill $QEMU_PID 2>/dev/null || true
+          wait 2>/dev/null || true
+          rm -f /tmp/ser.in /tmp/ser.out
+
+          echo ""
+          if grep -q "0% packet loss" /tmp/linux-ping.txt; then
+            echo "=== PASS: Linux ping ==="
+          else
+            echo "=== FAIL: Linux ping ==="
+            strings /tmp/linux-ping.txt | grep -E "PING|bytes from|packet loss|sendto"
+            exit 1
+          fi
+
+      - name: "U-Boot ping test"
+        if: matrix.uboot_bin
+        timeout-minutes: 2
+        run: |
+          QEMU=./qemu-src/build/qemu-system-arm
+
+          # Download U-Boot and build flash image
+          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/${{ matrix.uboot_bin }}" \
+              -o /tmp/u-boot.bin
+          FLASH=/tmp/flash.bin
+          dd if=/dev/zero of=$FLASH bs=1M count=8 2>/dev/null
+          dd if=/tmp/u-boot.bin of=$FLASH bs=1 conv=notrunc 2>/dev/null
+          dd if=qemu-boot/uImage.${{ matrix.soc }} of=$FLASH bs=1 seek=$((0x50000)) conv=notrunc 2>/dev/null
+          dd if=qemu-boot/rootfs.squashfs.${{ matrix.soc }} of=$FLASH bs=1 seek=$((0x350000)) conv=notrunc 2>/dev/null
+
+          mkfifo /tmp/ub.in /tmp/ub.out
+          $QEMU \
+            -M ${{ matrix.machine }} -m ${{ matrix.flash_mem || matrix.mem }} \
+            -global hisi-fmc.flash-file=$FLASH \
+            -nographic -serial pipe:/tmp/ub -nic user \
+            -monitor none &
+          QEMU_PID=$!
+          cat /tmp/ub.out > /tmp/uboot-ping.txt &
+
+          # Interrupt autoboot (spam Ctrl-C until we see the prompt)
+          for i in $(seq 1 20); do
+            printf '\x03\n' > /tmp/ub.in
+            if grep -q "OpenIPC #\|hisilicon #\|=> " /tmp/uboot-ping.txt 2>/dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          echo "setenv ipaddr 10.0.2.15" > /tmp/ub.in
+          echo "setenv serverip 10.0.2.2" > /tmp/ub.in
+          echo "setenv gatewayip 10.0.2.2" > /tmp/ub.in
+          echo "setenv netmask 255.255.255.0" > /tmp/ub.in
+          sleep 1
+          echo "ping 10.0.2.2" > /tmp/ub.in
+
+          # Wait for ping result (up to 30s)
+          for i in $(seq 1 30); do
+            if grep -qE "alive|ARP Retry" /tmp/uboot-ping.txt 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          kill $QEMU_PID 2>/dev/null || true
+          wait 2>/dev/null || true
+          rm -f /tmp/ub.in /tmp/ub.out
+
+          echo ""
+          if grep -q "is alive" /tmp/uboot-ping.txt; then
+            echo "=== PASS: U-Boot ping ==="
+          else
+            echo "=== FAIL: U-Boot ping ==="
+            exit 1
+          fi
+
       - name: Upload boot log
         if: always()
         uses: actions/upload-artifact@v4
@@ -464,4 +354,5 @@ jobs:
           path: |
             boot-output.txt
             qemu-boot/qemu.log
+            /tmp/*-ping.txt
           retention-days: 7
