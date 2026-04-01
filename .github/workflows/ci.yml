@@ -62,7 +62,7 @@ jobs:
       - name: Install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
+          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 dnsmasq-base
 
       - name: Download QEMU binary
         uses: actions/download-artifact@v4
@@ -183,7 +183,7 @@ jobs:
       - name: Install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
+          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 dnsmasq-base
 
       - name: Download QEMU binary
         uses: actions/download-artifact@v4
@@ -193,6 +193,25 @@ jobs:
 
       - name: Make QEMU executable
         run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Setup TAP network
+        if: matrix.ping_linux || matrix.uboot_bin
+        run: |
+          sudo ip tuntap add dev tap0 mode tap user $(whoami)
+          sudo ip link add qbr0 type bridge
+          sudo ip link set qbr0 type bridge stp_state 0
+          sudo ip link set tap0 master qbr0
+          sudo ip link set qbr0 up
+          sudo ip link set tap0 up
+          sudo ip addr add 10.0.10.1/24 dev qbr0
+          sudo iptables -I INPUT -i qbr0 -j ACCEPT
+          # dnsmasq: DHCP + DNS forwarder on the bridge
+          sudo dnsmasq --interface=qbr0 --bind-interfaces --listen-address=10.0.10.1 \
+            --dhcp-range=10.0.10.50,10.0.10.99,255.255.255.0,1h \
+            --dhcp-option=3,10.0.10.1 --dhcp-option=6,10.0.10.1 \
+            --no-resolv --server=8.8.8.8 \
+            --no-daemon --log-dhcp --pid-file=/tmp/dnsmasq.pid &
+          sleep 1
 
       - name: Download firmware
         run: |
@@ -211,7 +230,6 @@ jobs:
             -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
             -nographic -serial mon:stdio \
             -append '${{ matrix.append }}' \
-            -nic user \
             -d unimp,guest_errors -D qemu-boot/qemu.log \
             2>&1 | tee boot-output.txt &
           QEMU_PID=$!
@@ -247,7 +265,7 @@ jobs:
             -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
             -nographic -serial pipe:/tmp/ser \
             -append '${{ matrix.append }}' \
-            -nic user \
+            -nic tap,ifname=tap0,script=no,downscript=no \
             -monitor none &
           QEMU_PID=$!
 
@@ -265,7 +283,7 @@ jobs:
           sleep 2
           echo "12345" > /tmp/ser.in
           sleep 3
-          echo "ping -c 3 10.0.2.2" > /tmp/ser.in
+          echo "ping -c 3 10.0.10.1" > /tmp/ser.in
 
           # Wait for ping result (up to 30s)
           for i in $(seq 1 30); do
@@ -305,7 +323,7 @@ jobs:
           $QEMU \
             -M ${{ matrix.machine }} -m ${{ matrix.flash_mem || matrix.mem }} \
             -global hisi-fmc.flash-file=$FLASH \
-            -nographic -serial pipe:/tmp/ub -nic user \
+            -nographic -serial pipe:/tmp/ub -nic tap,ifname=tap0,script=no,downscript=no \
             -monitor none &
           QEMU_PID=$!
           cat /tmp/ub.out > /tmp/uboot-ping.txt &
@@ -319,12 +337,12 @@ jobs:
             sleep 0.5
           done
 
-          echo "setenv ipaddr 10.0.2.15" > /tmp/ub.in
-          echo "setenv serverip 10.0.2.2" > /tmp/ub.in
-          echo "setenv gatewayip 10.0.2.2" > /tmp/ub.in
+          echo "setenv ipaddr 10.0.10.15" > /tmp/ub.in
+          echo "setenv serverip 10.0.10.1" > /tmp/ub.in
+          echo "setenv gatewayip 10.0.10.1" > /tmp/ub.in
           echo "setenv netmask 255.255.255.0" > /tmp/ub.in
           sleep 1
-          echo "ping 10.0.2.2" > /tmp/ub.in
+          echo "ping 10.0.10.1" > /tmp/ub.in
 
           # Wait for ping result (up to 30s)
           for i in $(seq 1 30); do
@@ -345,6 +363,14 @@ jobs:
             echo "=== FAIL: U-Boot ping ==="
             exit 1
           fi
+
+      - name: Teardown TAP network
+        if: always() && (matrix.ping_linux || matrix.uboot_bin)
+        run: |
+          sudo kill $(cat /tmp/dnsmasq.pid) 2>/dev/null || true
+          sudo iptables -D INPUT -i qbr0 -j ACCEPT 2>/dev/null || true
+          sudo ip link del qbr0 2>/dev/null || true
+          sudo ip tuntap del dev tap0 mode tap 2>/dev/null || true
 
       - name: Upload boot log
         if: always()
