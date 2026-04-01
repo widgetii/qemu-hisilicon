@@ -1648,13 +1648,16 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
     };
 
     MemoryRegion *bootrom = g_new(MemoryRegion, 1);
-    memory_region_init_ram(bootrom, NULL, "hisilicon.bootrom",
+    memory_region_init_rom(bootrom, NULL, "hisilicon.bootrom",
                            0x1000, &error_fatal);
     memory_region_add_subregion(sysmem, 0, bootrom);
-    /* Write boot ROM code; using RAM (not ROM) so U-Boot can later
-     * install its own exception vectors at address 0. */
-    address_space_write(&address_space_memory, 0,
-                        MEMTXATTRS_UNSPECIFIED, rom, sizeof(rom));
+    /* ROM is read-only after initial write, matching real hardware where
+     * address 0 is internal boot ROM.  U-Boot on Cortex-A7 uses VBAR for
+     * exception vectors (not address 0).  Firmware with NULL pointer bugs
+     * that write to address 0 will have writes silently dropped — same as
+     * real silicon where the boot ROM is not writable. */
+    address_space_write_rom(&address_space_memory, 0,
+                            MEMTXATTRS_UNSPECIFIED, rom, sizeof(rom));
 }
 
 static void hisilicon_common_init(MachineState *machine,
