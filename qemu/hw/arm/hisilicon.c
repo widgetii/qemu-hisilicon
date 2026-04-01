@@ -1624,12 +1624,35 @@ static inline uint32_t arm_movt(int rd, uint16_t imm16)
  * of the boot partition (256 KB) from flash window to DDR base.
  */
 static void hisilicon_write_bootrom(MemoryRegion *sysmem,
-                                     const HisiSoCConfig *c)
+                                     const HisiSoCConfig *c,
+                                     MachineState *machine)
 {
     hwaddr flash_src = c->fmc_mem_base;         /* e.g. 0x14000000 */
     hwaddr ram_dst   = c->ram_base;             /* e.g. 0x40000000 */
     uint32_t copy_sz = 0x40000;                 /* 256 KB boot partition */
     bool armv7 = c->use_gic;  /* ARM926 SoCs use VIC, Cortex-A7+ use GIC */
+
+    /*
+     * Detect U-Boot TEXT_BASE from the exception vector table in flash.
+     * If vector[1] (undefined instruction handler) is "ldr pc, [pc, #off]",
+     * the literal it loads is an absolute address revealing where U-Boot
+     * expects to be loaded.  Position-independent U-Boots (e.g. EV300) use
+     * infinite loops instead, in which case we fall back to ram_base.
+     */
+    uint32_t vec1_insn = address_space_ldl(&address_space_memory,
+                            flash_src + 4, MEMTXATTRS_UNSPECIFIED, NULL);
+    if ((vec1_insn & 0xFFFFF000) == 0xe59FF000) {
+        /* ldr pc, [pc, #imm12] */
+        uint32_t pool_off = vec1_insn & 0xFFF;
+        uint32_t abs_handler = address_space_ldl(&address_space_memory,
+                                flash_src + 4 + 8 + pool_off,
+                                MEMTXATTRS_UNSPECIFIED, NULL);
+        /* TEXT_BASE = handler rounded down to 64K boundary */
+        hwaddr text_base = abs_handler & ~0xFFFF;
+        if (text_base >= c->ram_base) {
+            ram_dst = text_base;
+        }
+    }
 
     /*
      * Build a small boot ROM that copies U-Boot from the SPI NOR flash
@@ -1774,7 +1797,7 @@ static void hisilicon_common_init(MachineState *machine,
      * (for normal -kernel boot where NULL function pointers must be safe).
      */
     if (flash_boot) {
-        hisilicon_write_bootrom(sysmem, c);
+        hisilicon_write_bootrom(sysmem, c, machine);
     } else {
         MemoryRegion *trap = g_new(MemoryRegion, 1);
         memory_region_init_rom(trap, NULL, "hisilicon.trapnull",

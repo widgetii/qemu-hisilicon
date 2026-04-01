@@ -45,6 +45,9 @@
 #include "net/net.h"
 #include "net/eth.h"
 #include "system/dma.h"
+#include "qemu/main-loop.h"
+#include "qemu/timer.h"
+#include "hw/core/cpu.h"
 
 #define TYPE_HISI_FEMAC "hisi-femac"
 OBJECT_DECLARE_SIMPLE_TYPE(HisiFemacState, HISI_FEMAC)
@@ -166,12 +169,47 @@ struct HisiFemacState {
     uint32_t endian_mod;
     uint32_t tx_ipgctrl;
     uint32_t mac_filter[16];
+
+    /* Periodic RX poll timer for polled (non-IRQ) drivers like U-Boot */
+    QEMUTimer *rx_poll_timer;
 };
 
 static void hisi_femac_update_irq(HisiFemacState *s)
 {
     bool level = (s->irq_raw & s->irq_ena) != 0;
     qemu_set_irq(s->irq, level);
+}
+
+/*
+ * Periodic RX poll timer — ensures the main loop processes network
+ * backends (SLIRP, TAP) even when the vCPU is busy-polling MMIO
+ * registers.  This is needed for ARM926 SoCs where U-Boot's udelay
+ * doesn't trigger an event loop iteration.  The timer auto-disables
+ * once the RX ring is empty (no pending receive buffers).
+ */
+#define FEMAC_RX_POLL_NS  (100000)  /* 100 us */
+
+static void hisi_femac_rx_poll(void *opaque)
+{
+    HisiFemacState *s = opaque;
+
+    /* Deliver any packets queued by the network backend */
+    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+
+    if (s->rx_ring_count > 0) {
+        timer_mod(s->rx_poll_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + FEMAC_RX_POLL_NS);
+        /*
+         * Force the vCPU out of cpu_exec() so the main loop can poll
+         * SLIRP/TAP sockets.  Without this, ARM926 SoCs (no arch_timer)
+         * never yield and network replies are never received.
+         */
+        CPUState *cpu = first_cpu;
+        if (cpu) {
+            cpu->exit_request = 1;
+            qemu_cpu_kick(cpu);
+        }
+    }
 }
 
 /* ── MDIO PHY stub ─────────────────────────────────────────────────── */
@@ -345,6 +383,10 @@ static uint64_t hisi_femac_read(void *opaque, hwaddr offset, unsigned size)
             return des;
         }
         return 0;
+    case REG_EQFRM_LEN:
+        /* U-Boot reads this register (TX frame length / status).
+         * Return 0 to indicate TX queue is empty (complete). */
+        return 0;
     case REG_ADDRQ_STAT:
         /* TX_CNT (bits 5:0) = 0 (instant completion),
          * BIT_TX_READY (bit 24) always set,
@@ -390,6 +432,15 @@ static uint64_t hisi_femac_read(void *opaque, hwaddr offset, unsigned size)
     case REG_GLB_IRQ_ENA:
         return s->irq_ena;
     case REG_GLB_IRQ_RAW:
+        /*
+         * When the guest polls for RX_RDY and it's not set, kick the
+         * vCPU to force cpu_exec() to return. This lets the main loop
+         * run SLIRP/TAP and deliver pending network replies.
+         * Essential for ARM926 SoCs without arch_timer.
+         */
+        if (!(s->irq_raw & IRQ_RX_RDY) && s->rx_ring_count > 0) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
         return s->irq_raw;
     default:
         if (offset >= REG_MAC_FILTER_BASE &&
@@ -436,6 +487,12 @@ static void hisi_femac_write(void *opaque, hwaddr offset, uint64_t val,
             s->rx_ring_count++;
         }
         qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        /* Arm RX poll timer for polled drivers (U-Boot on ARM926) */
+        if (s->rx_ring_count > 0 &&
+            !timer_pending(s->rx_poll_timer)) {
+            timer_mod(s->rx_poll_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + FEMAC_RX_POLL_NS);
+        }
         break;
     case REG_EQ_ADDR:
         s->eq_addr = val;
@@ -547,6 +604,9 @@ static void hisi_femac_realize(DeviceState *dev, Error **errp)
                            object_get_typename(OBJECT(dev)),
                            dev->id, &dev->mem_reentrancy_guard, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
+
+    s->rx_poll_timer = timer_new_ns(QEMU_CLOCK_REALTIME,
+                                     hisi_femac_rx_poll, s);
 }
 
 static void hisi_femac_reset(DeviceState *dev)
