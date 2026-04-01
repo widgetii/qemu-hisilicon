@@ -716,6 +716,20 @@ static const HisiSoCConfig hi3516ev300_soc = {
 
     .gzip_base          = 0x11310000,
 
+    /*
+     * CRG register defaults — mimic what U-Boot sets before booting Linux.
+     * Register map from drivers/clk/hisilicon/clk-hi3516ev300.c.
+     */
+    .num_crg_defaults   = 4,
+    .crg_defaults       = {
+        { 0x144, (1 << 1) },            /* FMC clock enable */
+        { 0x16c, (1 << 1) },            /* ETH clock enable (resets deasserted=0) */
+        { 0x1b8, (1 << 0) | (1 << 1) | (1 << 2)
+               | (1 << 11) | (1 << 12) | (1 << 13) },
+                                         /* UART0/1/2 + I2C0/1/2 clock enable */
+        { 0x1bc, (1 << 12) | (1 << 13) },/* SPI0/1 clock enable */
+    },
+
     .num_regbanks       = 1,
     .regbanks           = {
         { "hisi-ive",    0x11320000, 0x10000 },
@@ -1651,6 +1665,11 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
     memory_region_init_rom(bootrom, NULL, "hisilicon.bootrom",
                            0x1000, &error_fatal);
     memory_region_add_subregion(sysmem, 0, bootrom);
+    /* ROM is read-only after initial write, matching real hardware where
+     * address 0 is internal boot ROM.  U-Boot on Cortex-A7 uses VBAR for
+     * exception vectors (not address 0).  Firmware with NULL pointer bugs
+     * that write to address 0 will have writes silently dropped — same as
+     * real silicon where the boot ROM is not writable. */
     address_space_write_rom(&address_space_memory, 0,
                             MEMTXATTRS_UNSPECIFIED, rom, sizeof(rom));
 }

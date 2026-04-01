@@ -24,10 +24,19 @@ fi
 
 shift 2>/dev/null  # consume $1 so "$@" passes only extra args
 
+TAP="${TAP:-tap0}"
+if ip link show "$TAP" &>/dev/null 2>&1; then
+    NIC_ARGS="-nic tap,ifname=$TAP,script=no,downscript=no"
+    echo "Using bridged TAP networking ($TAP)"
+else
+    NIC_ARGS="-nic user"
+    echo "TAP not available; using SLIRP user-mode networking"
+fi
+
 exec "$QEMU" -M hi3516ev300 -m 128M \
     -global hisi-fmc.flash-file="$FLASH_FILE" \
     -nographic -serial mon:stdio \
-    -nic user \
+    $NIC_ARGS \
     -d unimp,guest_errors \
     -D "$SCRIPT_DIR/qemu-ev300-flash.log" \
     "$@" 2>&1 | tee /tmp/ev300_serial.log

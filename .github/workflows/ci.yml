@@ -17,7 +17,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential ninja-build meson pkg-config \
-            libglib2.0-dev libpixman-1-dev libfdt-dev zlib1g-dev \
+            libglib2.0-dev libpixman-1-dev libfdt-dev zlib1g-dev libslirp-dev \
             python3 python3-venv git gcc-arm-linux-gnueabi libc6-dev-armel-cross
 
       - name: Build QEMU
@@ -52,6 +52,112 @@ jobs:
           path: qemu-boot/test-ive.cpio
           retention-days: 1
 
+  net-test:
+    name: EV300 network (U-Boot + Linux ping)
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
+
+      - name: Download QEMU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/
+
+      - name: Make QEMU executable
+        run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Download firmware
+        run: |
+          cd qemu-boot
+          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.hi3516ev300-nor-lite.tgz" \
+              -o openipc.hi3516ev300-nor-lite.tgz
+          tar xzf openipc.hi3516ev300-nor-lite.tgz
+
+      - name: Download U-Boot
+        run: |
+          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/u-boot-hi3516ev300-universal.bin" \
+              -o /tmp/u-boot-ev300.bin
+
+      - name: Build flash image
+        run: |
+          FLASH=/tmp/flash_ev300.bin
+          dd if=/dev/zero of=$FLASH bs=1M count=8 2>/dev/null
+          dd if=/tmp/u-boot-ev300.bin of=$FLASH bs=1 conv=notrunc 2>/dev/null
+          dd if=qemu-boot/uImage.hi3516ev300 of=$FLASH bs=1 seek=$((0x50000)) conv=notrunc 2>/dev/null
+          dd if=qemu-boot/rootfs.squashfs.hi3516ev300 of=$FLASH bs=1 seek=$((0x350000)) conv=notrunc 2>/dev/null
+
+      - name: "Test: U-Boot ping"
+        timeout-minutes: 2
+        run: |
+          QEMU=./qemu-src/build/qemu-system-arm
+          {
+            sleep 1; printf '\x03\n\x03\n'; sleep 3
+            echo "setenv ipaddr 10.0.2.15"
+            echo "setenv serverip 10.0.2.2"
+            echo "setenv gatewayip 10.0.2.2"
+            echo "setenv netmask 255.255.255.0"
+            sleep 1
+            echo "ping 10.0.2.2"
+            sleep 8
+          } | timeout 30 $QEMU -M hi3516ev300 -m 128M \
+                -global hisi-fmc.flash-file=/tmp/flash_ev300.bin \
+                -nographic -serial mon:stdio -nic user \
+                2>&1 | tee /tmp/uboot-net.txt
+
+          echo ""
+          echo "=== U-Boot ping result ==="
+          if grep -q "is alive" /tmp/uboot-net.txt; then
+            echo "PASS: U-Boot ping succeeded"
+          else
+            echo "FAIL: U-Boot ping failed"
+            exit 1
+          fi
+
+      - name: "Test: Linux ping"
+        timeout-minutes: 3
+        run: |
+          QEMU=./qemu-src/build/qemu-system-arm
+          {
+            sleep 60
+            echo "root"
+            sleep 2
+            echo "12345"
+            sleep 3
+            echo 'killall udhcpc 2>/dev/null; ip addr flush dev eth0; ip addr add 10.0.2.15/24 dev eth0; ip link set eth0 up; ip route add default via 10.0.2.2; ping -c 3 10.0.2.2'
+            sleep 10
+          } | timeout 90 $QEMU -M hi3516ev300 -m 128M \
+                -kernel qemu-boot/uImage.hi3516ev300 \
+                -initrd qemu-boot/rootfs.squashfs.hi3516ev300 \
+                -nographic -serial mon:stdio \
+                -append "console=ttyAMA0,115200 earlyprintk mem=96M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data) mmz_allocator=hisi mmz=anonymous,0,0x46000000,32M" \
+                -nic user \
+                2>&1 | tee /tmp/linux-net.txt
+
+          echo ""
+          echo "=== Linux ping result ==="
+          if grep -q "0% packet loss" /tmp/linux-net.txt; then
+            echo "PASS: Linux ping succeeded"
+          else
+            echo "FAIL: Linux ping failed"
+            cat /tmp/linux-net.txt | grep -E "PING|bytes from|packet loss|sendto"
+            exit 1
+          fi
+
+      - name: Upload network test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: net-test-logs
+          path: /tmp/*-net.txt
+          retention-days: 7
+
   ive-test:
     name: IVE register tests (19 ops)
     needs: build
@@ -62,7 +168,7 @@ jobs:
       - name: Install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0
+          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
 
       - name: Download QEMU binary
         uses: actions/download-artifact@v4
@@ -196,7 +302,7 @@ jobs:
       - name: Install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0
+          sudo apt-get install -y --no-install-recommends libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
 
       - name: Download QEMU binary
         uses: actions/download-artifact@v4

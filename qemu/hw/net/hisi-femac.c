@@ -63,7 +63,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiFemacState, HISI_FEMAC)
 #define REG_ADDRQ_STAT          0x036C
 #define REG_RX_COE_CTRL         0x0380
 
-/* MDIO registers */
+/* U-Boot per-port MDIO registers (upstream port) */
+#define REG_U_MDIO_PHYADDR     0x0108
+#define REG_U_MDIO_RO_STAT     0x010C
+#define REG_U_MDIO_ANEG_CTRL   0x0110
+#define REG_U_MDIO_IRQENA      0x0114
+
+/* MAC TX/RX IPG control (U-Boot uses these) */
+#define REG_U_MAC_TX_IPGCTRL   0x0218
+
+/* Linux kernel MDIO registers (separate MDIO base) */
 #define REG_MDIO_RWCTRL         0x1100
 #define REG_MDIO_RO_DATA        0x1104
 
@@ -73,6 +82,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiFemacState, HISI_FEMAC)
 #define REG_GLB_SOFT_RESET      0x1308
 #define REG_GLB_FWCTRL          0x1310
 #define REG_GLB_MACTCTRL        0x1314
+#define REG_GLB_ENDIAN_MOD      0x1318
 #define REG_GLB_IRQ_STAT        0x1330
 #define REG_GLB_IRQ_ENA         0x1334
 #define REG_GLB_IRQ_RAW         0x1338
@@ -128,12 +138,18 @@ struct HisiFemacState {
     uint32_t rx_ring_tail;
     uint32_t rx_ring_count;
 
-    /* RX frame descriptor */
-    uint32_t iqfrm_des;
+    /* RX frame descriptor FIFO (mirrors the DMA buffer ring) */
+    uint32_t iqfrm_des_fifo[RX_RING_SIZE];
+    uint32_t iqfrm_des_head;
+    uint32_t iqfrm_des_tail;
+    uint32_t iqfrm_des_count;
 
     /* MDIO */
     uint32_t mdio_rwctrl;
     uint32_t mdio_ro_data;
+    uint32_t u_mdio_phyaddr;
+    uint32_t u_mdio_aneg_ctrl;
+    uint32_t u_mdio_irqena;
     uint16_t phy_bmcr;
     uint16_t phy_bmsr;
     uint16_t phy_anar;
@@ -147,6 +163,8 @@ struct HisiFemacState {
     uint32_t mactctrl;
     uint32_t irq_ena;
     uint32_t irq_raw;
+    uint32_t endian_mod;
+    uint32_t tx_ipgctrl;
     uint32_t mac_filter[16];
 };
 
@@ -201,7 +219,12 @@ static void hisi_femac_mdio_access(HisiFemacState *s, uint32_t val)
 
     s->mdio_rwctrl = val | MDIO_RW_FINISH;
 
-    if (phy_addr != FEMAC_PHY_ADDR) {
+    /*
+     * Respond to PHY address 0 (U-Boot default) and 1 (Linux DTB default).
+     * Real hardware has one internal PHY; the address depends on the
+     * driver configuration.
+     */
+    if (phy_addr != FEMAC_PHY_ADDR && phy_addr != 0) {
         s->mdio_ro_data = 0xffff;
         return;
     }
@@ -215,9 +238,24 @@ static void hisi_femac_mdio_access(HisiFemacState *s, uint32_t val)
 
 /* ── TX path ───────────────────────────────────────────────────────── */
 
-static void hisi_femac_do_tx(HisiFemacState *s, uint32_t len)
+static void hisi_femac_do_tx(HisiFemacState *s, uint32_t pkt_info)
 {
     uint8_t buf[2048];
+
+    /*
+     * EQFRM_LEN register format (from hisi-femac kernel driver):
+     *   bits [10:0]  = frame length including 4-byte FCS
+     *   bits [15:11] = nr_frags (scatter-gather fragment count)
+     *   bits [19:16] = protocol header length
+     *   bits [23:20] = IP header length
+     *   bit  26      = scatter-gather flag
+     *   bit  27      = TX checksum offload
+     *   bit  28      = UDP flag
+     *   bit  29      = IPv6 flag
+     *   bit  30      = VLAN flag
+     *   bit  31      = TSO flag
+     */
+    uint32_t len = pkt_info & 0x7FF;
 
     /* Driver includes 4-byte FCS in length; strip it */
     if (len <= 4 || len > sizeof(buf) + 4) {
@@ -268,8 +306,10 @@ static ssize_t hisi_femac_receive(NetClientState *nc, const uint8_t *buf,
         return -1;
     }
 
-    /* Set frame descriptor: size + 4 for FCS */
-    s->iqfrm_des = (size + 4) & 0xfff;
+    /* Push frame descriptor into FIFO: size + 4 for FCS */
+    s->iqfrm_des_fifo[s->iqfrm_des_tail] = (size + 4) & 0xfff;
+    s->iqfrm_des_tail = (s->iqfrm_des_tail + 1) % RX_RING_SIZE;
+    s->iqfrm_des_count++;
 
     s->irq_raw |= IRQ_RX_RDY | IRQ_MULTI_RXRDY;
     hisi_femac_update_irq(s);
@@ -298,7 +338,13 @@ static uint64_t hisi_femac_read(void *opaque, hwaddr offset, unsigned size)
     case REG_FC_LEVEL:
         return s->fc_level;
     case REG_IQFRM_DES:
-        return s->iqfrm_des;
+        if (s->iqfrm_des_count > 0) {
+            uint32_t des = s->iqfrm_des_fifo[s->iqfrm_des_head];
+            s->iqfrm_des_head = (s->iqfrm_des_head + 1) % RX_RING_SIZE;
+            s->iqfrm_des_count--;
+            return des;
+        }
+        return 0;
     case REG_ADDRQ_STAT:
         /* TX_CNT (bits 5:0) = 0 (instant completion),
          * BIT_TX_READY (bit 24) always set,
@@ -307,8 +353,20 @@ static uint64_t hisi_femac_read(void *opaque, hwaddr offset, unsigned size)
                ((s->rx_ring_count < RX_RING_SIZE) ? (1 << 25) : 0);
     case REG_RX_COE_CTRL:
         return s->rx_coe_ctrl;
+    case REG_U_MAC_TX_IPGCTRL:
+        return s->tx_ipgctrl;
 
-    /* MDIO */
+    /* U-Boot per-port MDIO config registers */
+    case REG_U_MDIO_PHYADDR:
+        return s->u_mdio_phyaddr;
+    case REG_U_MDIO_RO_STAT:
+        return 0; /* MDIO status: always ready */
+    case REG_U_MDIO_ANEG_CTRL:
+        return s->u_mdio_aneg_ctrl;
+    case REG_U_MDIO_IRQENA:
+        return s->u_mdio_irqena;
+
+    /* Linux kernel MDIO registers */
     case REG_MDIO_RWCTRL:
         return s->mdio_rwctrl;
     case REG_MDIO_RO_DATA:
@@ -325,6 +383,8 @@ static uint64_t hisi_femac_read(void *opaque, hwaddr offset, unsigned size)
         return s->fwctrl;
     case REG_GLB_MACTCTRL:
         return s->mactctrl;
+    case REG_GLB_ENDIAN_MOD:
+        return s->endian_mod;
     case REG_GLB_IRQ_STAT:
         return s->irq_raw & s->irq_ena;
     case REG_GLB_IRQ_ENA:
@@ -386,8 +446,24 @@ static void hisi_femac_write(void *opaque, hwaddr offset, uint64_t val,
     case REG_RX_COE_CTRL:
         s->rx_coe_ctrl = val;
         break;
+    case REG_U_MAC_TX_IPGCTRL:
+        s->tx_ipgctrl = val;
+        break;
 
-    /* MDIO */
+    /* U-Boot per-port MDIO config registers */
+    case REG_U_MDIO_PHYADDR:
+        s->u_mdio_phyaddr = val;
+        break;
+    case REG_U_MDIO_RO_STAT:
+        break; /* read-only */
+    case REG_U_MDIO_ANEG_CTRL:
+        s->u_mdio_aneg_ctrl = val;
+        break;
+    case REG_U_MDIO_IRQENA:
+        s->u_mdio_irqena = val;
+        break;
+
+    /* Linux kernel MDIO registers */
     case REG_MDIO_RWCTRL:
         hisi_femac_mdio_access(s, val);
         break;
@@ -408,6 +484,9 @@ static void hisi_femac_write(void *opaque, hwaddr offset, uint64_t val,
     case REG_GLB_MACTCTRL:
         s->mactctrl = val;
         break;
+    case REG_GLB_ENDIAN_MOD:
+        s->endian_mod = val;
+        break;
     case REG_GLB_IRQ_ENA:
         s->irq_ena = val;
         hisi_femac_update_irq(s);
@@ -415,6 +494,10 @@ static void hisi_femac_write(void *opaque, hwaddr offset, uint64_t val,
     case REG_GLB_IRQ_RAW:
         /* W1C: clear bits written as 1 */
         s->irq_raw &= ~val;
+        /* Re-assert RX_RDY if unprocessed descriptors remain in FIFO */
+        if ((val & IRQ_RX_RDY) && s->iqfrm_des_count > 0) {
+            s->irq_raw |= IRQ_RX_RDY;
+        }
         hisi_femac_update_irq(s);
         break;
     default:
@@ -481,7 +564,9 @@ static void hisi_femac_reset(DeviceState *dev)
     s->rx_ring_head = 0;
     s->rx_ring_tail = 0;
     s->rx_ring_count = 0;
-    s->iqfrm_des = 0;
+    s->iqfrm_des_head = 0;
+    s->iqfrm_des_tail = 0;
+    s->iqfrm_des_count = 0;
     s->mdio_rwctrl = MDIO_RW_FINISH; /* idle = ready */
     s->mdio_ro_data = 0;
     s->hostmac_l32 = 0;
