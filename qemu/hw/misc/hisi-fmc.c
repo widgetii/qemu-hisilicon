@@ -394,6 +394,7 @@ static void hisi_fmc_exec_dma_nor(HisiFmcState *s)
     uint32_t addr = s->addrl;
     uint32_t len = s->dma_len;
     bool is_write = s->op_ctrl & FMC_OP_CTRL_RW_OP;
+    uint64_t dma_addr = ((uint64_t)s->dma_saddrh_d0 << 32) | s->dma_saddr;
 
     if (addr + len > s->flash_size) {
         len = (addr < s->flash_size) ? s->flash_size - addr : 0;
@@ -404,12 +405,12 @@ static void hisi_fmc_exec_dma_nor(HisiFmcState *s)
     }
 
     if (!is_write) {
-        dma_memory_write(&address_space_memory, s->dma_saddr,
+        dma_memory_write(&address_space_memory, dma_addr,
                          &s->flash[addr], len, MEMTXATTRS_UNSPECIFIED);
     } else {
         if (s->sr & SPI_SR_WEL) {
             uint8_t *buf = g_malloc(len);
-            dma_memory_read(&address_space_memory, s->dma_saddr,
+            dma_memory_read(&address_space_memory, dma_addr,
                             buf, len, MEMTXATTRS_UNSPECIFIED);
             for (uint32_t i = 0; i < len; i++) {
                 s->flash[addr + i] &= buf[i];
@@ -424,6 +425,9 @@ static void hisi_fmc_exec_dma_nand(HisiFmcState *s)
 {
     uint32_t block, page, column;
     bool is_write = s->op_ctrl & FMC_OP_CTRL_RW_OP;
+    uint64_t dma_addr = ((uint64_t)s->dma_saddrh_d0 << 32) | s->dma_saddr;
+    uint64_t dma_oob_addr = ((uint64_t)s->dma_saddrh_oob << 32)
+                            | s->dma_saddr_oob;
 
     hisi_fmc_nand_decode_addr(s, &block, &page, &column);
 
@@ -446,13 +450,13 @@ static void hisi_fmc_exec_dma_nand(HisiFmcState *s)
     if (!is_write) {
         /* DMA read: flash → guest memory (page data) */
         if (dma_len > 0) {
-            dma_memory_write(&address_space_memory, s->dma_saddr,
+            dma_memory_write(&address_space_memory, dma_addr,
                              &s->flash[flash_off], dma_len,
                              MEMTXATTRS_UNSPECIFIED);
         }
         /* OOB → guest memory */
         if (s->dma_saddr_oob) {
-            dma_memory_write(&address_space_memory, s->dma_saddr_oob,
+            dma_memory_write(&address_space_memory, dma_oob_addr,
                              &s->nand_oob[oob_off], NAND_OOB_SIZE,
                              MEMTXATTRS_UNSPECIFIED);
         }
@@ -461,7 +465,7 @@ static void hisi_fmc_exec_dma_nand(HisiFmcState *s)
         if (s->sr & SPI_SR_WEL) {
             if (dma_len > 0) {
                 uint8_t *buf = g_malloc(dma_len);
-                dma_memory_read(&address_space_memory, s->dma_saddr,
+                dma_memory_read(&address_space_memory, dma_addr,
                                 buf, dma_len, MEMTXATTRS_UNSPECIFIED);
                 /* NAND program: can only clear bits */
                 for (uint32_t i = 0; i < dma_len; i++) {
@@ -472,7 +476,7 @@ static void hisi_fmc_exec_dma_nand(HisiFmcState *s)
             /* OOB write */
             if (s->dma_saddr_oob) {
                 uint8_t oob_buf[NAND_OOB_SIZE];
-                dma_memory_read(&address_space_memory, s->dma_saddr_oob,
+                dma_memory_read(&address_space_memory, dma_oob_addr,
                                 oob_buf, NAND_OOB_SIZE,
                                 MEMTXATTRS_UNSPECIFIED);
                 for (int i = 0; i < NAND_OOB_SIZE; i++) {

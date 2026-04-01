@@ -216,6 +216,8 @@ static uint64_t hisi_gzip_read(void *opaque, hwaddr offset, unsigned size)
 
     case CRC_CHECK_EN:      return s->crc_en;
 
+    case INT_CLEAR:         return 0;  /* write-only, reads as 0 */
+
     default:
         qemu_log_mask(LOG_UNIMP,
                       "hisi-gzip: read from unknown reg 0x%04x\n",
