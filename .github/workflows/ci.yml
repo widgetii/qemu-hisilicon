@@ -210,6 +210,8 @@ jobs:
           sudo ip link set tap0 up
           sudo ip addr add 10.0.10.1/24 dev qbr0
           sudo iptables -I INPUT -i qbr0 -j ACCEPT
+          # HTTP server for TCP connectivity test (validates TX checksum offload)
+          python3 -m http.server 8080 --bind 10.0.10.1 &
           # dnsmasq: DHCP + DNS forwarder on the bridge
           sudo dnsmasq --interface=qbr0 --bind-interfaces --listen-address=10.0.10.1 \
             --dhcp-range=10.0.10.50,10.0.10.99,255.255.255.0,1h \
@@ -283,16 +285,23 @@ jobs:
             sleep 1
           done
 
-          # Login and ping
+          # Login and run tests
           echo "root" > /tmp/ser.in
           sleep 2
           echo "12345" > /tmp/ser.in
           sleep 3
-          echo "ping -c 3 10.0.10.1" > /tmp/ser.in
 
-          # Wait for ping result (up to 30s)
+          # Test 1: ICMP ping
+          echo "ping -c 3 10.0.10.1" > /tmp/ser.in
           for i in $(seq 1 30); do
             if grep -q "packet loss" /tmp/linux-ping.txt 2>/dev/null; then break; fi
+            sleep 1
+          done
+
+          # Test 2: TCP (curl) — validates TX checksum offload works
+          echo "curl -s -o /dev/null -w '%{http_code}' http://10.0.10.1:8080/; echo CURL_RC=\$?" > /tmp/ser.in
+          for i in $(seq 1 30); do
+            if grep -q "CURL_RC=" /tmp/linux-ping.txt 2>/dev/null; then break; fi
             sleep 1
           done
 
@@ -301,13 +310,22 @@ jobs:
           rm -f /tmp/ser.in /tmp/ser.out
 
           echo ""
+          FAIL=0
           if grep -q "0% packet loss" /tmp/linux-ping.txt; then
             echo "=== PASS: Linux ping ==="
           else
             echo "=== FAIL: Linux ping ==="
             strings /tmp/linux-ping.txt | grep -E "PING|bytes from|packet loss|sendto"
-            exit 1
+            FAIL=1
           fi
+          if grep -q "CURL_RC=0" /tmp/linux-ping.txt; then
+            echo "=== PASS: Linux curl (TCP) ==="
+          else
+            echo "=== FAIL: Linux curl (TCP) ==="
+            strings /tmp/linux-ping.txt | grep -E "CURL_RC|curl"
+            FAIL=1
+          fi
+          [ "$FAIL" = "0" ] || exit 1
 
       - name: "U-Boot ping test"
         if: matrix.uboot_bin
