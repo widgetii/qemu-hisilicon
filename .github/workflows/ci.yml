@@ -130,6 +130,8 @@ jobs:
             machine: hi3516cv100
             mem: 64M
             append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            ping_linux: true
+            # No U-Boot flash test: hisi-sfc350 doesn't support flash-file yet
 
           - name: hi3516cv200
             soc: hi3516cv200
