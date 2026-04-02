@@ -262,70 +262,19 @@ jobs:
         if: matrix.ping_linux
         timeout-minutes: 8
         run: |
-          QEMU=./qemu-src/build/qemu-system-arm
-
-          # Use QEMU's -serial pipe: for reliable interactive serial I/O
-          mkfifo /tmp/ser.in /tmp/ser.out
-          $QEMU \
-            -M ${{ matrix.machine }} -m ${{ matrix.mem }} \
-            -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
-            -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
-            -nographic -serial pipe:/tmp/ser \
-            -append '${{ matrix.append }}' \
-            -nic tap,ifname=tap0,script=no,downscript=no \
-            -monitor none &
-          QEMU_PID=$!
-
-          # Drain serial output to file in background
-          cat /tmp/ser.out > /tmp/linux-ping.txt &
-
-          # Wait for login prompt (up to 240s — CV200 with 32M is slow)
-          for i in $(seq 1 240); do
-            if grep -q "login:" /tmp/linux-ping.txt 2>/dev/null; then break; fi
-            sleep 1
-          done
-
-          # Login and run tests
-          echo "root" > /tmp/ser.in
-          sleep 2
-          echo "12345" > /tmp/ser.in
-          sleep 3
-
-          # Test 1: ICMP ping
-          echo "ping -c 3 10.0.10.1" > /tmp/ser.in
-          for i in $(seq 1 30); do
-            if grep -q "packet loss" /tmp/linux-ping.txt 2>/dev/null; then break; fi
-            sleep 1
-          done
-
-          # Test 2: TCP (curl) — validates TX checksum offload works
-          echo "curl -s -o /dev/null -w '%{http_code}' http://10.0.10.1:8080/; echo CURL_RC=\$?" > /tmp/ser.in
-          for i in $(seq 1 60); do
-            if grep -q "CURL_RC=" /tmp/linux-ping.txt 2>/dev/null; then break; fi
-            sleep 1
-          done
-
-          kill $QEMU_PID 2>/dev/null || true
-          wait 2>/dev/null || true
-          rm -f /tmp/ser.in /tmp/ser.out
-
-          echo ""
-          FAIL=0
-          if grep -q "0% packet loss" /tmp/linux-ping.txt; then
-            echo "=== PASS: Linux ping ==="
-          else
-            echo "=== FAIL: Linux ping ==="
-            strings /tmp/linux-ping.txt | grep -E "PING|bytes from|packet loss|sendto"
-            FAIL=1
-          fi
-          if grep -q "CURL_RC=0" /tmp/linux-ping.txt; then
-            echo "=== PASS: Linux curl (TCP) ==="
-          else
-            echo "=== FAIL: Linux curl (TCP) ==="
-            strings /tmp/linux-ping.txt | grep -E "CURL_RC|curl"
-            FAIL=1
-          fi
-          [ "$FAIL" = "0" ] || exit 1
+          bash qemu-boot/test-linux-network.sh \
+            --soc "${{ matrix.soc }}" \
+            --machine "${{ matrix.machine }}" \
+            --mem "${{ matrix.mem }}" \
+            --append '${{ matrix.append }}' \
+            --qemu ./qemu-src/build/qemu-system-arm \
+            --tap tap0 \
+            --host-ip 10.0.10.1 \
+            --login-timeout 240 \
+            --ping-timeout 45 \
+            --curl-timeout 100 \
+            --curl-max-time 90 \
+            --output-dir "qemu-boot/linux-network-${{ matrix.soc }}"
 
       - name: "U-Boot ping test"
         if: matrix.uboot_bin
@@ -403,5 +352,7 @@ jobs:
           path: |
             boot-output.txt
             qemu-boot/qemu.log
+            qemu-boot/linux-network-${{ matrix.soc }}
             /tmp/*-ping.txt
+            /tmp/linux-network-summary.txt
           retention-days: 7
