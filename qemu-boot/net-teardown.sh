@@ -8,38 +8,38 @@ set -euo pipefail
 
 STATE_FILE="/run/qemu-net/state"
 
-if [ ! -f "$STATE_FILE" ]; then
-    echo "No state file found at $STATE_FILE; nothing to tear down." >&2
-    exit 1
+# Load state (or use defaults)
+if [ -f "$STATE_FILE" ]; then
+    source "$STATE_FILE"
+else
+    BRIDGE="${BRIDGE:-qbr0}"
+    TAP="${TAP:-tap0}"
+    HOST_IF="${HOST_IF:-enp12s0}"
 fi
-
-source "$STATE_FILE"
 
 # Stop dnsmasq
-if [ -f /run/qemu-net/dnsmasq.pid ]; then
-    kill "$(cat /run/qemu-net/dnsmasq.pid)" 2>/dev/null || true
-    rm -f /run/qemu-net/dnsmasq.pid
-fi
 pkill -f "dnsmasq.*${BRIDGE}" 2>/dev/null || true
+rm -f /run/qemu-net/dnsmasq.pid
 
-# Remove iptables rules
-iptables -t nat -D POSTROUTING -s 192.168.0.0/24 -o "$HOST_IF" -j MASQUERADE 2>/dev/null || true
+# Remove iptables rules (ignore errors if already gone)
+iptables -D INPUT -i "$BRIDGE" -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$BRIDGE" -o "$HOST_IF" -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$HOST_IF" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i "$HOST_IF" -o "$BRIDGE" -j ACCEPT 2>/dev/null || true
+iptables -t nat -D POSTROUTING -s 192.168.0.0/24 -o "$HOST_IF" -j MASQUERADE 2>/dev/null || true
 
 # Remove TAP
 if ip link show "$TAP" &>/dev/null; then
-    ip link set "$TAP" down
+    ip link set "$TAP" down 2>/dev/null || true
     ip tuntap del dev "$TAP" mode tap
     echo "Removed $TAP."
 fi
 
 # Remove bridge
 if ip link show "$BRIDGE" &>/dev/null; then
-    ip link set "$BRIDGE" down
+    ip link set "$BRIDGE" down 2>/dev/null || true
     ip link del "$BRIDGE"
     echo "Removed $BRIDGE."
 fi
 
-rm -f "$STATE_FILE"
+rm -rf /run/qemu-net
 echo "Network teardown complete."

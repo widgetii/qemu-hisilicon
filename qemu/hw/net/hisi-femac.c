@@ -278,8 +278,6 @@ static void hisi_femac_mdio_access(HisiFemacState *s, uint32_t val)
 
 static void hisi_femac_do_tx(HisiFemacState *s, uint32_t pkt_info)
 {
-    uint8_t buf[2048];
-
     /*
      * EQFRM_LEN register format (from hisi-femac kernel driver):
      *   bits [10:0]  = frame length including 4-byte FCS
@@ -293,19 +291,78 @@ static void hisi_femac_do_tx(HisiFemacState *s, uint32_t pkt_info)
      *   bit  30      = VLAN flag
      *   bit  31      = TSO flag
      */
+    bool is_sg = (pkt_info >> 26) & 1;
+    uint32_t nr_frags = (pkt_info >> 11) & 0x1f;
     uint32_t len = pkt_info & 0x7FF;
+    uint8_t buf[65536]; /* large enough for assembled SG packet */
+    uint32_t real_len;
 
-    /* Driver includes 4-byte FCS in length; strip it */
-    if (len <= 4 || len > sizeof(buf) + 4) {
-        return;
-    }
-    uint32_t real_len = len - 4;
+    if (is_sg) {
+        /*
+         * Scatter-gather mode: EQ_ADDR points to a tx_desc descriptor:
+         *   Word0: total_len (bits 16:0)
+         *   Word1: ipv6_id
+         *   Word2: linear_addr (DMA address of head data)
+         *   Word3: linear_len (bits 15:0)
+         *   Then per-fragment pairs: { addr(32), size(16)|reserved(16) }
+         */
+        /* 4 header words + 2 words per fragment (max 31 frags) */
+        uint32_t desc[4 + 2 * 31];
+        uint32_t desc_words = 4 + 2 * nr_frags;
+        if (dma_memory_read(&address_space_memory, s->eq_addr,
+                            desc, desc_words * 4,
+                            MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "hisi-femac: TX SG desc read failed at 0x%08x\n",
+                          s->eq_addr);
+            return;
+        }
 
-    if (dma_memory_read(&address_space_memory, s->eq_addr, buf, real_len,
-                        MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "hisi-femac: TX DMA read failed at 0x%08x\n", s->eq_addr);
-        return;
+        /* Read linear (head) data */
+        uint32_t linear_addr = desc[2];
+        uint32_t linear_len = desc[3] & 0xFFFF;
+        uint32_t offset = 0;
+
+        if (linear_len > sizeof(buf)) {
+            return;
+        }
+        if (dma_memory_read(&address_space_memory, linear_addr,
+                            buf, linear_len,
+                            MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            return;
+        }
+        offset = linear_len;
+
+        /* Read each fragment */
+        for (uint32_t i = 0; i < nr_frags; i++) {
+            uint32_t frag_addr = desc[4 + i * 2];
+            uint32_t frag_len = desc[5 + i * 2] & 0xFFFF;
+            if (offset + frag_len > sizeof(buf)) {
+                return;
+            }
+            if (dma_memory_read(&address_space_memory, frag_addr,
+                                buf + offset, frag_len,
+                                MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+                return;
+            }
+            offset += frag_len;
+        }
+        real_len = offset;
+    } else {
+        /* Non-SG: EQ_ADDR points directly to packet data */
+        /* Driver includes 4-byte FCS in length; strip it */
+        if (len <= 4 || len > 2048 + 4) {
+            return;
+        }
+        real_len = len - 4;
+
+        if (dma_memory_read(&address_space_memory, s->eq_addr, buf, real_len,
+                            MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "hisi-femac: TX DMA read failed at 0x%08x\n",
+                          s->eq_addr);
+            return;
+        }
     }
 
     qemu_send_packet(qemu_get_queue(s->nic), buf, real_len);
