@@ -44,6 +44,7 @@
 #include "hw/qdev-properties-system.h"
 #include "net/net.h"
 #include "net/eth.h"
+#include "net/checksum.h"
 #include "system/dma.h"
 #include "qemu/main-loop.h"
 #include "qemu/timer.h"
@@ -363,6 +364,15 @@ static void hisi_femac_do_tx(HisiFemacState *s, uint32_t pkt_info)
                           s->eq_addr);
             return;
         }
+    }
+
+    /*
+     * TX checksum offload: when BIT_FLAG_TXCSUM (bit 27) is set, the
+     * guest kernel left the IP/TCP/UDP checksums for hardware to compute.
+     * Real FEMAC hardware fills them in; we must do the same.
+     */
+    if ((pkt_info >> 27) & 1) {
+        net_checksum_calculate(buf, real_len, CSUM_ALL);
     }
 
     qemu_send_packet(qemu_get_queue(s->nic), buf, real_len);
