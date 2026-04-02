@@ -376,7 +376,14 @@ static void hisi_femac_do_tx(HisiFemacState *s, uint32_t pkt_info)
 static bool hisi_femac_can_receive(NetClientState *nc)
 {
     HisiFemacState *s = qemu_get_nic_opaque(nc);
-    return s->rx_ring_count > 0;
+    /*
+     * Accept packets only when DMA buffers are available AND the
+     * descriptor FIFO isn't full.  If we accept packets when the FIFO
+     * is full, the driver can't process them fast enough (NAPI budget)
+     * and the ring drains permanently — TCP never works because all
+     * buffers get consumed by broadcast traffic during boot.
+     */
+    return s->rx_ring_count > 0 && s->iqfrm_des_count < RX_RING_SIZE;
 }
 
 static ssize_t hisi_femac_receive(NetClientState *nc, const uint8_t *buf,
