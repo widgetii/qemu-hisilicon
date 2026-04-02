@@ -256,7 +256,7 @@ jobs:
 
       - name: "Linux ping test"
         if: matrix.ping_linux
-        timeout-minutes: 4
+        timeout-minutes: 6
         run: |
           QEMU=./qemu-src/build/qemu-system-arm
 
@@ -275,8 +275,8 @@ jobs:
           # Drain serial output to file in background
           cat /tmp/ser.out > /tmp/linux-ping.txt &
 
-          # Wait for login prompt (up to 120s)
-          for i in $(seq 1 120); do
+          # Wait for login prompt (up to 240s — CV200 with 32M is slow)
+          for i in $(seq 1 240); do
             if grep -q "login:" /tmp/linux-ping.txt 2>/dev/null; then break; fi
             sleep 1
           done
