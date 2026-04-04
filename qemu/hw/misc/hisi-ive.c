@@ -140,6 +140,17 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiIveState, HISI_IVE)
 #define IVE_MAX_REGION_NUM  254
 #define CCBLOB_SIZE         (4 + IVE_MAX_REGION_NUM * 12)
 
+/* XNN CNN accelerator registers (shared address space with IVE) */
+#define IVE_XNN_TRIGGER  0x0000      /* write 1 to start XNN task chain */
+#define IVE_XNN_STATUS   0x000C      /* completion status (non-zero = done) */
+#define IVE_XNN_TASK_PTR 0x0010      /* task buffer physical address */
+
+/* XNN task node layer markers (at node byte +11) */
+#define XNN_LAYER_PREPROC  1
+#define XNN_LAYER_FLATTEN  1   /* same as preproc — distinguished by position */
+#define XNN_LAYER_FC       2
+#define XNN_LAYER_UNPACK   4
+
 #define IVE_MMIO_SIZE   0x10000
 #define IVE_NREGS       (IVE_MMIO_SIZE / 4)
 
@@ -1920,6 +1931,138 @@ static void ive_op_hog(HisiIveState *s)
                      zeros, sizeof(zeros), MEMTXATTRS_UNSPECIFIED);
 }
 
+/* ── XNN CNN accelerator ──────────────────────────────────────── */
+
+/*
+ * Flatten: copy from planar-stride input to contiguous output.
+ * Node fields: in_addr(+16), out_addr(+20), stride×height at (+32).
+ */
+static void ive_xnn_flatten(uint8_t *node)
+{
+    uint32_t in_addr  = *(uint32_t *)(node + 16);
+    uint32_t out_addr = *(uint32_t *)(node + 20);
+    uint32_t total    = *(uint32_t *)(node + 32); /* stride × height */
+
+    if (!total || total > 1024 * 1024) return;
+
+    uint8_t *buf = g_malloc(total);
+    dma_memory_read(&address_space_memory, in_addr,
+                    buf, total, MEMTXATTRS_UNSPECIFIED);
+    dma_memory_write(&address_space_memory, out_addr,
+                     buf, total, MEMTXATTRS_UNSPECIFIED);
+    g_free(buf);
+}
+
+/*
+ * FC: int8 matrix multiply with int32 bias → s16 output.
+ * Weight blob: 1-byte pad + (out_w × in_w) int8 + (out_w) int32 bias.
+ * Node fields: in(+16), out(+20), weights(+24), weight_size(+28),
+ *   in_w(+48), out_w(+50).
+ */
+static void ive_xnn_fc(uint8_t *node)
+{
+    uint32_t in_addr     = *(uint32_t *)(node + 16);
+    uint32_t out_addr    = *(uint32_t *)(node + 20);
+    uint32_t weight_addr = *(uint32_t *)(node + 24);
+    uint16_t in_w  = *(uint16_t *)(node + 48);
+    uint16_t out_w = *(uint16_t *)(node + 50);
+
+    if (!in_w || !out_w || in_w > 65536 || out_w > 65536) return;
+
+    int8_t *input   = g_malloc(in_w);
+    /* Skip 1-byte padding at weight blob start */
+    int8_t *weights = g_malloc(out_w * in_w);
+    int32_t *bias   = g_malloc(out_w * sizeof(int32_t));
+    int16_t *output = g_malloc0(out_w * sizeof(int16_t));
+
+    dma_memory_read(&address_space_memory, in_addr,
+                    input, in_w, MEMTXATTRS_UNSPECIFIED);
+    dma_memory_read(&address_space_memory, weight_addr + 1,
+                    weights, out_w * in_w, MEMTXATTRS_UNSPECIFIED);
+    dma_memory_read(&address_space_memory, weight_addr + 1 + out_w * in_w,
+                    bias, out_w * sizeof(int32_t), MEMTXATTRS_UNSPECIFIED);
+
+    for (int j = 0; j < out_w; j++) {
+        int32_t acc = bias[j];
+        for (int i = 0; i < in_w; i++)
+            acc += (int32_t)input[i] * (int32_t)weights[j * in_w + i];
+        output[j] = (int16_t)(acc >> 19);
+    }
+
+    dma_memory_write(&address_space_memory, out_addr,
+                     output, out_w * sizeof(int16_t), MEMTXATTRS_UNSPECIFIED);
+    g_free(input); g_free(weights); g_free(bias); g_free(output);
+}
+
+/*
+ * Unpack: copy s16 input to s8 output (truncate high byte).
+ * Node fields: in(+16), out(+20), count from (+116) or dimensions.
+ */
+static void ive_xnn_unpack(uint8_t *node)
+{
+    uint32_t in_addr  = *(uint32_t *)(node + 16);
+    uint32_t out_addr = *(uint32_t *)(node + 20);
+    uint32_t count    = *(uint32_t *)(node + 116); /* total output bytes */
+    uint16_t out_w    = *(uint16_t *)(node + 40);
+    uint16_t out_h    = *(uint16_t *)(node + 42);
+
+    if (!count) count = out_w * out_h;
+    if (!count || count > 1024 * 1024) return;
+
+    /* Read s16 input (count values × 2 bytes) */
+    int16_t *s16buf = g_malloc(count * sizeof(int16_t));
+    int8_t  *s8buf  = g_malloc(count);
+
+    dma_memory_read(&address_space_memory, in_addr,
+                    s16buf, count * sizeof(int16_t), MEMTXATTRS_UNSPECIFIED);
+
+    for (uint32_t i = 0; i < count; i++) {
+        int16_t v = s16buf[i];
+        s8buf[i] = (v > 127) ? 127 : (v < -128) ? -128 : (int8_t)v;
+    }
+
+    dma_memory_write(&address_space_memory, out_addr,
+                     s8buf, count, MEMTXATTRS_UNSPECIFIED);
+    g_free(s16buf); g_free(s8buf);
+}
+
+/*
+ * Walk the XNN task node chain and execute each layer.
+ * Triggered by writing 1 to register 0x00.
+ */
+static void ive_xnn_fire(HisiIveState *s)
+{
+    uint32_t node_addr = s->regs[IVE_XNN_TASK_PTR / 4];
+
+    while (node_addr) {
+        uint8_t node[128];
+        dma_memory_read(&address_space_memory, node_addr,
+                        node, 128, MEMTXATTRS_UNSPECIFIED);
+
+        uint8_t marker = node[11];
+
+        switch (marker) {
+        case XNN_LAYER_FC:
+            ive_xnn_fc(node);
+            break;
+        case XNN_LAYER_UNPACK:
+            ive_xnn_unpack(node);
+            break;
+        case XNN_LAYER_FLATTEN:
+            /* Flatten and Preproc share marker 1.
+             * Preproc (first node, input/output = 0) is a no-op.
+             * Flatten (has non-zero addresses) copies data. */
+            if (*(uint32_t *)(node + 16) && *(uint32_t *)(node + 20))
+                ive_xnn_flatten(node);
+            break;
+        }
+
+        node_addr = *(uint32_t *)node; /* next-node pointer */
+    }
+
+    s->regs[IVE_XNN_STATUS / 4] |= 0x08; /* bit 3 = done */
+}
+
 /* ── Fire handler ─────────────────────────────────────────────── */
 
 static void ive_fire(HisiIveState *s)
@@ -2010,12 +2153,21 @@ static void hisi_ive_write(void *opaque, hwaddr offset,
     s->regs[offset / 4] = value;
 
     switch (offset) {
-    case IVE_SW_FIRE:
-        if (value & 1) {
-            s->regs[IVE_SW_FIRE / 4] = 0;  /* auto-clear */
+    case IVE_XNN_TRIGGER: /* 0x00 — XNN task chain trigger */
+        if (value & 1)
+            ive_xnn_fire(s);
+        break;
+
+    case IVE_SW_FIRE: /* 0x08 — IVE image op fire / XNN interrupt clear */
+        if (value == 1) {
+            /* IVE image operation fire (vendor writes exactly 1) */
+            s->regs[IVE_SW_FIRE / 4] = 0;
             s->regs[IVE_CMD_DONE / 4] = 0;
             s->regs[IVE_OP_ACTIVE / 4] = 1;
             ive_fire(s);
+        } else {
+            /* XNN interrupt clear (writes 7) */
+            s->regs[IVE_XNN_STATUS / 4] = 0;
         }
         break;
 
