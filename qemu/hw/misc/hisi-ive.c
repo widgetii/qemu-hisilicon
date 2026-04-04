@@ -1967,7 +1967,7 @@ static void ive_xnn_fc(uint8_t *node)
     uint16_t in_w  = *(uint16_t *)(node + 48);
     uint16_t out_w = *(uint16_t *)(node + 50);
 
-    if (!in_w || !out_w || in_w > 65536 || out_w > 65536) return;
+    if (!in_w || !out_w) return;
 
     int8_t *input   = g_malloc(in_w);
     /* Skip 1-byte padding at weight blob start */
@@ -2033,6 +2033,10 @@ static void ive_xnn_unpack(uint8_t *node)
 static void ive_xnn_fire(HisiIveState *s)
 {
     uint32_t node_addr = s->regs[IVE_XNN_TASK_PTR / 4];
+    int node_count = 0;
+
+    qemu_log_mask(LOG_GUEST_ERROR, "hisi-ive: XNN fire task_ptr=0x%08x\n",
+                  node_addr);
 
     while (node_addr) {
         uint8_t node[128];
@@ -2057,9 +2061,11 @@ static void ive_xnn_fire(HisiIveState *s)
             break;
         }
 
+        node_count++;
         node_addr = *(uint32_t *)node; /* next-node pointer */
     }
 
+    qemu_log_mask(LOG_GUEST_ERROR, "hisi-ive: XNN done, %d nodes\n", node_count);
     s->regs[IVE_XNN_STATUS / 4] |= 0x08; /* bit 3 = done */
 }
 
