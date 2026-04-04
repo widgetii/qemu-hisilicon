@@ -474,6 +474,37 @@ static void hisi_fmc_exec_dma_nor(HisiFmcState *s)
     bool is_write = s->op_ctrl & FMC_OP_CTRL_RW_OP;
     uint64_t dma_addr = ((uint64_t)s->dma_saddrh_d0 << 32) | s->dma_saddr;
 
+    /*
+     * Real FMC hardware requires OP_MODE_NORMAL (bit 0 = 1) in FMC_CFG
+     * for DMA operations. In boot mode (bit 0 = 0), only memory-mapped
+     * XIP reads work. If the kernel driver forgets to set this, DMA reads
+     * return 0xFF (erased flash).
+     */
+    if (!(s->cfg & 1)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "hisi-fmc: DMA op with FMC_CFG=0x%x (not in NORMAL mode),"
+                      " returning 0xFF\n", s->cfg);
+        if (!is_write && len > 0) {
+            uint8_t *erased = g_malloc(len);
+            memset(erased, 0xFF, len);
+            dma_memory_write(&address_space_memory, dma_addr,
+                             erased, len, MEMTXATTRS_UNSPECIFIED);
+            g_free(erased);
+        }
+        s->fmc_int |= FMC_INT_OP_DONE;
+        return;
+    }
+
+    /*
+     * Validate SPI timing is configured. Real hardware needs non-zero
+     * chip-select timing for reliable DMA transfers.
+     */
+    if (s->spi_timing == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "hisi-fmc: DMA op with FMC_SPI_TIMING_CFG=0 "
+                      "(unconfigured timing)\n");
+    }
+
     if (addr + len > s->flash_size) {
         len = (addr < s->flash_size) ? s->flash_size - addr : 0;
     }
