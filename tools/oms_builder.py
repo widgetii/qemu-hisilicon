@@ -428,7 +428,7 @@ def build_fc_model(input_h, input_w, input_c, output_size,
     # Layer 2: FC (flat_size → output_size)
     layers += make_fc(flat_size, output_size,
                      arg_len_cumulative=weight_size,
-                     arg_offset=1,  # weights at offset 1 (kernel requires >= 1)
+                     arg_offset=1,  # offset within weight blob (real HW adds weight_data_off internally)
                      in_tmp_offset=fc_in_off,
                      out_tmp_offset=fc_out_off,
                      layer_index=2)

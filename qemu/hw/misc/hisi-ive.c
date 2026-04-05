@@ -1941,13 +1941,19 @@ static void ive_xnn_flatten(uint8_t *node)
 {
     uint32_t in_addr  = *(uint32_t *)(node + 16);
     uint32_t out_addr = *(uint32_t *)(node + 20);
-    uint32_t total    = *(uint32_t *)(node + 32); /* stride × height */
+    /* node+32 has one channel's stride×height. Multiply by in_c (node+48)
+     * or use the out_stride (node+46) which is the full flat size. */
+    uint16_t out_stride = *(uint16_t *)(node + 46);
+    uint32_t total = out_stride ? out_stride : *(uint32_t *)(node + 32);
 
     if (!total || total > 1024 * 1024) return;
 
     uint8_t *buf = g_malloc(total);
     dma_memory_read(&address_space_memory, in_addr,
                     buf, total, MEMTXATTRS_UNSPECIFIED);
+    qemu_log_mask(LOG_GUEST_ERROR,
+        "hisi-ive: Flatten in=0x%x out=0x%x total=%u data[0]=%u data[1]=%u\n",
+        in_addr, out_addr, total, buf[0], buf[1]);
     dma_memory_write(&address_space_memory, out_addr,
                      buf, total, MEMTXATTRS_UNSPECIFIED);
     g_free(buf);
@@ -1970,17 +1976,35 @@ static void ive_xnn_fc(uint8_t *node)
     if (!in_w || !out_w) return;
 
     int8_t *input   = g_malloc(in_w);
-    /* Skip 1-byte padding at weight blob start */
     int8_t *weights = g_malloc(out_w * in_w);
     int32_t *bias   = g_malloc(out_w * sizeof(int32_t));
     int16_t *output = g_malloc0(out_w * sizeof(int16_t));
 
     dma_memory_read(&address_space_memory, in_addr,
                     input, in_w, MEMTXATTRS_UNSPECIFIED);
-    dma_memory_read(&address_space_memory, weight_addr + 1,
-                    weights, out_w * in_w, MEMTXATTRS_UNSPECIFIED);
-    dma_memory_read(&address_space_memory, weight_addr + 1 + out_w * in_w,
-                    bias, out_w * sizeof(int32_t), MEMTXATTRS_UNSPECIFIED);
+    /* weight_addr = model_phys + arg_offset (small, e.g. 1).
+     * Real HW adds weight_data_off internally. In QEMU, read the OMS
+     * segment header at model_phys to find weight_data_off (at seg+60),
+     * then read weights from model_phys + weight_data_off + arg_offset. */
+    {
+        uint32_t seg_weight_off;
+        dma_memory_read(&address_space_memory, weight_addr & ~0xFFF,
+                        /* read u32 at model_base + 60 */ NULL, 0,
+                        MEMTXATTRS_UNSPECIFIED);
+        /* Simplified: model_base is weight_addr with low bits cleared.
+         * arg_offset is small (1), so model_base ≈ weight_addr. */
+        uint32_t model_base = weight_addr - (weight_addr & 0xFFF ? 1 : 0);
+        /* Actually: weight_addr = model_phys + arg_offset. If arg_offset=1,
+         * model_base = weight_addr - 1. Read seg+60 for weight_data_off. */
+        model_base = weight_addr - 1; /* subtract arg_offset=1 */
+        dma_memory_read(&address_space_memory, model_base + 60,
+                        &seg_weight_off, 4, MEMTXATTRS_UNSPECIFIED);
+        uint32_t actual_weight = model_base + seg_weight_off + 1; /* +1 for padding */
+        dma_memory_read(&address_space_memory, actual_weight,
+                        weights, out_w * in_w, MEMTXATTRS_UNSPECIFIED);
+        dma_memory_read(&address_space_memory, actual_weight + out_w * in_w,
+                        bias, out_w * sizeof(int32_t), MEMTXATTRS_UNSPECIFIED);
+    }
 
     for (int j = 0; j < out_w; j++) {
         int32_t acc = bias[j];
@@ -1988,6 +2012,13 @@ static void ive_xnn_fc(uint8_t *node)
             acc += (int32_t)input[i] * (int32_t)weights[j * in_w + i];
         output[j] = (int16_t)(acc >> 19);
     }
+    qemu_log_mask(LOG_GUEST_ERROR,
+        "hisi-ive: FC in=0x%x out=0x%x w=0x%x in_w=%u out_w=%u "
+        "input[0]=%d w[0]=%d bias[0]=%d acc0>>19=%d out[0]=%d\n",
+        in_addr, out_addr, weight_addr, in_w, out_w,
+        input[0], weights[0], bias[0],
+        (int)((bias[0] + (int32_t)input[0] * (int32_t)weights[0]) >> 19),
+        output[0]);
 
     dma_memory_write(&address_space_memory, out_addr,
                      output, out_w * sizeof(int16_t), MEMTXATTRS_UNSPECIFIED);
@@ -2054,9 +2085,9 @@ static void ive_xnn_fire(HisiIveState *s)
             break;
         case XNN_LAYER_FLATTEN:
             /* Flatten and Preproc share marker 1.
-             * Preproc (first node, input/output = 0) is a no-op.
-             * Flatten (has non-zero addresses) copies data. */
-            if (*(uint32_t *)(node + 16) && *(uint32_t *)(node + 20))
+             * Skip first node (Preproc pass-through — CPU already
+             * preprocessed into tmp). Execute subsequent Flatten nodes. */
+            if (node_count > 0)
                 ive_xnn_flatten(node);
             break;
         }
