@@ -127,29 +127,43 @@ def make_conv(input_c, input_h, input_w, output_c, output_h, output_w,
     d = bytearray(80)
     d[0] = 0  # type = Conv
     d[1] = 1  # always 1 in vendor models
-    d[4] = in_fmt
-    d[5] = out_fmt
-    d[6] = pool_mode
-    d[7] = af_mode
-    d[8] = 0  # is_pad (must be 0 for 3×3)
-    struct.pack_into('<H', d, 10, input_c)
-    struct.pack_into('<H', d, 12, input_h)
-    struct.pack_into('<H', d, 14, input_w)
-    struct.pack_into('<H', d, 16, output_c)
-    struct.pack_into('<H', d, 18, output_h)
-    struct.pack_into('<H', d, 20, output_w)
-    struct.pack_into('<I', d, 24, arg_len_cumulative)
-    struct.pack_into('<I', d, 28, arg_offset)
-    struct.pack_into('<I', d, 44, in_tmp_offset)
-    struct.pack_into('<I', d, 48, out_tmp_offset)
+    # Fields matched to vendor s[] packing → check function a1[offset]:
+    # s[1] = {desc[3], desc[4..5] as word, desc[6]}
+    # s[2] = {desc[7], padding, desc[8..9] as word}
+    d[3] = in_fmt       # a1+4 = LOBYTE(s[1])
+    d[4] = out_fmt      # a1+5 = BYTE1(s[1])
+    d[5] = pool_mode    # a1+6 = BYTE2(s[1])
+    d[6] = af_mode      # a1+7 = HIBYTE(s[1])
+    d[7] = 0            # a1+8 = LOBYTE(s[2]) = is_pad (0 for 3×3)
+    struct.pack_into('<H', d, 8, input_c)    # a1+10 = HIWORD(s[2])
+    struct.pack_into('<H', d, 10, input_h)   # a1+12 = LOWORD(s[3])
+    struct.pack_into('<H', d, 12, input_w)   # a1+14 = HIWORD(s[3])
+    struct.pack_into('<H', d, 14, output_c)  # a1+16 = LOWORD(s[4])
+    struct.pack_into('<H', d, 16, output_h)  # a1+18 = HIWORD(s[4])
+    struct.pack_into('<H', d, 18, output_w)  # a1+20 = LOWORD(s[5])
+    # s[6..15] = desc[20..59] as u32 words
+    struct.pack_into('<I', d, 20, arg_len_cumulative)   # s[6] = a1+24
+    struct.pack_into('<I', d, 24, arg_offset)           # s[7] = a1+28
+    # s[8]=desc[28..31], s[9]=desc[32..35], s[10]=desc[36..39] — reserved
+    struct.pack_into('<I', d, 40, in_tmp_offset)        # s[11] = a1+44
+    struct.pack_into('<I', d, 44, out_tmp_offset)       # s[12] = a1+48
+    # in_stride must be exactly align16(input_w) (vendor check: must equal X)
+    # out_stride minimum is 240 (vendor check: ive_xnn_check_stride [240,65535])
     in_stride_w = align16(input_w)
-    out_stride_w = align16(output_w)
-    struct.pack_into('<H', d, 52, in_stride_w)
-    struct.pack_into('<H', d, 54, out_stride_w)
-    struct.pack_into('<I', d, 56, input_h * in_stride_w)
-    struct.pack_into('<I', d, 60, output_h * out_stride_w)
-    d[61] = kernel_size  # MUST be 1 or 3
-    d[62] = in_bond_num
+    out_stride_w = max(align16(output_w), 240)
+    # s[13] = desc[48..51] = {in_stride_w, out_stride_w} packed
+    struct.pack_into('<H', d, 48, in_stride_w)          # a1+52 LOWORD(s[13])
+    struct.pack_into('<H', d, 50, out_stride_w)         # a1+54 HIWORD(s[13])
+    struct.pack_into('<I', d, 52, input_h * in_stride_w)  # s[14] = in_stride_c
+    struct.pack_into('<I', d, 56, output_h * out_stride_w) # s[15] = out_stride_c
+    # s[16] = {desc[60..61] as u16, desc[62] as byte}
+    d[61] = kernel_size  # BYTE1 of LOWORD(s[16]) — MUST be 1 or 3
+    d[62] = in_bond_num  # BYTE2(s[16])
+    # s[19] = {desc[72] as byte, desc[73..74] as u16}
+    # desc[72] = is_bottom_from_user (1 if this Conv reads from model input)
+    # desc[73..74] = input_node_name_id (which src_node this references)
+    d[72] = 1  # first Conv reads from user input
+    struct.pack_into('<H', d, 73, 0)  # src_node 0 (= 'data')
     return bytes(d)
 
 
@@ -270,7 +284,7 @@ def make_unpack(out_c, out_h, out_w, in_tmp_offset, out_tmp_offset,
     in_stride = align16(max(out_w * 4, 16))
     # out_stride: external format, computed as align16((out_fmt_sz * out_w) >> 3), min 16
     # out_fmt=1 → 1 byte per elem → (1 * out_w) >> 3 → small; min is 16
-    out_stride = align16(max((out_w + 7) >> 3, 16))  # bit-level packing for output
+    out_stride = align16(max(out_w, 16))  # vendor minimum is out_w, 16-byte aligned
     struct.pack_into('<H', d, 12, in_stride)
     struct.pack_into('<H', d, 14, out_stride)
     struct.pack_into('<I', d, 16, out_h * in_stride)   # in_stride_c
