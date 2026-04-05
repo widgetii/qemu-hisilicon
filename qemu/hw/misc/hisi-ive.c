@@ -2048,8 +2048,10 @@ static void ive_xnn_unpack(uint8_t *node)
                     s16buf, count * sizeof(int16_t), MEMTXATTRS_UNSPECIFIED);
 
     for (uint32_t i = 0; i < count; i++) {
-        int16_t v = s16buf[i];
-        s8buf[i] = (v > 127) ? 127 : (v < -128) ? -128 : (int8_t)v;
+        /* Real HW Unpack maps s16 → u8 with +1 offset:
+         * output = clamp(s16_value + 1, 0, 255) */
+        int32_t v = (int32_t)s16buf[i] + 1;
+        s8buf[i] = (v > 255) ? 255 : (v < 0) ? 0 : (uint8_t)v;
     }
 
     dma_memory_write(&address_space_memory, out_addr,
