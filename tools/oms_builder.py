@@ -93,6 +93,66 @@ def make_preproc(input_h, input_w, input_c, out_tmp_offset, need_vgs=1):
     return bytes(d)
 
 
+def make_conv(input_c, input_h, input_w, output_c, output_h, output_w,
+              kernel_size, pool_mode, af_mode, arg_len_cumulative, arg_offset,
+              in_tmp_offset, out_tmp_offset, layer_index,
+              in_fmt=0, out_fmt=1, in_bond_num=1):
+    """Build an 80-byte Conv layer descriptor.
+
+    Conv descriptor layout (from IDA RE of ive_xnn_check_conv_layer):
+      d[0]  = type (0=Conv)
+      d[1]  = 1 (always, unknown flag)
+      d[4]  = in_fmt {0,2,4}
+      d[5]  = out_fmt {0,1}
+      d[6]  = pool_mode [0,5) — 0=none, 1=max2x2, 2=avg2x2
+      d[7]  = af_mode [0,4) — 0=none, 1=relu, 2=sigmoid, 3=tanh
+      d[8]  = is_pad [0,2) — must be 0 for kernel_size=3
+      d[10..11] = input_c  [1,1024]
+      d[12..13] = input_h  [2,720]
+      d[14..15] = input_w  [2,1280]
+      d[16..17] = output_c [1,1024]
+      d[18..19] = output_h
+      d[20..21] = output_w
+      d[24..27] = arg_len (cumulative)
+      d[28..31] = arg_offset (per-layer)
+      d[44..47] = in_tmp_offset
+      d[48..51] = out_tmp_offset
+      d[52..53] = in_stride_w (aligned 16)
+      d[54..55] = out_stride_w (aligned 16)
+      d[56..59] = in_stride_c (= input_h × in_stride_w)
+      d[60..63] = out_stride_c (= output_h × out_stride_w)
+      d[61]     = kernel_size {1,3}
+      d[62]     = in_bond_num {1,2,8}
+    """
+    d = bytearray(80)
+    d[0] = 0  # type = Conv
+    d[1] = 1  # always 1 in vendor models
+    d[4] = in_fmt
+    d[5] = out_fmt
+    d[6] = pool_mode
+    d[7] = af_mode
+    d[8] = 0  # is_pad (must be 0 for 3×3)
+    struct.pack_into('<H', d, 10, input_c)
+    struct.pack_into('<H', d, 12, input_h)
+    struct.pack_into('<H', d, 14, input_w)
+    struct.pack_into('<H', d, 16, output_c)
+    struct.pack_into('<H', d, 18, output_h)
+    struct.pack_into('<H', d, 20, output_w)
+    struct.pack_into('<I', d, 24, arg_len_cumulative)
+    struct.pack_into('<I', d, 28, arg_offset)
+    struct.pack_into('<I', d, 44, in_tmp_offset)
+    struct.pack_into('<I', d, 48, out_tmp_offset)
+    in_stride_w = align16(input_w)
+    out_stride_w = align16(output_w)
+    struct.pack_into('<H', d, 52, in_stride_w)
+    struct.pack_into('<H', d, 54, out_stride_w)
+    struct.pack_into('<I', d, 56, input_h * in_stride_w)
+    struct.pack_into('<I', d, 60, output_h * out_stride_w)
+    d[61] = kernel_size  # MUST be 1 or 3
+    d[62] = in_bond_num
+    return bytes(d)
+
+
 def make_flatten(in_c, in_h, in_w, in_tmp_offset, out_tmp_offset,
                  layer_index):
     """Build a 48-byte Flatten layer descriptor.
@@ -543,6 +603,101 @@ def build_from_pytorch(model_path, output_path):
                    weight, bias, output_path)
 
 
+def build_conv_test(output_path):
+    """Build minimal Conv test: Preproc + Conv(3×3, 1→1) + Unpack.
+
+    Uses identity-like weights (center=127, rest=0) so the Conv output
+    is approximately 127× the input — predictable for HW verification.
+    """
+    input_h, input_w = 8, 8  # small for easy debugging
+    input_c = 1  # grayscale
+    kernel_size = 3
+    output_c = 1
+    output_h = input_h - kernel_size + 1  # 6
+    output_w = input_w - kernel_size + 1  # 6
+
+    # Identity-ish weights: only center pixel has weight=1, rest=0
+    # This makes Conv output ≈ input_center_pixel × 1 + bias
+    w = np.zeros((output_c, input_c, kernel_size, kernel_size), dtype=np.int8)
+    w[0, 0, 1, 1] = 1  # center pixel only
+    b = np.zeros(output_c, dtype=np.int32)
+
+    # Weight blob: 1 byte pad + weights + bias
+    weight_blob = b'\x00' + w.tobytes() + b.tobytes()
+    weight_size = len(weight_blob)
+    print(f'Conv test: {input_h}×{input_w}×{input_c} → 3×3 → {output_h}×{output_w}×{output_c}')
+    print(f'Weight blob: {weight_size} bytes')
+
+    # Tmp buffer layout
+    preproc_out = align16(input_w) * input_h * 32  # 32ch preproc output
+    conv_in_off = 0
+    conv_out_off = align16(preproc_out)
+    unpack_in_off = conv_out_off
+    unpack_out_off = align16(conv_out_off + align16(output_w) * output_h * output_c)
+    tmp_buf_size = unpack_out_off + 4096
+
+    # Build layer descriptors
+    layers = bytearray()
+
+    # Layer 0: Preproc
+    layers += make_preproc(input_h, input_w, 3, 0)
+
+    # Layer 1: Conv 3×3
+    layers += make_conv(
+        input_c=input_c, input_h=input_h, input_w=input_w,
+        output_c=output_c, output_h=output_h, output_w=output_w,
+        kernel_size=kernel_size, pool_mode=0, af_mode=0,
+        arg_len_cumulative=weight_size,
+        arg_offset=1,  # skip 1-byte pad
+        in_tmp_offset=conv_in_off,
+        out_tmp_offset=conv_out_off,
+        layer_index=1)
+
+    # Layer 2: Unpack
+    layers += make_unpack(
+        out_c=output_c, out_h=output_h, out_w=output_w,
+        in_tmp_offset=unpack_in_off,
+        out_tmp_offset=unpack_out_off,
+        layer_index=2)
+
+    total_layers = 3
+
+    # Calculate weight_data_off (same as build_segment)
+    v63 = ((-2 * 2) & 0xF) + 2 * 2 + 80
+    v61 = 32 + v63
+    v70 = 32 + v61
+    layer_desc_end = v70 + len(layers)
+    weight_data_off = max(align16(layer_desc_end + 16), 1)
+
+    # Build name entries
+    names = bytearray()
+    for nm in ['data', 'conv', 'output']:
+        entry = bytearray(64)
+        entry[:len(nm)] = nm.encode('ascii')
+        names += entry
+
+    segment = build_segment(
+        layers_desc=bytes(layers),
+        weight_data=weight_blob,
+        name_entries=bytes(names),
+        src_num=1, dst_num=1,
+        total_layers=total_layers,
+        tmp_buf_size=tmp_buf_size,
+        src_names=['data'],
+        dst_names=['output'],
+    )
+
+    outer = build_outer_header(segment)
+    oms_data = outer + segment
+
+    with open(output_path, 'wb') as f:
+        f.write(oms_data)
+
+    print(f'Conv test OMS: {output_path} ({len(oms_data)} bytes)')
+    print(f'  weight_data_off={weight_data_off} tmp_buf_size={tmp_buf_size}')
+    return oms_data
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Build HiSilicon IVE XNN .oms model files')
@@ -551,14 +706,18 @@ def main():
     parser.add_argument('output', help='Output .oms file path')
     parser.add_argument('--test', action='store_true',
                         help='Generate test model (Flatten+FC, random weights)')
+    parser.add_argument('--conv-test', action='store_true',
+                        help='Generate Conv test model (single 3×3 conv)')
     args = parser.parse_args()
 
-    if args.test:
+    if args.conv_test:
+        build_conv_test(args.output)
+    elif args.test:
         build_test_model(args.output)
     elif args.input:
         build_from_pytorch(args.input, args.output)
     else:
-        parser.error('Specify --test or provide a PyTorch model path')
+        parser.error('Specify --test, --conv-test, or provide a PyTorch model')
 
     # Verify with parser
     print('\n--- Verification ---')
