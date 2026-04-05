@@ -395,6 +395,29 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     # Layer descriptors
     seg[v70:v70 + len(layers_desc)] = layers_desc
 
+    # Fixup arg_offset fields: convert from weight-blob-relative to segment-relative
+    # by adding weight_data_off. This is needed because the HW uses
+    # model_phys + arg_offset directly to find weight data.
+    off = v70
+    for _ in range(total_layers):
+        ltype = seg[off]
+        if ltype == 0:  # Conv: arg_offset at desc+24 (4 bytes)
+            old = struct.unpack_from('<I', seg, off + 24)[0]
+            struct.pack_into('<I', seg, off + 24, old + weight_data_off)
+            off += 80
+        elif ltype == 2:  # FC: arg_offset at desc+20 (4 bytes)
+            old = struct.unpack_from('<I', seg, off + 20)[0]
+            struct.pack_into('<I', seg, off + 20, old + weight_data_off)
+            off += 64
+        elif ltype == 4:  # Unpack: no weight data, don't patch
+            off += 64
+        elif ltype == 5:  # Preproc
+            off += 48
+        elif ltype == 1:  # Flatten
+            off += 48
+        else:
+            off += 80  # default
+
     # Weight data
     seg[weight_data_off:weight_data_off + len(weight_data)] = weight_data
 
@@ -623,7 +646,7 @@ def build_conv_test(output_path):
     Uses identity-like weights (center=127, rest=0) so the Conv output
     is approximately 127× the input — predictable for HW verification.
     """
-    input_h, input_w = 8, 8  # small for easy debugging
+    input_h, input_w = 32, 32  # match reference Preproc (32×32)
     input_c = 1  # grayscale
     kernel_size = 3
     output_c = 1
@@ -648,7 +671,9 @@ def build_conv_test(output_path):
     conv_out_off = align16(preproc_out)
     unpack_in_off = conv_out_off
     unpack_out_off = align16(conv_out_off + align16(output_w) * output_h * output_c)
-    tmp_buf_size = unpack_out_off + 4096
+    # VGS preproc needs large working memory (~144*H*W + overhead)
+    vgs_overhead = input_h * input_w * 144 + 65536
+    tmp_buf_size = max(unpack_out_off + 4096, vgs_overhead)
 
     # Build layer descriptors
     layers = bytearray()
