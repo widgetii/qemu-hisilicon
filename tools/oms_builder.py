@@ -349,12 +349,17 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     v70 = 32 * dst_num + v61  # layer desc start
 
     layer_desc_end = v70 + len(layers_desc)
-    # For Conv models: arg_data goes right after descs, weight_data_off points elsewhere
-    # For FC models: weight_data_off points to the FC weight blob
+    # Layout: [descs] [arg_data] [weight_data] [hw_weight_area] [names]
+    # arg_data: Conv biases+pad+weights (right after descs)
+    # weight_data: bulk blob (for FC weights or vendor validation)
+    # hw_weight_area: free space for loadmodel to store transformed Conv weights
     arg_data_off = align16(layer_desc_end)
     weight_data_off = max(align16(arg_data_off + len(weight_data) + 16), 1)
     weight_data_end = weight_data_off + len(weight_data)
-    name_table_off = align16(weight_data_end + 16)
+    # Reserve space for HW-transformed weights (same size as weight_data)
+    hw_weight_off = align16(weight_data_end + 16)
+    hw_weight_end = hw_weight_off + len(weight_data)
+    name_table_off = align16(hw_weight_end + 16)
     segment_end = name_table_off + len(name_entries)
     segment_size = align16(segment_end)
 
@@ -415,10 +420,11 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     off = v70
     for _ in range(total_layers):
         ltype = seg[off]
-        if ltype == 0:  # Conv: patch arg_offset and s[8] (weight pointer)
+        if ltype == 0:  # Conv: patch arg_offset and s[8]
             struct.pack_into('<I', seg, off + 24, arg_data_off)
-            # s[8] = offset to int8 weights within segment (always at arg+64)
-            struct.pack_into('<I', seg, off + 28, arg_data_off + 64)
+            # s[8] = offset to HW weight area (free space for loadmodel to
+            # store transformed weights). Must be separate from arg_data.
+            struct.pack_into('<I', seg, off + 28, hw_weight_off)
             off += 80
         elif ltype == 2:  # FC: arg_offset relative to weight blob
             old = struct.unpack_from('<I', seg, off + 20)[0]
