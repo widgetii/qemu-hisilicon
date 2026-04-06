@@ -145,9 +145,10 @@ def make_conv(input_c, input_h, input_w, output_c, output_h, output_w,
     # s[6..15] = desc[20..59] as u32 words
     struct.pack_into('<I', d, 20, arg_len_cumulative)   # s[6] = a1+24
     struct.pack_into('<I', d, 24, arg_offset)           # s[7] = a1+28
-    # s[8]=desc[28..31] → node[12]: critical for Conv weight loading
-    # Vendor has non-zero values here (e.g., 0x21D9B for first Conv layer)
-    struct.pack_into('<I', d, 28, arg_len_cumulative)  # s[8]: try arg_len as value
+    # s[8]=desc[28..31] → node[12]: offset to int8 weights within segment
+    # Vendor points this to the actual weight bytes (after biases+padding in arg_data)
+    # Set to 0 here; build_segment patches it to arg_data_off + bias_size + pad_size
+    struct.pack_into('<I', d, 28, 0)  # patched by build_segment
     struct.pack_into('<I', d, 40, in_tmp_offset)        # s[11] = a1+44
     struct.pack_into('<I', d, 44, out_tmp_offset)       # s[12] = a1+48
     # in_stride must be exactly align16(input_w) (vendor check: must equal X)
@@ -414,8 +415,10 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     off = v70
     for _ in range(total_layers):
         ltype = seg[off]
-        if ltype == 0:  # Conv: arg_offset = arg_data_off (right after descs)
+        if ltype == 0:  # Conv: patch arg_offset and s[8] (weight pointer)
             struct.pack_into('<I', seg, off + 24, arg_data_off)
+            # s[8] = offset to int8 weights within segment (always at arg+64)
+            struct.pack_into('<I', seg, off + 28, arg_data_off + 64)
             off += 80
         elif ltype == 2:  # FC: arg_offset relative to weight blob
             old = struct.unpack_from('<I', seg, off + 20)[0]
@@ -669,13 +672,14 @@ def build_conv_test(output_path):
     w[0, 0, 1, 1] = 1  # center pixel only
     b = np.zeros(output_c, dtype=np.int32)
 
-    # Weight blob (vendor format): int32 biases + 0x80 padding + int8 weights
-    # Vendor packs: [biases (out_c×4)] [0x80 pad (out_c×4)] [int8 weights] [align]
+    # Weight blob (vendor format): int8 weights always start at offset 64
+    # [int32 biases] [0x80 padding to offset 64] [int8 weights] [align]
     bias_data = b.tobytes()  # output_c × 4 bytes
-    pad_data = b'\x80' * (output_c * 4)  # vendor uses exactly out_c × 4 bytes of 0x80
+    pad_to_64 = 64 - len(bias_data)
+    pad_data = b'\x80' * pad_to_64  # pad with 0x80 up to offset 64
     weight_data = w.tobytes()
     weight_blob = bias_data + pad_data + weight_data
-    # Pad to minimum 288 bytes (vendor Conv minimum arg_len)
+    # Pad to minimum 288 bytes
     while len(weight_blob) < 288:
         weight_blob += b'\x00'
     # Align total to 16 bytes
