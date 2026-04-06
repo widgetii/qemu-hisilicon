@@ -96,7 +96,8 @@ def make_preproc(input_h, input_w, input_c, out_tmp_offset, need_vgs=1):
 def make_conv(input_c, input_h, input_w, output_c, output_h, output_w,
               kernel_size, pool_mode, af_mode, arg_len_cumulative, arg_offset,
               in_tmp_offset, out_tmp_offset, layer_index,
-              in_fmt=0, out_fmt=1, in_bond_num=1):
+              in_fmt=0, out_fmt=1, in_bond_num=1,
+              requant_scale=0x26000, requant_mult=0x7fff):
     """Build an 80-byte Conv layer descriptor.
 
     Conv descriptor layout (from IDA RE of ive_xnn_check_conv_layer):
@@ -157,8 +158,15 @@ def make_conv(input_c, input_h, input_w, output_c, output_h, output_w,
     struct.pack_into('<I', d, 52, input_h * in_stride_w)  # s[14] = in_stride_c
     struct.pack_into('<I', d, 56, output_h * out_stride_w) # s[15] = out_stride_c
     # s[16] = {desc[60..61] as u16, desc[62] as byte}
+    d[60] = 128  # LOBYTE(s[16]) — output zero-point/activation (vendor=128)
     d[61] = kernel_size  # BYTE1 of LOWORD(s[16]) — MUST be 1 or 3
     d[62] = in_bond_num  # BYTE2(s[16])
+    # s[10] = desc[36..39] — negative shift mask (vendor uses 0xFFF80000 = -(1<<19))
+    struct.pack_into('<i', d, 36, -(1 << 19))
+    # s[17] = desc[64..67] — requantization scale (HIWORD=2, LOWORD=scale)
+    struct.pack_into('<I', d, 64, 0x20000 | (requant_scale & 0xFFFF))
+    # s[18] = desc[68..71] — requantization multiplier
+    struct.pack_into('<I', d, 68, requant_mult)
     # s[19] = {desc[72] as byte, desc[73..74] as u16}
     # desc[72] = is_bottom_from_user (1 if this Conv reads from model input)
     # desc[73..74] = input_node_name_id (which src_node this references)
@@ -338,7 +346,10 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     v70 = 32 * dst_num + v61  # layer desc start
 
     layer_desc_end = v70 + len(layers_desc)
-    weight_data_off = max(align16(layer_desc_end + 16), 1)  # must be >= 1
+    # For Conv models: arg_data goes right after descs, weight_data_off points elsewhere
+    # For FC models: weight_data_off points to the FC weight blob
+    arg_data_off = align16(layer_desc_end)
+    weight_data_off = max(align16(arg_data_off + len(weight_data) + 16), 1)
     weight_data_end = weight_data_off + len(weight_data)
     name_table_off = align16(weight_data_end + 16)
     segment_end = name_table_off + len(name_entries)
@@ -395,30 +406,27 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     # Layer descriptors
     seg[v70:v70 + len(layers_desc)] = layers_desc
 
-    # Fixup arg_offset fields: convert from weight-blob-relative to segment-relative
-    # by adding weight_data_off. This is needed because the HW uses
-    # model_phys + arg_offset directly to find weight data.
+    # Fixup arg_offset for each layer type:
+    # - Conv: arg_offset = weight_data_off (weight metadata right after descs)
+    # - FC: arg_offset += weight_data_off (relative to weight blob start)
     off = v70
     for _ in range(total_layers):
         ltype = seg[off]
-        if ltype == 0:  # Conv: arg_offset at desc+24 (4 bytes)
-            old = struct.unpack_from('<I', seg, off + 24)[0]
-            struct.pack_into('<I', seg, off + 24, old + weight_data_off)
+        if ltype == 0:  # Conv: arg_offset = arg_data_off (right after descs)
+            struct.pack_into('<I', seg, off + 24, arg_data_off)
             off += 80
-        elif ltype == 2:  # FC: arg_offset at desc+20 (4 bytes)
+        elif ltype == 2:  # FC: arg_offset relative to weight blob
             old = struct.unpack_from('<I', seg, off + 20)[0]
             struct.pack_into('<I', seg, off + 20, old + weight_data_off)
             off += 64
-        elif ltype == 4:  # Unpack: no weight data, don't patch
-            off += 64
-        elif ltype == 5:  # Preproc
-            off += 48
-        elif ltype == 1:  # Flatten
-            off += 48
-        else:
-            off += 80  # default
+        elif ltype == 4:  off += 64  # Unpack
+        elif ltype == 5:  off += 48  # Preproc
+        elif ltype == 1:  off += 48  # Flatten
+        else:             off += 80
 
-    # Weight data
+    # Weight/arg data: placed at arg_data_off (right after descs)
+    seg[arg_data_off:arg_data_off + len(weight_data)] = weight_data
+    # Also place at weight_data_off (vendor validation needs data here)
     seg[weight_data_off:weight_data_off + len(weight_data)] = weight_data
 
     # Name table
@@ -659,8 +667,15 @@ def build_conv_test(output_path):
     w[0, 0, 1, 1] = 1  # center pixel only
     b = np.zeros(output_c, dtype=np.int32)
 
-    # Weight blob: 1 byte pad + weights + bias
-    weight_blob = b'\x00' + w.tobytes() + b.tobytes()
+    # Weight blob (vendor format): int32 biases + 0x80 padding + int8 weights
+    # Vendor packs: [biases (out_c×4)] [0x80 pad (out_c×4)] [int8 weights] [align]
+    bias_data = b.tobytes()  # output_c × 4 bytes
+    pad_data = b'\x80' * (output_c * 4)  # vendor uses exactly out_c × 4 bytes of 0x80
+    weight_data = w.tobytes()
+    weight_blob = bias_data + pad_data + weight_data
+    # Align total to 16 bytes
+    while len(weight_blob) % 16:
+        weight_blob += b'\x00'
     weight_size = len(weight_blob)
     print(f'Conv test: {input_h}×{input_w}×{input_c} → 3×3 → {output_h}×{output_w}×{output_c}')
     print(f'Weight blob: {weight_size} bytes')
@@ -682,12 +697,13 @@ def build_conv_test(output_path):
     layers += make_preproc(input_h, input_w, 3, 0)
 
     # Layer 1: Conv 3×3
+    # arg_offset will be patched by build_segment to point to weight_data_off
     layers += make_conv(
         input_c=input_c, input_h=input_h, input_w=input_w,
         output_c=output_c, output_h=output_h, output_w=output_w,
         kernel_size=kernel_size, pool_mode=0, af_mode=0,
         arg_len_cumulative=weight_size,
-        arg_offset=1,  # skip 1-byte pad
+        arg_offset=0,  # will be patched to weight_data_off by build_segment
         in_tmp_offset=conv_in_off,
         out_tmp_offset=conv_out_off,
         layer_index=1)

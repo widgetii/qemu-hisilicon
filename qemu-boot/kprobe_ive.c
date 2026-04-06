@@ -1,84 +1,70 @@
 /*
- * kprobe_ive — Capture vendor's HW register writes + task nodes
+ * kprobe_ive — Hijack vendor's task chain to test Conv parameters
  *
- * Probes drv_ive_write_regs (task submit) AND drv_ive_read_regs (status read).
- * Also probes writel to capture ALL register writes to IVE space (0x11320000).
+ * Hooks drv_ive_write_regs to modify the Conv task node before HW submit.
+ * Keeps the vendor module loaded (no rmmod), so all HW state is intact.
+ *
+ * Module param "test_weight_addr" — if set, overrides Conv node[24] (weight address).
+ * This lets us test different weight data while using the vendor's infrastructure.
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
 #include <asm/io.h>
 
-static int call_count;
-static void __iomem *ive_base;
+static unsigned int test_weight_addr;
+module_param(test_weight_addr, uint, S_IRUGO | S_IWUSR);
 
-/* Capture task node submission */
+static int submit_count;
+
 static int write_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	u32 phys = regs->ARM_r0;
 	u8 *virt;
-	int n, i;
 
-	if (phys < 0x40000000 || phys > 0x50000000)
-		return 0;
+	if (phys < 0x40000000 || phys > 0x50000000) return 0;
 
-	pr_info("kp_ive: SUBMIT phys=0x%08x\n", phys);
+	virt = phys_to_virt(phys);
+	if (!virt) return 0;
 
-	for (n = 0; n < 16; n++) {
-		virt = phys_to_virt(phys);
-		if (!virt) break;
-		pr_info("kp_ive: chain[%d] phys=0x%08x type=%d\n",
-			n, phys, virt[11]);
-		for (i = 0; i < 128; i += 16)
-			pr_info("kp_ive:   +%02x: %*ph\n", i, 16, virt + i);
-		phys = *(u32 *)virt;
-		if (!phys || phys < 0x40000000) break;
+	/* Check if this is a Conv node (marker=0x36, type=0) */
+	if (virt[10] == 0x36 && virt[11] == 0) {
+		pr_info("kp_ive: Conv node submit #%d, weight=0x%08x\n",
+			submit_count, *(u32 *)(virt + 24));
+
+		if (test_weight_addr) {
+			pr_info("kp_ive: OVERRIDE weight 0x%08x -> 0x%08x\n",
+				*(u32 *)(virt + 24), test_weight_addr);
+			*(u32 *)(virt + 24) = test_weight_addr;
+		}
 	}
 
-	/* Dump IVE regs snapshot before submit */
-	if (ive_base) {
-		pr_info("kp_ive: REGS before submit:\n");
-		for (i = 0; i < 0x90; i += 4)
-			pr_info("kp_ive:   reg[0x%02x]=0x%08x\n",
-				i, readl(ive_base + i));
-	}
-
-	call_count++;
+	submit_count++;
 	return 0;
 }
 
-static struct kprobe kp_write = {
-	.symbol_name = "drv_ive_write_regs",
-};
+static struct kprobe kp = { .symbol_name = "drv_ive_write_regs" };
 
 static int __init kprobe_ive_init(void)
 {
 	int ret;
-
-	ive_base = ioremap(0x11320000, 0x100);
-
-	kp_write.pre_handler = write_pre;
-	ret = register_kprobe(&kp_write);
+	kp.pre_handler = write_pre;
+	ret = register_kprobe(&kp);
 	if (ret < 0) {
-		pr_err("kp_ive: register_kprobe failed: %d\n", ret);
-		if (ive_base) iounmap(ive_base);
+		pr_err("kp_ive: failed: %d\n", ret);
 		return ret;
 	}
-
-	call_count = 0;
-	pr_info("kp_ive: probing at %pS, ive_base=%p\n",
-		kp_write.addr, ive_base);
+	submit_count = 0;
+	pr_info("kp_ive: hijack mode, test_weight_addr=0x%x\n", test_weight_addr);
 	return 0;
 }
 
 static void __exit kprobe_ive_exit(void)
 {
-	unregister_kprobe(&kp_write);
-	if (ive_base) iounmap(ive_base);
-	pr_info("kp_ive: removed, %d calls\n", call_count);
+	unregister_kprobe(&kp);
+	pr_info("kp_ive: removed after %d submits\n", submit_count);
 }
 
 module_init(kprobe_ive_init);
 module_exit(kprobe_ive_exit);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("kprobe to capture IVE register state during Conv dispatch");
