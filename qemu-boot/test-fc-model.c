@@ -278,6 +278,47 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Dumped %u bytes of tmp to /tmp/tmp_dump.bin\n", tmp_size);
     }
 
+    /* Read HW task pointer and dump task chain via /dev/mem */
+    {
+        int memfd = open("/dev/mem", 2); /* O_RDWR */
+        if (memfd >= 0) {
+            /* Map IVE HW regs at 0x11320000 */
+            volatile uint32_t *regs = mmap(NULL, 0x100, PROT_READ, MAP_SHARED, memfd, 0x11320000);
+            if (regs != MAP_FAILED) {
+                uint32_t task_ptr = regs[4]; /* reg 0x10 = task pointer */
+                fprintf(stderr, "HW task_ptr=0x%08x\n", task_ptr);
+                munmap((void *)regs, 0x100);
+
+                if (task_ptr >= 0x42000000 && task_ptr < 0x44000000) {
+                    /* Map task chain region */
+                    uint32_t page = task_ptr & ~0xFFF;
+                    volatile uint8_t *task = mmap(NULL, 0x2000, PROT_READ, MAP_SHARED, memfd, page);
+                    if (task != MAP_FAILED) {
+                        uint32_t off = task_ptr - page;
+                        FILE *tf = fopen("/tmp/task_dump.bin", "wb");
+                        if (tf) {
+                            fwrite((void *)(task + off), 1, 0x1000, tf);
+                            fclose(tf);
+                            fprintf(stderr, "Dumped task chain to /tmp/task_dump.bin\n");
+                        }
+                        /* Print first 2 nodes */
+                        for (int n = 0; n < 2; n++) {
+                            fprintf(stderr, "Task node %d:\n", n);
+                            for (int r = 0; r < 128; r += 16) {
+                                fprintf(stderr, "  +%02x:", r);
+                                for (int b = 0; b < 16; b++)
+                                    fprintf(stderr, " %02x", task[off + n*128 + r + b]);
+                                fprintf(stderr, "\n");
+                            }
+                        }
+                        munmap((void *)task, 0x2000);
+                    }
+                }
+            }
+            close(memfd);
+        }
+    }
+
     /* Scan tmp for HW-written regions (not 0xAA), dump each */
     int8_t *tmp = (int8_t *)(uintptr_t)tmp_mem.virt;
     fprintf(stderr, "HW-written regions:\n");

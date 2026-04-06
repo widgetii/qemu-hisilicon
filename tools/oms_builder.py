@@ -282,9 +282,9 @@ def make_unpack(out_c, out_h, out_w, in_tmp_offset, out_tmp_offset,
     struct.pack_into('<H', d, 10, out_w)
     # in_stride: internal format (int8/int32), needs >= out_w * elem_size
     in_stride = align16(max(out_w * 4, 16))
-    # out_stride: external format, computed as align16((out_fmt_sz * out_w) >> 3), min 16
-    # out_fmt=1 → 1 byte per elem → (1 * out_w) >> 3 → small; min is 16
-    out_stride = align16(max(out_w, 16))  # vendor minimum is out_w, 16-byte aligned
+    # out_stride: vendor node uses 4 bytes/element but the OMS descriptor
+    # validation expects align16(out_w). The node builder adjusts at runtime.
+    out_stride = align16(max(out_w, 16))
     struct.pack_into('<H', d, 12, in_stride)
     struct.pack_into('<H', d, 14, out_stride)
     struct.pack_into('<I', d, 16, out_h * in_stride)   # in_stride_c
