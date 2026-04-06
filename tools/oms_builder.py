@@ -145,7 +145,9 @@ def make_conv(input_c, input_h, input_w, output_c, output_h, output_w,
     # s[6..15] = desc[20..59] as u32 words
     struct.pack_into('<I', d, 20, arg_len_cumulative)   # s[6] = a1+24
     struct.pack_into('<I', d, 24, arg_offset)           # s[7] = a1+28
-    # s[8]=desc[28..31], s[9]=desc[32..35], s[10]=desc[36..39] — reserved
+    # s[8]=desc[28..31] → node[12]: critical for Conv weight loading
+    # Vendor has non-zero values here (e.g., 0x21D9B for first Conv layer)
+    struct.pack_into('<I', d, 28, arg_len_cumulative)  # s[8]: try arg_len as value
     struct.pack_into('<I', d, 40, in_tmp_offset)        # s[11] = a1+44
     struct.pack_into('<I', d, 44, out_tmp_offset)       # s[12] = a1+48
     # in_stride must be exactly align16(input_w) (vendor check: must equal X)
@@ -673,6 +675,9 @@ def build_conv_test(output_path):
     pad_data = b'\x80' * (output_c * 4)  # vendor uses exactly out_c × 4 bytes of 0x80
     weight_data = w.tobytes()
     weight_blob = bias_data + pad_data + weight_data
+    # Pad to minimum 288 bytes (vendor Conv minimum arg_len)
+    while len(weight_blob) < 288:
+        weight_blob += b'\x00'
     # Align total to 16 bytes
     while len(weight_blob) % 16:
         weight_blob += b'\x00'

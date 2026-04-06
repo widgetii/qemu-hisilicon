@@ -217,14 +217,14 @@ int main(int argc, char **argv) {
     src.chn = in_chn ? in_chn : 3;
 
     xnn_blob_t dst = {0};
-    dst.type = out_type ? out_type : 7;
+    dst.type = out_type; /* 0=S32, 7=U8, etc — use model's actual type */
     dst.stride = out_stride;
     dst.virt = out_v;
     dst.phys = out_p;
     dst.num = 1;
     dst.width = out_w;
     dst.height = out_h;
-    dst.chn = out_chn ? out_chn : 1;
+    dst.chn = out_chn;
 
     /* ctrl: a5[0]=0, a5[1]=src_num, a5[2]=has_roi, a5[3]=dst_num */
     uint32_t ctrl[4] = {0, 1, 0, 1};
