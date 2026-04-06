@@ -356,9 +356,26 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     arg_data_off = align16(layer_desc_end)
     weight_data_off = max(align16(arg_data_off + len(weight_data) + 16), 1)
     weight_data_end = weight_data_off + len(weight_data)
-    # Reserve space for HW-transformed weights (same size as weight_data)
+    # Reserve space for HW int24 weights at s[8] offset.
+    # Format: 3-byte int24 = round(float_weight * 2^20), packed in 40-byte records
+    # Each record = one 2D filter (k*k weights * 3 bytes + padding to 40 bytes)
     hw_weight_off = align16(weight_data_end + 16)
-    hw_weight_end = hw_weight_off + len(weight_data)
+    # Compute hw weight blob size from layer descriptors
+    hw_weight_size = 0
+    _off = 0
+    for _ in range(total_layers):
+        if layers_desc[_off] == 0:  # Conv
+            _ic = struct.unpack_from('<H', layers_desc, _off + 8)[0]
+            _oc = struct.unpack_from('<H', layers_desc, _off + 14)[0]
+            _k = layers_desc[_off + 61]
+            hw_weight_size += _oc * _ic * 40  # 40 bytes per 2D filter
+            _off += 80
+        elif layers_desc[_off] == 5: _off += 48
+        elif layers_desc[_off] == 1: _off += 48
+        elif layers_desc[_off] == 2: _off += 64
+        elif layers_desc[_off] == 4: _off += 64
+        else: _off += 80
+    hw_weight_end = hw_weight_off + max(hw_weight_size, len(weight_data))
     name_table_off = align16(hw_weight_end + 16)
     segment_end = name_table_off + len(name_entries)
     segment_size = align16(segment_end)
@@ -439,6 +456,38 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     seg[arg_data_off:arg_data_off + len(weight_data)] = weight_data
     # Also place at weight_data_off (vendor validation needs data here)
     seg[weight_data_off:weight_data_off + len(weight_data)] = weight_data
+
+    # Generate int24 HW weights at hw_weight_off.
+    # Format: round(float_weight * 2^20) as 3-byte LE signed, in 40-byte records.
+    # For int8 source weights: float ≈ int8 / 127, so int24 ≈ int8 * (2^20 / 127) ≈ int8 * 8257
+    _off = v70
+    _hw_off = hw_weight_off
+    for _ in range(total_layers):
+        ltype = seg[_off]
+        if ltype == 0:  # Conv
+            _ic = struct.unpack_from('<H', seg, _off + 8)[0]
+            _oc = struct.unpack_from('<H', seg, _off + 14)[0]
+            _k = seg[_off + 61]
+            _arg_off = struct.unpack_from('<I', seg, _off + 24)[0]
+            # int8 weights start at arg_data + 64
+            for filt in range(_oc * _ic):
+                for w in range(_k * _k):
+                    w8 = seg[_arg_off + 64 + filt * _k * _k + w]
+                    if w8 > 127: w8 -= 256  # unsigned→signed
+                    # Convert: int24 = int8 * (2^20 / 127) for unit-scale int8
+                    w24 = int(round(w8 * (1 << 20) / 127.0))
+                    w24 = max(-8388608, min(8388607, w24))
+                    struct.pack_into('<i', seg, _hw_off + w * 3, 0)  # clear 4 bytes first
+                    seg[_hw_off + w*3] = w24 & 0xFF
+                    seg[_hw_off + w*3 + 1] = (w24 >> 8) & 0xFF
+                    seg[_hw_off + w*3 + 2] = (w24 >> 16) & 0xFF
+                _hw_off += 40  # advance to next 40-byte record
+            _off += 80
+        elif ltype == 5: _off += 48
+        elif ltype == 1: _off += 48
+        elif ltype == 2: _off += 64
+        elif ltype == 4: _off += 64
+        else: _off += 80
 
     # Name table
     seg[name_table_off:name_table_off + len(name_entries)] = name_entries
