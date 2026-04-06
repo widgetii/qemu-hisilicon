@@ -1,101 +1,82 @@
 /*
- * kprobe_ive — Dump model_ctx from ive_start_task
+ * kprobe_ive — Capture tile data table from ive_start_task
  *
- * Places kprobe at ive_start_task+0x68 (after r6 = model_ctx is computed)
- * to capture the per-model context fields that control Conv tiling.
- *
- * At offset 0x68: r6 = model_ctx_base + model_idx * 1080
- * We read r7 = task node virt pointer, and dump model_ctx at 0x400-0x440.
+ * Probes at ive_start_task+0x68 (bcc) where r4=global, r7=task_node.
+ * Reads model_ctx and tile table to understand Conv HW configuration.
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
+#include <linux/kallsyms.h>
 #include <asm/io.h>
-
-/* Probe on drv_ive_write_regs — simple, reliable.
- * Manually walk globals to find model_ctx. */
 
 static int call_count;
 
-/* Use hardcoded address from kallsyms for the global */
-static unsigned long g_xnn_ctx_addr;
-module_param(g_xnn_ctx_addr, ulong, S_IRUGO);
-
-static int write_pre(struct kprobe *p, struct pt_regs *regs)
+static int start_handler(struct kprobe *p, struct pt_regs *regs)
 {
-	u32 phys = regs->ARM_r0;
-	u8 *virt;
-	u8 *base;
-	u32 ctx_arr_ptr;
-	u16 model_idx;
+	u32 r4 = regs->ARM_r4;  /* global base (g_ive_md_ctx) */
+	u32 r7 = regs->ARM_r7;  /* task node virtual addr */
+	u8 *node = (u8 *)(unsigned long)r7;
+	u32 ctx_arr, node12;
 	u8 *mctx;
-	int i;
 
-	if (phys < 0x40000000 || phys > 0x50000000) return 0;
+	if (!node || node[10] != 0x36) return 0;
 
-	virt = phys_to_virt(phys);
-	if (!virt) return 0;
+	node12 = *(u32 *)(node + 12);
+	pr_info("kp_ive: node type=%d node[12]=0x%x\n", node[11], node12);
 
-	/* node[6..7] = model context index */
-	model_idx = *(u16 *)(virt + 6);
+	ctx_arr = *(u32 *)((u8 *)r4 + 0x1c0);
+	if (ctx_arr) {
+		u16 model_idx = *(u16 *)(node + 6);
+		u32 field420, base18;
+		u8 *table;
 
-	pr_info("kp_ive: SUBMIT phys=0x%x type=%d model_idx=%d\n",
-		phys, virt[11], model_idx);
+		mctx = (u8 *)(unsigned long)ctx_arr + model_idx * 1080;
 
-	if (g_xnn_ctx_addr) {
-		base = (u8 *)g_xnn_ctx_addr;
+		field420 = *(u32 *)(mctx + 0x420);
+		base18 = *(u32 *)(mctx + 0x18);
 
-		/* Dump relevant offsets from g_xnn_ctx to find model_ctx_arr */
-		pr_info("kp_ive: g_xnn[0x064]=%08x\n", *(u32*)(base+0x64));
-		pr_info("kp_ive: g_xnn[0x1c0]=%08x\n", *(u32*)(base+0x1c0));
-		pr_info("kp_ive: g_xnn[0x1cc]=%08x\n", *(u32*)(base+0x1cc));
+		pr_info("kp_ive: mctx=%p field420=%d base18=0x%x\n",
+			mctx, field420, base18);
+		pr_info("kp_ive: mctx+420: %*ph\n", 16, mctx + 0x420);
 
-		ctx_arr_ptr = *(u32*)(base + 0x1c0);
-		if (ctx_arr_ptr) {
-			mctx = (u8*)(unsigned long)ctx_arr_ptr +
-				(u32)model_idx * 1080;
-			pr_info("kp_ive: model_ctx at %p (arr=0x%x + %d*1080)\n",
-				mctx, ctx_arr_ptr, model_idx);
+		/* Tile table = node[12] * field420 + base18 */
+		table = (u8 *)(unsigned long)(base18 + node12 * field420);
+		pr_info("kp_ive: tile_table = 0x%x * %d + 0x%x = %p\n",
+			node12, field420, base18, table);
 
-			/* Dump 0x400-0x440 */
-			for (i = 0x400; i < 0x440; i += 16)
-				pr_info("kp_ive: mctx+%03x: %*ph\n",
-					i, 16, mctx + i);
-		} else {
-			pr_info("kp_ive: model_ctx_arr is NULL\n");
-		}
+		/* Dump first 3 table entries (20 bytes each) */
+		pr_info("kp_ive: entry[0]: %*ph\n", 20, table);
+		pr_info("kp_ive: entry[1]: %*ph\n", 20, table + 20);
+		pr_info("kp_ive: entry[2]: %*ph\n", 20, table + 40);
 	}
-
-	/* Also dump first node */
-	pr_info("kp_ive: node +00: %*ph\n", 16, virt);
-	pr_info("kp_ive: node +10: %*ph\n", 16, virt+16);
 
 	call_count++;
 	return 0;
 }
 
-static struct kprobe kp = { .symbol_name = "drv_ive_write_regs" };
+static struct kprobe kp_start;
 
 static int __init kprobe_ive_init(void)
 {
 	int ret;
+	unsigned long addr = kallsyms_lookup_name("ive_start_task");
+	if (!addr) return -ENOENT;
 
-	if (!g_xnn_ctx_addr) {
-		/* Try to find from kallsyms */
-		g_xnn_ctx_addr = kallsyms_lookup_name("g_ive_xnn_ctx");
-		if (!g_xnn_ctx_addr)
-			g_xnn_ctx_addr = kallsyms_lookup_name("g_svp_alg_xnn_ctx");
-	}
-
-	kp.pre_handler = write_pre;
-	ret = register_kprobe(&kp);
+	kp_start.addr = (void *)(addr + 0x68);
+	kp_start.pre_handler = start_handler;
+	ret = register_kprobe(&kp_start);
 	if (ret < 0) return ret;
 
-	pr_info("kp_ive: ready, g_xnn_ctx=0x%lx\n", g_xnn_ctx_addr);
+	pr_info("kp_ive: probing at %pS\n", kp_start.addr);
 	return 0;
 }
 
-static void __exit kprobe_ive_exit(void) { unregister_kprobe(&kp); }
+static void __exit kprobe_ive_exit(void)
+{
+	unregister_kprobe(&kp_start);
+}
+
 module_init(kprobe_ive_init);
 module_exit(kprobe_ive_exit);
 MODULE_LICENSE("GPL");
