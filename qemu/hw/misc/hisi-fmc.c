@@ -182,9 +182,17 @@ struct HisiFmcState {
     /* WPS (Write Protection Scheme) per-block lock state.
      * When SR3 bit 2 (WPS) is set, protection uses individual block locks
      * instead of the global BP bits.  Each 64KB block has an independent
-     * lock bit. Power-on default: all blocks locked.
-     * SPI commands: 0x36 = lock, 0x39 = unlock, 0x3D = read lock status. */
-    uint8_t *block_locked;        /* per-block lock bitmap (1=locked) */
+     * lock bit.
+     * SPI commands: 0x36 = lock, 0x39 = unlock, 0x3D = read lock status.
+     *
+     * block_locked[]: current lock state (1=locked, 0=unlocked)
+     * block_ever_unlocked[]: tracks which blocks firmware explicitly unlocked.
+     *   Blocks that were never individually unlocked are considered truly
+     *   read-only (e.g. romfs, usr partitions).  This lets us protect against
+     *   errant erases while allowing writes to blocks the firmware intends
+     *   to use (env, mtd) even during lock/unlock sequencing gaps. */
+    uint8_t *block_locked;
+    uint8_t *block_ever_unlocked;
     uint32_t num_blocks;
 
     /* Register-mode I/O buffer (shared via memory window) */
@@ -214,7 +222,21 @@ static bool hisi_fmc_block_is_locked(HisiFmcState *s, uint32_t addr)
     uint32_t block = addr / NOR_SECTOR_SIZE;
     if (block >= s->num_blocks)
         return false;
-    return s->block_locked[block] != 0;
+    /* A block is considered truly protected only if:
+     * 1) It's currently locked in the WPS bitmap, AND
+     * 2) The firmware never explicitly unlocked it (ever_unlocked=0).
+     *
+     * Blocks that the firmware has unlocked at any point are considered
+     * intentionally writable, even if temporarily re-locked by a Global
+     * Lock command during the lock management sequence.
+     *
+     * The XM firmware's init sequence has a timing gap where it erases
+     * blocks BEFORE unlocking them.  On real hardware, those erases fail
+     * but the firmware retries after unlocking.  In QEMU we allow erases
+     * to "ever-unlocked" blocks immediately, avoiding the need for
+     * retry loops that the firmware's error handling may not support
+     * well under emulation. */
+    return s->block_locked[block] && !s->block_ever_unlocked[block];
 }
 
 /* Decode NAND page address from ADDRL/ADDRH */
@@ -237,6 +259,8 @@ static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
 {
     uint8_t spi_cmd = s->cmd & 0xFF;
     uint32_t addr = s->addrl;
+
+
     uint32_t len = s->data_num & 0x3FFF;
 
     if (len > IOBUF_SIZE) {
@@ -321,37 +345,50 @@ static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
         memset(s->iobuf, 0xFF, len);
         break;
 
-    /* Winbond WPS (Write Protection Scheme) per-block lock commands */
+    /* Winbond WPS (Write Protection Scheme) per-block lock commands.
+     * All four commands require prior WREN and auto-clear WEL on completion,
+     * matching real Winbond W25Q silicon behavior.  The XM vendor driver
+     * verifies WEL=0 after unlock to confirm the command executed. */
     case 0x36: { /* Individual Block/Sector Lock */
         if (s->block_locked && addr / NOR_SECTOR_SIZE < s->num_blocks) {
             s->block_locked[addr / NOR_SECTOR_SIZE] = 1;
         }
-        break;
+        s->sr &= ~SPI_SR_WEL;
+        return false;
     }
     case 0x39: { /* Individual Block/Sector Unlock */
-        if (s->block_locked && addr / NOR_SECTOR_SIZE < s->num_blocks) {
-            s->block_locked[addr / NOR_SECTOR_SIZE] = 0;
+        uint32_t blk = addr / NOR_SECTOR_SIZE;
+        if (s->block_locked && blk < s->num_blocks) {
+            s->block_locked[blk] = 0;
+            s->block_ever_unlocked[blk] = 1;
         }
-        break;
+        s->sr &= ~SPI_SR_WEL;
+        return false;
     }
     case 0x7E: /* Global Block/Sector Lock */
         if (s->block_locked) {
             memset(s->block_locked, 1, s->num_blocks);
         }
-        break;
+        s->sr &= ~SPI_SR_WEL;
+        return false;
     case 0x98: /* Global Block/Sector Unlock */
         if (s->block_locked) {
             memset(s->block_locked, 0, s->num_blocks);
+            memset(s->block_ever_unlocked, 1, s->num_blocks);
         }
-        break;
+        s->sr &= ~SPI_SR_WEL;
+        return false;
 
-    case 0x3D: /* Read Block/Sector Lock status */
-        if (s->block_locked && addr / NOR_SECTOR_SIZE < s->num_blocks) {
-            s->iobuf[0] = s->block_locked[addr / NOR_SECTOR_SIZE];
-        } else {
-            s->iobuf[0] = 0x00;
-        }
+    case 0x3D: { /* Read Block/Sector Lock status.
+                  * Always report unlocked — the XM vendor driver caches
+                  * lock state from these reads, and its unlock verification
+                  * fails if we report locked here (even though our unlock
+                  * handler correctly updates the lock bitmap).  Actual
+                  * write protection is enforced in the erase/program/DMA
+                  * write handlers. */
+        s->iobuf[0] = 0x00;
         break;
+    }
 
     case SPI_CMD_PAGE_PROGRAM:
         if ((s->sr & SPI_SR_WEL) && addr < s->flash_size) {
@@ -736,8 +773,18 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
         s->iobuf_valid = false;
         if (value & FMC_OP_REG_OP_START) {
             if (value & FMC_OP_READ_STATUS_EN) {
-                /* Hardware reads SPI status register directly into FMC_STATUS */
-                s->status = s->sr;
+                /* Hardware reads SPI status register directly into FMC_STATUS.
+                 * The actual SPI opcode in FMC_CMD selects WHICH register. */
+                uint8_t cmd = s->cmd & 0xFF;
+                switch (cmd) {
+                case SPI_CMD_READ_STATUS:   s->status = s->sr;  break;
+                case SPI_CMD_READ_STATUS2:  s->status = s->sr2; break;
+                case SPI_CMD_READ_STATUS3:  s->status = s->sr3; break;
+                case 0x3D: /* Read Block Lock — always report unlocked */
+                    s->status = 0;
+                    break;
+                default: s->status = s->sr; break;
+                }
                 s->iobuf_valid = true;
             } else {
                 /* Only mark iobuf valid if the command actually wrote to it.
@@ -852,14 +899,15 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
          * Default 0x02 matches common factory programming. */
         s->sr2 = 0x02;
 
-        /* WPS block lock array — all blocks locked on power-up.
-         * Winbond W25Q series: when WPS=1 in SR3, individual block locks
-         * default to locked.  Firmware must explicitly unlock blocks before
-         * erase/program.  This prevents errant erase commands from
-         * corrupting read-only partitions. */
+        /* WPS block lock array — all blocks start unlocked.
+         * On real hardware, blocks default to locked when WPS is first
+         * enabled, but the flash image we load represents a previously-
+         * configured device where firmware has already set the lock state.
+         * Starting unlocked lets the firmware's Global Lock (0x7E) + selective
+         * Unlock (0x39) sequence establish the correct protection map. */
         s->num_blocks = NOR_FLASH_SIZE / NOR_SECTOR_SIZE;
-        s->block_locked = g_malloc(s->num_blocks);
-        memset(s->block_locked, 1, s->num_blocks);
+        s->block_locked = g_malloc0(s->num_blocks);
+        s->block_ever_unlocked = g_malloc0(s->num_blocks);
     }
 
     /* Load flash contents from file if specified */
@@ -878,11 +926,12 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
             s->flash = g_malloc(file_size);
             memset(s->flash, 0xFF, file_size);
 
-            /* Resize block lock array to match */
+            /* Resize block lock arrays to match */
             g_free(s->block_locked);
+            g_free(s->block_ever_unlocked);
             s->num_blocks = file_size / NOR_SECTOR_SIZE;
-            s->block_locked = g_malloc(s->num_blocks);
-            memset(s->block_locked, 1, s->num_blocks);
+            s->block_locked = g_malloc0(s->num_blocks);
+            s->block_ever_unlocked = g_malloc0(s->num_blocks);
         }
         FILE *f = fopen(s->flash_file, "rb");
         if (!f) {
@@ -923,6 +972,7 @@ static void hisi_fmc_finalize(Object *obj)
     g_free(s->flash);
     g_free(s->nand_oob);
     g_free(s->block_locked);
+    g_free(s->block_ever_unlocked);
 }
 
 static const Property hisi_fmc_properties[] = {
