@@ -213,6 +213,19 @@ static inline int hisi_fmc_current_flash_sel(HisiFmcState *s)
  * Returns true if the address is protected and writes/erases should be blocked.
  * WPS is active when SR3 bit 2 is set.
  */
+/*
+ * Check if a flash address is in a block that should be write-protected.
+ *
+ * Uses a two-layer approach:
+ * 1) WPS must be enabled (SR3 bit 2) and block must be in locked state
+ * 2) Only blocks that were never individually unlocked by the firmware
+ *    are actually protected.  This prevents errant erases/writes from
+ *    corrupting read-only SquashFS partitions while allowing the firmware
+ *    to write to blocks it intends to use (env, mtd partitions).
+ *
+ * The ever_unlocked flag persists across Global Lock commands, handling
+ * the XM firmware's pattern of: Global Lock → selective Unlock → use.
+ */
 static bool hisi_fmc_block_is_locked(HisiFmcState *s, uint32_t addr)
 {
     if (!(s->sr3 & 0x04))  /* WPS bit in SR3 */
@@ -222,20 +235,6 @@ static bool hisi_fmc_block_is_locked(HisiFmcState *s, uint32_t addr)
     uint32_t block = addr / NOR_SECTOR_SIZE;
     if (block >= s->num_blocks)
         return false;
-    /* A block is considered truly protected only if:
-     * 1) It's currently locked in the WPS bitmap, AND
-     * 2) The firmware never explicitly unlocked it (ever_unlocked=0).
-     *
-     * Blocks that the firmware has unlocked at any point are considered
-     * intentionally writable, even if temporarily re-locked by a Global
-     * Lock command during the lock management sequence.
-     *
-     * The XM firmware's init sequence has a timing gap where it erases
-     * blocks BEFORE unlocking them.  On real hardware, those erases fail
-     * but the firmware retries after unlocking.  In QEMU we allow erases
-     * to "ever-unlocked" blocks immediately, avoiding the need for
-     * retry loops that the firmware's error handling may not support
-     * well under emulation. */
     return s->block_locked[block] && !s->block_ever_unlocked[block];
 }
 
@@ -949,6 +948,52 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
         }
         qemu_log("hisi-fmc: loaded %u bytes from '%s'\n",
                  file_size, s->flash_file);
+
+        /* Scan for SquashFS partitions and pre-mark non-SquashFS blocks as
+         * ever_unlocked.  This protects SquashFS data from errant erases
+         * while allowing the firmware to freely erase/write other blocks
+         * (env, mtd, boot) without WPS interference.
+         *
+         * The scan finds SquashFS superblocks (magic 'hsqs') at sector
+         * boundaries and marks blocks within each filesystem's extent as
+         * protected (ever_unlocked=0).  All other blocks get ever_unlocked=1.
+         */
+        if (s->block_ever_unlocked && s->flash_type == FLASH_TYPE_SPI_NOR) {
+            /* Start by marking ALL blocks as ever_unlocked (writable) */
+            memset(s->block_ever_unlocked, 1, s->num_blocks);
+
+            /* Then clear ever_unlocked for blocks inside SquashFS partitions */
+            for (uint32_t off = 0; off + 4 <= s->flash_size;
+                 off += NOR_SECTOR_SIZE) {
+                if (s->flash[off]     == 0x68 && /* 'h' */
+                    s->flash[off + 1] == 0x73 && /* 's' */
+                    s->flash[off + 2] == 0x71 && /* 'q' */
+                    s->flash[off + 3] == 0x73) { /* 's' */
+                    /* Found SquashFS superblock — read bytes_used (LE64 at +40) */
+                    uint64_t bytes_used = 0;
+                    if (off + 48 <= s->flash_size) {
+                        for (int i = 0; i < 8; i++) {
+                            bytes_used |= (uint64_t)s->flash[off + 40 + i] << (8 * i);
+                        }
+                    }
+                    if (bytes_used == 0 || bytes_used > s->flash_size) {
+                        bytes_used = NOR_SECTOR_SIZE; /* fallback: protect one block */
+                    }
+                    uint32_t sqfs_end = off + (uint32_t)bytes_used;
+                    if (sqfs_end > s->flash_size) sqfs_end = s->flash_size;
+                    uint32_t blk_start = off / NOR_SECTOR_SIZE;
+                    uint32_t blk_end = (sqfs_end + NOR_SECTOR_SIZE - 1)
+                                       / NOR_SECTOR_SIZE;
+                    if (blk_end > s->num_blocks) blk_end = s->num_blocks;
+                    for (uint32_t b = blk_start; b < blk_end; b++) {
+                        s->block_ever_unlocked[b] = 0;
+                    }
+                    qemu_log("hisi-fmc: protect SquashFS at 0x%x "
+                             "(%" PRIu64 " bytes, blocks %u-%u)\n",
+                             off, bytes_used, blk_start, blk_end - 1);
+                }
+            }
+        }
     }
 }
 
