@@ -1692,64 +1692,90 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
         rom[n++] = cpu_to_le32(0xe12fff11);     /* bx r1                  */
     } else {
         /*
-         * ARMv5 (ARM926): no movw/movt.  Use PC-relative loads from a
-         * literal pool placed after the branch instruction.
+         * ARMv5 (ARM926): no movw/movt, no VBAR.  Exception vectors are
+         * always at address 0, so the boot ROM must provide a proper
+         * vector table.  QEMU's ARM926 model raises undefined-instruction
+         * exceptions for some cp15 registers that real silicon silently
+         * ignores (e.g. L2 cache aux control), so the undefined handler
+         * must skip the faulting instruction instead of looping.
          *
-         * Layout (n starts at 1 after msr):
-         *   [1] ldr r0, [pc, #20]   -> pool[0] = flash_src
-         *   [2] ldr r1, [pc, #20]   -> pool[1] = ram_dst
-         *   [3] ldr r2, [pc, #20]   -> pool[2] = copy_sz
-         *   [4] add r3, r1, r2
-         *   [5] ldr r4, [r0], #4    (copy_loop)
-         *   [6] str r4, [r1], #4
-         *   [7] cmp r1, r3
-         *   [8] bne copy_loop
-         *   [9] ldr r1, [pc, #4]    -> pool[1] = ram_dst
-         *  [10] bx r1
-         *  [11] pool[0] = flash_src
-         *  [12] pool[1] = ram_dst
-         *  [13] pool[2] = copy_sz
-         *
-         * PC-relative offset = target_addr - (insn_addr + 8)
-         * For insn at index i: addr = i*4, pc_val = i*4 + 8
-         * pool[j] at index (11+j): addr = (11+j)*4
-         * offset for insn[i] -> pool[j] = (11+j)*4 - (i*4+8)
+         * Layout:
+         *   [0]  b reset_handler      ; reset vector  -> word 8
+         *   [1]  movs pc, lr          ; undefined insn -> skip & continue
+         *   [2]  b .                  ; SWI            -> hang
+         *   [3]  b .                  ; prefetch abort -> hang
+         *   [4]  subs pc, lr, #4      ; data abort     -> retry
+         *   [5]  b .                  ; reserved
+         *   [6]  b .                  ; IRQ            -> hang
+         *   [7]  b .                  ; FIQ            -> hang
+         *   [8]  msr cpsr_c, #0xD3   ; reset_handler
+         *   [9]  ldr r0, [pc, #32]   -> pool[0] = flash_src
+         *  [10]  ldr r1, [pc, #32]   -> pool[1] = ram_dst
+         *  [11]  ldr r2, [pc, #32]   -> pool[2] = copy_sz
+         *  [12]  add r3, r1, r2
+         *  [13]  ldr r4, [r0], #4    (copy_loop)
+         *  [14]  str r4, [r1], #4
+         *  [15]  cmp r1, r3
+         *  [16]  bne copy_loop
+         *  [17]  ldr r1, [pc, #4]    -> pool[1] = ram_dst
+         *  [18]  bx r1
+         *  [19]  pool[0] = flash_src
+         *  [20]  pool[1] = ram_dst
+         *  [21]  pool[2] = copy_sz
          */
-        /* insn[1]: ldr r0, [pc, #offset_to_pool0]
-         * pool[0] at word 11, insn at word 1: offset = (11-1-2)*4 = 32 */
-        rom[n++] = cpu_to_le32(0xe59f0000 | 32);  /* ldr r0, [pc, #32] */
-        /* insn[2]: pool[1] at word 12: offset = (12-2-2)*4 = 32 */
-        rom[n++] = cpu_to_le32(0xe59f1000 | 32);  /* ldr r1, [pc, #32] */
-        /* insn[3]: pool[2] at word 13: offset = (13-3-2)*4 = 32 */
-        rom[n++] = cpu_to_le32(0xe59f2000 | 32);  /* ldr r2, [pc, #32] */
+        n = 0;
+        rom[n++] = cpu_to_le32(0xea000006);     /* b reset_handler (word 8) */
+        rom[n++] = cpu_to_le32(0xe1b0f00e);     /* movs pc, lr              */
+        rom[n++] = cpu_to_le32(0xeafffffe);     /* b .  (SWI)               */
+        rom[n++] = cpu_to_le32(0xeafffffe);     /* b .  (prefetch abort)    */
+        rom[n++] = cpu_to_le32(0xe25ef004);     /* subs pc, lr, #4 (dabort) */
+        rom[n++] = cpu_to_le32(0xeafffffe);     /* b .  (reserved)          */
+        rom[n++] = cpu_to_le32(0xeafffffe);     /* b .  (IRQ)               */
+        rom[n++] = cpu_to_le32(0xeafffffe);     /* b .  (FIQ)               */
 
-        rom[n++] = cpu_to_le32(0xe0813002);     /* add r3, r1, r2         */
-        rom[n++] = cpu_to_le32(0xe4904004);     /* ldr r4, [r0], #4       */
-        rom[n++] = cpu_to_le32(0xe4814004);     /* str r4, [r1], #4       */
-        rom[n++] = cpu_to_le32(0xe1510003);     /* cmp r1, r3             */
-        rom[n++] = cpu_to_le32(0x1afffffb);     /* bne copy_loop          */
+        /* reset_handler at word 8 */
+        assert(n == 8);
+        rom[n++] = cpu_to_le32(0xe321f0d3);     /* msr cpsr_c, #0xD3       */
 
-        /* insn[9]: ldr r1, [pc, #offset_to_pool1]
-         * pool[1] at word 12: offset = (12-9-2)*4 = 4 */
-        rom[n++] = cpu_to_le32(0xe59f1000 | 4); /* ldr r1, [pc, #4]  */
-        rom[n++] = cpu_to_le32(0xe12fff11);     /* bx r1                  */
+        /* PC-relative offset = pool_addr - (insn_addr + 8)
+         * For insn[i] -> pool at word p: offset = (p - i - 2) * 4 */
+        rom[n++] = cpu_to_le32(0xe59f0000 | 32); /* ldr r0, [pc, #32]      */
+        rom[n++] = cpu_to_le32(0xe59f1000 | 32); /* ldr r1, [pc, #32]      */
+        rom[n++] = cpu_to_le32(0xe59f2000 | 32); /* ldr r2, [pc, #32]      */
 
-        /* Literal pool at word 11 */
-        assert(n == 11);
+        rom[n++] = cpu_to_le32(0xe0813002);     /* add r3, r1, r2           */
+        rom[n++] = cpu_to_le32(0xe4904004);     /* ldr r4, [r0], #4         */
+        rom[n++] = cpu_to_le32(0xe4814004);     /* str r4, [r1], #4         */
+        rom[n++] = cpu_to_le32(0xe1510003);     /* cmp r1, r3               */
+        rom[n++] = cpu_to_le32(0x1afffffb);     /* bne copy_loop            */
+
+        rom[n++] = cpu_to_le32(0xe59f1000 | 4); /* ldr r1, [pc, #4]        */
+        rom[n++] = cpu_to_le32(0xe12fff11);     /* bx r1                    */
+
+        /* Literal pool at word 19 */
+        assert(n == 19);
         rom[n++] = cpu_to_le32(flash_src);
         rom[n++] = cpu_to_le32(ram_dst);
         rom[n++] = cpu_to_le32(copy_sz);
     }
 
     MemoryRegion *bootrom = g_new(MemoryRegion, 1);
-    memory_region_init_rom(bootrom, NULL, "hisilicon.bootrom",
-                           0x1000, &error_fatal);
+    if (armv7) {
+        /* Cortex-A7+ uses VBAR for exception vectors, so address 0 can be
+         * ROM.  Firmware with NULL pointer bugs that write to address 0
+         * will have writes silently dropped — same as real silicon. */
+        memory_region_init_rom(bootrom, NULL, "hisilicon.bootrom",
+                               0x1000, &error_fatal);
+    } else {
+        /* ARM926 has no VBAR — exception vectors are always at address 0.
+         * U-Boot must overwrite the boot ROM vectors with its own handlers
+         * (e.g. for undefined instruction).  Use RAM so the vectors are
+         * writable, matching real hardware where address 0 is internal
+         * SRAM that becomes writable after boot ROM handoff. */
+        memory_region_init_ram(bootrom, NULL, "hisilicon.bootrom",
+                               0x1000, &error_fatal);
+    }
     memory_region_add_subregion(sysmem, 0, bootrom);
-    /* ROM is read-only after initial write, matching real hardware where
-     * address 0 is internal boot ROM.  U-Boot on Cortex-A7 uses VBAR for
-     * exception vectors (not address 0).  Firmware with NULL pointer bugs
-     * that write to address 0 will have writes silently dropped — same as
-     * real silicon where the boot ROM is not writable. */
     address_space_write_rom(&address_space_memory, 0,
                             MEMTXATTRS_UNSPECIFIED, rom, sizeof(rom));
 }
