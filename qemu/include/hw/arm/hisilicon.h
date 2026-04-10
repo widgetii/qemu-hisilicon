@@ -92,6 +92,10 @@ typedef struct HisiSoCConfig {
     hwaddr          femac_base;     /* 0 = no FEMAC */
     int             femac_irq;
 
+    /* GMAC (Gigabit Ethernet MAC) — for AV100, 3519V101 */
+    hwaddr          gmac_base;      /* 0 = no GMAC */
+    int             gmac_irq;
+
     /* SD/MMC — himciv200 (older SoCs) */
     int             num_himci;
     hwaddr          himci_bases[HISI_MAX_HIMCI];

@@ -351,7 +351,8 @@ static const HisiSoCConfig hi3516av100_soc = {
     .gpio_stride        = 0x10000,
     .gpio_irq           = 47,               /* shared IRQ for all ports (GIC) */
 
-    /* No FEMAC — uses GMAC (higmac) which is not emulated */
+    .gmac_base          = 0x10090000,
+    .gmac_irq           = 25,
 
     .num_himci          = 2,
     .himci_bases        = { 0x206E0000, 0x206F0000 },
@@ -375,12 +376,11 @@ static const HisiSoCConfig hi3516av100_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
-    .num_regbanks       = 9,
+    .num_regbanks       = 8,
     .regbanks           = {
         { "hisi-misc",       0x20120000, 0x10000 },
         { "hisi-ddr",        0x20110000, 0x10000 },
         { "hisi-pwm",        0x20130000, 0x10000 },
-        { "hisi-gmac",       0x10090000, 0x10000 },
         { "hisi-nandc",      0x10000000, 0x1000  },
         /* USB/SNAND left unmapped — regbanks store poll-bit writes
          * causing infinite loops in EHCI handshake and SPI NAND OP */
@@ -2001,6 +2001,16 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, c->femac_base);
         sysbus_connect_irq(busdev, 0, pic[c->femac_irq]);
+    }
+
+    /* GMAC (Gigabit Ethernet MAC) — for AV100, 3519V101 */
+    if (c->gmac_base) {
+        DeviceState *gmac = qdev_new("hisi-gmac");
+        qemu_configure_nic_device(gmac, true, NULL);
+        SysBusDevice *busdev = SYS_BUS_DEVICE(gmac);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->gmac_base);
+        sysbus_connect_irq(busdev, 0, pic[c->gmac_irq]);
     }
 
     /* SD/MMC — himciv200 */
