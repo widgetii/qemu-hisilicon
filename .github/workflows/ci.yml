@@ -148,6 +148,7 @@ jobs:
             machine: hi3516av100
             mem: 256M
             append: "console=ttyAMA0,115200 earlyprintk mem=256M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            # ping_linux blocked by vendor module crash (#30)
 
           - name: hi3516cv300
             soc: hi3516cv300
