@@ -305,13 +305,22 @@ jobs:
           # Keep input pipe open (prevents EOF on each write)
           exec 3>/tmp/ub.in
 
-          # Interrupt autoboot (spam Ctrl-C until we see the prompt)
-          for i in $(seq 1 20); do
-            printf '\x03\n' >&3
-            if grep -q "OpenIPC #\|hisilicon #\|=> " /tmp/uboot-ping.txt 2>/dev/null; then
+          # Wait for U-Boot to start before sending interrupt — sending too
+          # early fills the UART FIFO and characters get dropped
+          for i in $(seq 1 30); do
+            if grep -q "autoboot" /tmp/uboot-ping.txt 2>/dev/null; then
               break
             fi
             sleep 0.5
+          done
+
+          # Interrupt autoboot (spam Ctrl-C until we see the prompt)
+          for i in $(seq 1 20); do
+            printf '\x03' >&3
+            if grep -q "OpenIPC #\|hisilicon #\|=> " /tmp/uboot-ping.txt 2>/dev/null; then
+              break
+            fi
+            sleep 0.2
           done
 
           echo "setenv ipaddr 10.0.10.15" >&3
