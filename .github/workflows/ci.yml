@@ -129,9 +129,10 @@ jobs:
             soc: hi3516cv100
             machine: hi3516cv100
             mem: 64M
-            append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),2048k(kernel),5120k(rootfs),-(rootfs_data)"
             ping_linux: true
-            # No U-Boot flash test: hisi-sfc350 doesn't support flash-file yet
+            uboot_bin: u-boot-hi3516cv100-universal.bin
+            flash_type: hisi-sfc350
 
           - name: hi3516cv200
             soc: hi3516cv200
@@ -292,29 +293,42 @@ jobs:
           dd if=qemu-boot/rootfs.squashfs.${{ matrix.soc }} of=$FLASH bs=1 seek=$((0x350000)) conv=notrunc 2>/dev/null
 
           mkfifo /tmp/ub.in /tmp/ub.out
+          FLASH_TYPE="${{ matrix.flash_type || 'hisi-fmc' }}"
           $QEMU \
             -M ${{ matrix.machine }} -m ${{ matrix.flash_mem || matrix.mem }} \
-            -global hisi-fmc.flash-file=$FLASH \
+            -global ${FLASH_TYPE}.flash-file=$FLASH \
             -nographic -serial pipe:/tmp/ub -nic tap,ifname=tap0,script=no,downscript=no \
             -monitor none &
           QEMU_PID=$!
           cat /tmp/ub.out > /tmp/uboot-ping.txt &
 
-          # Interrupt autoboot (spam Ctrl-C until we see the prompt)
-          for i in $(seq 1 20); do
-            printf '\x03\n' > /tmp/ub.in
-            if grep -q "OpenIPC #\|hisilicon #\|=> " /tmp/uboot-ping.txt 2>/dev/null; then
+          # Keep input pipe open (prevents EOF on each write)
+          exec 3>/tmp/ub.in
+
+          # Wait for U-Boot to start before sending interrupt — sending too
+          # early fills the UART FIFO and characters get dropped
+          for i in $(seq 1 30); do
+            if grep -q "autoboot" /tmp/uboot-ping.txt 2>/dev/null; then
               break
             fi
             sleep 0.5
           done
 
-          echo "setenv ipaddr 10.0.10.15" > /tmp/ub.in
-          echo "setenv serverip 10.0.10.1" > /tmp/ub.in
-          echo "setenv gatewayip 10.0.10.1" > /tmp/ub.in
-          echo "setenv netmask 255.255.255.0" > /tmp/ub.in
+          # Interrupt autoboot (spam Ctrl-C until we see the prompt)
+          for i in $(seq 1 20); do
+            printf '\x03' >&3
+            if grep -q "OpenIPC #\|hisilicon #\|=> " /tmp/uboot-ping.txt 2>/dev/null; then
+              break
+            fi
+            sleep 0.2
+          done
+
+          echo "setenv ipaddr 10.0.10.15" >&3
+          echo "setenv serverip 10.0.10.1" >&3
+          echo "setenv gatewayip 10.0.10.1" >&3
+          echo "setenv netmask 255.255.255.0" >&3
           sleep 1
-          echo "ping 10.0.10.1" > /tmp/ub.in
+          echo "ping 10.0.10.1" >&3
 
           # Wait for ping result (up to 30s)
           for i in $(seq 1 30); do
@@ -324,6 +338,7 @@ jobs:
             sleep 1
           done
 
+          exec 3>&-
           kill $QEMU_PID 2>/dev/null || true
           wait 2>/dev/null || true
           rm -f /tmp/ub.in /tmp/ub.out
