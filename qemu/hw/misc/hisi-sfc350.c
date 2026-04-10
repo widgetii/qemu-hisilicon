@@ -18,6 +18,7 @@
 #include "hw/qdev-properties.h"
 #include "qemu/log.h"
 #include "system/dma.h"
+#include <sys/stat.h>
 
 /* ── Register offsets ────────────────────────────────────────────────── */
 
@@ -77,6 +78,8 @@
 #define SPI_CMD_SE_32K          0x52
 #define SPI_CMD_SE_64K          0xD8
 #define SPI_CMD_CE              0xC7
+#define SPI_CMD_FAST_READ_DUAL  0x3B
+#define SPI_CMD_FAST_READ_QUAD  0x6B
 #define SPI_CMD_EN4B            0xB7
 #define SPI_CMD_EX4B            0xE9
 
@@ -129,6 +132,9 @@ struct HisiSfc350State {
     uint32_t cmd_addr;
     uint32_t cmd_databuf[DATABUF_REGS];
 
+    /* Configuration properties */
+    char    *flash_file;
+
     /* SPI flash state */
     uint8_t  sr;
     uint8_t *flash;
@@ -151,11 +157,18 @@ static void hisi_sfc350_exec_cmd(HisiSfc350State *s)
     }
 
     switch (opcode) {
-    case SPI_CMD_RDID:
-        s->cmd_databuf[0] = NOR_JEDEC_MFR | (NOR_JEDEC_TYPE << 8) |
-                            (NOR_JEDEC_CAP << 16);
+    case SPI_CMD_RDID: {
+        /* Only CS0 has a flash chip; CS1 returns 0 (no chip) */
+        uint32_t cs = (s->cmd_config >> CMD_CONFIG_SEL_CS_SHIFT) & 1;
+        if (cs == 0) {
+            s->cmd_databuf[0] = NOR_JEDEC_MFR | (NOR_JEDEC_TYPE << 8) |
+                                (NOR_JEDEC_CAP << 16);
+        } else {
+            s->cmd_databuf[0] = 0;
+        }
         s->cmd_databuf[1] = 0;
         break;
+    }
 
     case SPI_CMD_RDSR:
         s->cmd_databuf[0] = s->sr;
@@ -180,6 +193,8 @@ static void hisi_sfc350_exec_cmd(HisiSfc350State *s)
 
     case SPI_CMD_READ:
     case SPI_CMD_FAST_READ:
+    case SPI_CMD_FAST_READ_DUAL:
+    case SPI_CMD_FAST_READ_QUAD:
         if (data_en && rw_read && addr < s->flash_size) {
             uint32_t len = data_cnt;
             if (addr + len > s->flash_size) {
@@ -396,7 +411,7 @@ static uint64_t hisi_sfc350_mem_read(void *opaque, hwaddr offset,
                                       unsigned size)
 {
     HisiSfc350State *s = HISI_SFC350(opaque);
-    uint32_t val = 0xFF;
+    uint32_t val = 0xFFFFFFFF;
 
     if (offset < s->flash_size) {
         memcpy(&val, &s->flash[offset], size > 4 ? 4 : size);
@@ -441,20 +456,70 @@ static void hisi_sfc350_realize(DeviceState *dev, Error **errp)
     s->flash_size = NOR_FLASH_SIZE;
     s->flash = g_malloc(s->flash_size);
     memset(s->flash, 0xFF, s->flash_size);
+
+    /* SFC_BUS_FLASH_SIZE: bits [1:0] = CS0 flash size
+     * 0=16MiB, 1=8MiB, 2=4MiB, 3=2MiB.
+     * Default to 8 MiB (W25Q64) so the kernel detects the correct size. */
+    s->bus_flash_size = 0x01;
+
+    /* Load flash contents from file if specified */
+    if (s->flash_file && s->flash_file[0]) {
+        struct stat st;
+        if (stat(s->flash_file, &st) != 0) {
+            error_setg(errp, "hisi-sfc350: cannot stat flash file '%s'",
+                       s->flash_file);
+            return;
+        }
+        uint32_t file_size = (uint32_t)st.st_size;
+        if (file_size > s->flash_size) {
+            g_free(s->flash);
+            s->flash_size = file_size;
+            s->flash = g_malloc(file_size);
+            memset(s->flash, 0xFF, file_size);
+        }
+        FILE *f = fopen(s->flash_file, "rb");
+        if (!f) {
+            error_setg(errp, "hisi-sfc350: cannot open flash file '%s'",
+                       s->flash_file);
+            return;
+        }
+        size_t nread = fread(s->flash, 1, file_size, f);
+        fclose(f);
+        if (nread != file_size) {
+            error_setg(errp, "hisi-sfc350: short read from '%s' "
+                       "(got %zu, expected %u)", s->flash_file,
+                       nread, file_size);
+            return;
+        }
+        qemu_log("hisi-sfc350: loaded %u bytes from '%s'\n",
+                 file_size, s->flash_file);
+    }
 }
+
+static void hisi_sfc350_finalize(Object *obj)
+{
+    HisiSfc350State *s = HISI_SFC350(obj);
+    g_free(s->flash);
+}
+
+static const Property hisi_sfc350_properties[] = {
+    DEFINE_PROP_STRING("flash-file", HisiSfc350State, flash_file),
+};
 
 static void hisi_sfc350_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->realize = hisi_sfc350_realize;
+    device_class_set_props(dc, hisi_sfc350_properties);
 }
 
 static const TypeInfo hisi_sfc350_info = {
-    .name          = TYPE_HISI_SFC350,
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(HisiSfc350State),
-    .instance_init = hisi_sfc350_init,
-    .class_init    = hisi_sfc350_class_init,
+    .name              = TYPE_HISI_SFC350,
+    .parent            = TYPE_SYS_BUS_DEVICE,
+    .instance_size     = sizeof(HisiSfc350State),
+    .instance_init     = hisi_sfc350_init,
+    .instance_finalize = hisi_sfc350_finalize,
+    .class_init        = hisi_sfc350_class_init,
 };
 
 static void hisi_sfc350_register_types(void)
