@@ -168,13 +168,19 @@ static const HisiSoCConfig hi3516cv100_soc = {
     .wdt_freq           = 3000000,
 
     /*
-     * BPLL register defaults for 100 MHz AXI bus clock.
-     * Kernel computes: busclk = 24M * fbdiv / (2 * refdiv * pstdiv1 * pstdiv2)
-     * With refdiv=3, fbdiv=25, pstdiv1=1, pstdiv2=1: busclk = 100 MHz.
-     * Timer clock = busclk / prescale(2) = 50 MHz.
+     * PLL register defaults.
+     * Kernel computes: clk = 24M * fbdiv / (2 * refdiv * pstdiv1 * pstdiv2)
+     *
+     * APLL (CRG0/CRG1): CPU clock ~552 MHz.
+     *   pstdiv1=1, pstdiv2=1, refdiv=1, fbdiv=46: 24*46/2 = 552 MHz.
+     * BPLL (CRG4/CRG5): AXI bus clock 100 MHz.
+     *   pstdiv1=1, pstdiv2=1, refdiv=3, fbdiv=25: 24*25/6 = 100 MHz.
+     *   Timer clock = busclk / prescale(2) = 50 MHz.
      */
-    .num_crg_defaults   = 2,
+    .num_crg_defaults   = 4,
     .crg_defaults       = {
+        { 0x00, (1 << 24) | (1 << 27) },   /* CRG0: pstdiv1=1, pstdiv2=1 */
+        { 0x04, (1 << 12) | 46 },           /* CRG1: refdiv=1, fbdiv=46 */
         { 0x10, (1 << 24) | (1 << 27) },   /* CRG4: pstdiv1=1, pstdiv2=1 */
         { 0x14, (3 << 12) | 25 },           /* CRG5: refdiv=3, fbdiv=25 */
     },
