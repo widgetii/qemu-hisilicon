@@ -48,6 +48,7 @@ cp qemu/hw/misc/hisi-ive.c          "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-fastboot.c     "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-gzip.c        "$QEMU_DIR/hw/misc/"
 cp qemu/hw/net/hisi-femac.c         "$QEMU_DIR/hw/net/"
+cp qemu/hw/net/hisi-gmac.c          "$QEMU_DIR/hw/net/"
 cp qemu/hw/i2c/hisi-i2c.c          "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-imx335.c       "$QEMU_DIR/hw/i2c/"
 
@@ -78,6 +79,7 @@ config HISILICON
     select SDHCI
     select HISI_MISC
     select HISI_FEMAC
+    select HISI_GMAC
     select I2C
     select HISI_I2C
     select CMSDK_APB_WATCHDOG
@@ -123,6 +125,9 @@ if ! grep -q HISI_FEMAC "$QEMU_DIR/hw/net/Kconfig"; then
 
 config HISI_FEMAC
     bool
+
+config HISI_GMAC
+    bool
 KCONFIG
     echo "  patched hw/net/Kconfig"
 else
@@ -133,9 +138,16 @@ fi
 if ! grep -q hisi-femac "$QEMU_DIR/hw/net/meson.build"; then
     echo "system_ss.add(when: 'CONFIG_HISI_FEMAC', if_true: files('hisi-femac.c'))" \
         >> "$QEMU_DIR/hw/net/meson.build"
-    echo "  patched hw/net/meson.build"
+    echo "  patched hw/net/meson.build (femac)"
 else
-    echo "  hw/net/meson.build already patched"
+    echo "  hw/net/meson.build already has femac"
+fi
+if ! grep -q hisi-gmac "$QEMU_DIR/hw/net/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_HISI_GMAC', if_true: files('hisi-gmac.c'))" \
+        >> "$QEMU_DIR/hw/net/meson.build"
+    echo "  patched hw/net/meson.build (gmac)"
+else
+    echo "  hw/net/meson.build already has gmac"
 fi
 
 # hw/i2c/Kconfig
