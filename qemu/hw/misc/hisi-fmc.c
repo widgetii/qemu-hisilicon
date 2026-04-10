@@ -209,11 +209,6 @@ static inline int hisi_fmc_current_flash_sel(HisiFmcState *s)
 }
 
 /*
- * Check if a flash address is in a WPS-locked block.
- * Returns true if the address is protected and writes/erases should be blocked.
- * WPS is active when SR3 bit 2 is set.
- */
-/*
  * Check if a flash address is in a block that should be write-protected.
  *
  * Uses a two-layer approach:
