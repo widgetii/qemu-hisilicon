@@ -131,7 +131,8 @@ jobs:
             mem: 64M
             append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
-            # No U-Boot flash test: hisi-sfc350 doesn't support flash-file yet
+            uboot_bin: u-boot-hi3516cv100-universal.bin
+            flash_type: hisi-sfc350
 
           - name: hi3516cv200
             soc: hi3516cv200
@@ -292,9 +293,10 @@ jobs:
           dd if=qemu-boot/rootfs.squashfs.${{ matrix.soc }} of=$FLASH bs=1 seek=$((0x350000)) conv=notrunc 2>/dev/null
 
           mkfifo /tmp/ub.in /tmp/ub.out
+          FLASH_TYPE="${{ matrix.flash_type || 'hisi-fmc' }}"
           $QEMU \
             -M ${{ matrix.machine }} -m ${{ matrix.flash_mem || matrix.mem }} \
-            -global hisi-fmc.flash-file=$FLASH \
+            -global ${FLASH_TYPE}.flash-file=$FLASH \
             -nographic -serial pipe:/tmp/ub -nic tap,ifname=tap0,script=no,downscript=no \
             -monitor none &
           QEMU_PID=$!
