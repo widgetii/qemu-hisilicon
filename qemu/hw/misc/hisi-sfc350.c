@@ -141,6 +141,25 @@ struct HisiSfc350State {
     uint32_t flash_size;
 };
 
+/* Write-back modified flash data to the backing file. */
+static void hisi_sfc350_flush_to_file(HisiSfc350State *s, uint32_t offset,
+                                       uint32_t len)
+{
+    if (!s->flash_file || !s->flash_file[0]) {
+        return;
+    }
+    if (offset + len > s->flash_size) {
+        len = s->flash_size - offset;
+    }
+    FILE *f = fopen(s->flash_file, "r+b");
+    if (!f) {
+        return;
+    }
+    fseek(f, offset, SEEK_SET);
+    fwrite(&s->flash[offset], 1, len, f);
+    fclose(f);
+}
+
 /* ── Register-mode command execution ─────────────────────────────────── */
 
 static void hisi_sfc350_exec_cmd(HisiSfc350State *s)
@@ -215,6 +234,7 @@ static void hisi_sfc350_exec_cmd(HisiSfc350State *s)
             for (uint32_t i = 0; i < len; i++) {
                 s->flash[addr + i] &= src[i];
             }
+            hisi_sfc350_flush_to_file(s, addr, len);
             s->sr &= ~SPI_SR_WEL;
         }
         break;
@@ -225,6 +245,7 @@ static void hisi_sfc350_exec_cmd(HisiSfc350State *s)
             uint32_t end = base + 4 * 1024;
             if (end > s->flash_size) end = s->flash_size;
             memset(&s->flash[base], 0xFF, end - base);
+            hisi_sfc350_flush_to_file(s, base, end - base);
             s->sr &= ~SPI_SR_WEL;
         }
         break;
@@ -235,6 +256,7 @@ static void hisi_sfc350_exec_cmd(HisiSfc350State *s)
             uint32_t end = base + 32 * 1024;
             if (end > s->flash_size) end = s->flash_size;
             memset(&s->flash[base], 0xFF, end - base);
+            hisi_sfc350_flush_to_file(s, base, end - base);
             s->sr &= ~SPI_SR_WEL;
         }
         break;
@@ -245,6 +267,7 @@ static void hisi_sfc350_exec_cmd(HisiSfc350State *s)
             uint32_t end = base + NOR_SECTOR_SIZE;
             if (end > s->flash_size) end = s->flash_size;
             memset(&s->flash[base], 0xFF, end - base);
+            hisi_sfc350_flush_to_file(s, base, end - base);
             s->sr &= ~SPI_SR_WEL;
         }
         break;
@@ -252,6 +275,7 @@ static void hisi_sfc350_exec_cmd(HisiSfc350State *s)
     case SPI_CMD_CE:
         if (s->sr & SPI_SR_WEL) {
             memset(s->flash, 0xFF, s->flash_size);
+            hisi_sfc350_flush_to_file(s, 0, s->flash_size);
             s->sr &= ~SPI_SR_WEL;
         }
         break;
@@ -298,6 +322,7 @@ static void hisi_sfc350_exec_dma(HisiSfc350State *s)
                 s->flash[flash_addr + i] &= buf[i];
             }
             g_free(buf);
+            hisi_sfc350_flush_to_file(s, flash_addr, len);
         }
     }
 

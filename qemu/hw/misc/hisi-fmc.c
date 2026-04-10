@@ -209,6 +209,33 @@ static inline int hisi_fmc_current_flash_sel(HisiFmcState *s)
 }
 
 /*
+ * Write-back modified flash data to the backing file.
+ * Called after every erase / page-program / DMA-write so that the
+ * on-disk image stays in sync with the in-memory flash array — matching
+ * real NOR flash persistence behavior.
+ */
+static void hisi_fmc_flush_to_file(HisiFmcState *s, uint32_t offset,
+                                    uint32_t len)
+{
+    if (!s->flash_file || !s->flash_file[0]) {
+        return;
+    }
+    if (offset + len > s->flash_size) {
+        len = s->flash_size - offset;
+    }
+    FILE *f = fopen(s->flash_file, "r+b");
+    if (!f) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "hisi-fmc: cannot open '%s' for write-back\n",
+                      s->flash_file);
+        return;
+    }
+    fseek(f, offset, SEEK_SET);
+    fwrite(&s->flash[offset], 1, len, f);
+    fclose(f);
+}
+
+/*
  * Check if a flash address is in a block that should be write-protected.
  *
  * Uses a two-layer approach:
@@ -399,6 +426,7 @@ static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
                     /* NOR flash: can only clear bits (AND with data) */
                     s->flash[i] &= s->iobuf[i - addr];
                 }
+                hisi_fmc_flush_to_file(s, addr, end - addr);
             }
             s->sr &= ~SPI_SR_WEL;
         }
@@ -417,6 +445,7 @@ static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
                               base);
             } else if (base < s->flash_size) {
                 memset(&s->flash[base], 0xFF, end - base);
+                hisi_fmc_flush_to_file(s, base, end - base);
             }
             s->sr &= ~SPI_SR_WEL;
         }
@@ -425,6 +454,7 @@ static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
     case SPI_CMD_CHIP_ERASE:
         if (s->sr & SPI_SR_WEL) {
             memset(s->flash, 0xFF, s->flash_size);
+            hisi_fmc_flush_to_file(s, 0, s->flash_size);
             s->sr &= ~SPI_SR_WEL;
         }
         break;
@@ -616,6 +646,7 @@ static void hisi_fmc_exec_dma_nor(HisiFmcState *s)
                     s->flash[addr + i] &= buf[i];
                 }
                 g_free(buf);
+                hisi_fmc_flush_to_file(s, addr, len);
             }
             s->sr &= ~SPI_SR_WEL;
         }
