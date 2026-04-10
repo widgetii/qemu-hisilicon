@@ -129,7 +129,7 @@ jobs:
             soc: hi3516cv100
             machine: hi3516cv100
             mem: 64M
-            append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),2048k(kernel),5120k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516cv100-universal.bin
             flash_type: hisi-sfc350
