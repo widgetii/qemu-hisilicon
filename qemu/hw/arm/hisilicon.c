@@ -466,10 +466,11 @@ static const HisiSoCConfig hi3516cv300_soc = {
  */
 static const HisiSoCConfig hi3516cv500_soc = {
     .name               = "hi3516cv500",
-    .desc               = "HiSilicon Hi3516CV500 (Cortex-A7)",
+    .desc               = "HiSilicon Hi3516CV500 (Cortex-A7, dual-core)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_CV500,
     .ram_size_default   = 64 * MiB,
+    .max_cpus           = 2,
 
     .ram_base           = 0x80000000,
     .sram_base          = 0x04010000,
@@ -1790,8 +1791,10 @@ static void hisilicon_common_init(MachineState *machine,
                                   const HisiSoCConfig *c)
 {
     MemoryRegion *sysmem = get_system_memory();
-    Object *cpuobj;
-    ARMCPU *cpu;
+    int smp_cpus = machine->smp.cpus;
+#define HISI_MAX_SMP 2
+    Object *cpuobj[HISI_MAX_SMP];
+    ARMCPU *cpu[HISI_MAX_SMP];
     qemu_irq pic[256];
     int num_pic = 0;
     int n;
@@ -1844,17 +1847,19 @@ static void hisilicon_common_init(MachineState *machine,
     /* RAM */
     memory_region_add_subregion(sysmem, c->ram_base, machine->ram);
 
-    /* CPU */
-    cpuobj = object_new(machine->cpu_type);
-    qdev_realize(DEVICE(cpuobj), NULL, &error_fatal);
-    cpu = ARM_CPU(cpuobj);
+    /* CPUs */
+    for (n = 0; n < smp_cpus; n++) {
+        cpuobj[n] = object_new(machine->cpu_type);
+        qdev_realize(DEVICE(cpuobj[n]), NULL, &error_fatal);
+        cpu[n] = ARM_CPU(cpuobj[n]);
+    }
 
     /* Interrupt controller */
     if (c->use_gic) {
         int num_irq = c->gic_num_spi + GIC_INTERNAL;
         DeviceState *gicdev = qdev_new(gic_class_name());
         qdev_prop_set_uint32(gicdev, "revision", 2);
-        qdev_prop_set_uint32(gicdev, "num-cpu", 1);
+        qdev_prop_set_uint32(gicdev, "num-cpu", smp_cpus);
         qdev_prop_set_uint32(gicdev, "num-irq", num_irq);
         qdev_prop_set_bit(gicdev, "has-security-extensions", false);
         SysBusDevice *gicbus = SYS_BUS_DEVICE(gicdev);
@@ -1862,19 +1867,22 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_mmio_map(gicbus, 0, c->gic_dist_base);
         sysbus_mmio_map(gicbus, 1, c->gic_cpu_base);
 
-        /* GIC outputs → CPU */
-        sysbus_connect_irq(gicbus, 0,
-                           qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ));
-        sysbus_connect_irq(gicbus, 1,
-                           qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_FIQ));
-        sysbus_connect_irq(gicbus, 2,
-                           qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_VIRQ));
-        sysbus_connect_irq(gicbus, 3,
-                           qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_VFIQ));
+        /* GIC outputs → each CPU */
+        for (n = 0; n < smp_cpus; n++) {
+            int irq_ofs = n * 4; /* 4 outputs per CPU: IRQ, FIQ, VIRQ, VFIQ */
+            sysbus_connect_irq(gicbus, irq_ofs + 0,
+                               qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_IRQ));
+            sysbus_connect_irq(gicbus, irq_ofs + 1,
+                               qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_FIQ));
+            sysbus_connect_irq(gicbus, irq_ofs + 2,
+                               qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_VIRQ));
+            sysbus_connect_irq(gicbus, irq_ofs + 3,
+                               qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_VFIQ));
+        }
 
-        /* CPU timer PPIs → GIC */
+        /* CPU timer PPIs → GIC (boot CPU only) */
         {
-            DeviceState *cpudev = DEVICE(cpu);
+            DeviceState *cpudev = DEVICE(cpu[0]);
             int ppibase = c->gic_num_spi + GIC_NR_SGIS;
             const int timer_ppi[] = {
                 [GTIMER_PHYS] = HISI_PPI_PHYSTIMER,
@@ -2189,11 +2197,11 @@ static void hisilicon_common_init(MachineState *machine,
         /* Boot ROM fastboot: halt CPU and wait for serial firmware upload */
         DeviceState *fb = qdev_new(TYPE_HISI_FASTBOOT);
         qdev_prop_set_chr(fb, "chardev", serial_hd(0));
-        hisi_fastboot_setup(fb, CPU(cpu), serial_hd(0),
+        hisi_fastboot_setup(fb, CPU(cpu[0]), serial_hd(0),
                             c->uart_bases[0], uart0_irq);
         qdev_realize(fb, NULL, &error_fatal);
 
-        CPUState *cs = CPU(cpu);
+        CPUState *cs = CPU(cpu[0]);
         cs->halted = 1;
     } else {
         /* Normal boot path: patch DTB and load kernel */
@@ -2223,7 +2231,7 @@ static void hisilicon_common_init(MachineState *machine,
             }
         }
         hisilicon_binfo.loader_start = c->ram_base;
-        arm_load_kernel(cpu, machine, &hisilicon_binfo);
+        arm_load_kernel(cpu[0], machine, &hisilicon_binfo);
     }
 }
 
@@ -2268,6 +2276,9 @@ static void hisi_machine_set_sensor(Object *obj, const char *value,
             hisi_machine_get_sensor, hisi_machine_set_sensor);       \
         object_class_property_set_description(oc, "sensor",          \
             "Image sensor to attach (e.g. imx335)");                 \
+        if (config.max_cpus > 0) {                                   \
+            mc->max_cpus = config.max_cpus;                          \
+        }                                                            \
     }                                                                \
     DEFINE_MACHINE_EXTENDED(namestr, MACHINE, HisiMachineState,      \
                             tag##_class_init, false,                  \

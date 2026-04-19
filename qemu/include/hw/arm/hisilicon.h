@@ -39,6 +39,7 @@ typedef struct HisiSoCConfig {
     const char     *cpu_type;       /* full QOM type, set at runtime */
     uint32_t        soc_id;
     ram_addr_t      ram_size_default;
+    int             max_cpus;       /* 0 = 1 (default) */
 
     /* Memory regions */
     hwaddr          ram_base;
