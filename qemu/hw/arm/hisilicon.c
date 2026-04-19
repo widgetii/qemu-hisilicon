@@ -1907,8 +1907,8 @@ static void hisilicon_common_init(MachineState *machine,
     } else {
         /* PL190 VIC */
         DeviceState *vic = sysbus_create_varargs("pl190", c->vic_base,
-                qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ),
-                qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_FIQ),
+                qdev_get_gpio_in(DEVICE(cpu[0]), ARM_CPU_IRQ),
+                qdev_get_gpio_in(DEVICE(cpu[0]), ARM_CPU_FIQ),
                 NULL);
         num_pic = 32;
         for (n = 0; n < num_pic; n++) {
