@@ -72,6 +72,9 @@ static void hisi_sysctl_write(void *opaque, hwaddr offset,
 
     switch (offset) {
     case 0x04: /* SC_SYSRES — system reset */
+        qemu_log_mask(LOG_UNIMP,
+                      "hisi-sysctl: SC_SYSRES reset triggered (val=0x%08x)\n",
+                      (uint32_t)val);
         qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         break;
     default:

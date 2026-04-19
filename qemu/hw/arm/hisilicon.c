@@ -532,10 +532,17 @@ static const HisiSoCConfig hi3516cv500_soc = {
 
     .num_crg_defaults   = 3,
     .crg_defaults       = {
-        { 0x1B8, (1 << 18) },          /* UART clock: 24 MHz select */
+        { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
+               | (1 << 11) | (1 << 12) | (1 << 13)
+               | (1 << 14) | (1 << 15) | (1 << 16)
+               | (1 << 17) | (1 << 18) },
+                                        /* UART0/1/2 clk enable + I2C0-7 clk enable
+                                         * + UART0 mux 24MHz */
         { 0x144, 0x02 },               /* FMC clock enable */
         { 0x16C, 0x02 },               /* ETH clock enable */
     },
+
+    .gzip_base          = 0x11200000,
 
     .num_regbanks       = 10,
     .regbanks           = {
@@ -1847,9 +1854,13 @@ static void hisilicon_common_init(MachineState *machine,
     /* RAM */
     memory_region_add_subregion(sysmem, c->ram_base, machine->ram);
 
-    /* CPUs */
+    /* CPUs — secondary CPUs start halted (held in reset until kernel brings them up) */
     for (n = 0; n < smp_cpus; n++) {
         cpuobj[n] = object_new(machine->cpu_type);
+        if (n > 0) {
+            object_property_set_bool(cpuobj[n], "start-powered-off", true,
+                                     &error_fatal);
+        }
         qdev_realize(DEVICE(cpuobj[n]), NULL, &error_fatal);
         cpu[n] = ARM_CPU(cpuobj[n]);
     }
