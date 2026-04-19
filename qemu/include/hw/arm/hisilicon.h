@@ -133,6 +133,9 @@ typedef struct HisiSoCConfig {
     /* Hardware GZIP decompressor */
     hwaddr          gzip_base;      /* 0 = no GZIP engine */
 
+    /* CPU soft-reset register offset in CRG (for SMP bringup) */
+    uint32_t        cpu_srst_offset; /* 0 = disabled, e.g. 0x78 for CV500 */
+
     /* CRG register defaults (mimics U-Boot clock init before kernel boot) */
     int             num_crg_defaults;
     struct { uint32_t offset; uint32_t value; } crg_defaults[HISI_MAX_CRG_DEFAULTS];
