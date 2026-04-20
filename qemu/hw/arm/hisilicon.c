@@ -530,12 +530,23 @@ static const HisiSoCConfig hi3516cv500_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
-    .num_crg_defaults   = 3,
+    .num_crg_defaults   = 4,
     .crg_defaults       = {
-        { 0x1B8, (1 << 18) },          /* UART clock: 24 MHz select */
+        { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
+               | (1 << 11) | (1 << 12) | (1 << 13)
+               | (1 << 14) | (1 << 15) | (1 << 16)
+               | (1 << 17) | (1 << 18) },
+                                        /* UART0/1/2 clk enable + I2C0-7 clk enable
+                                         * + UART0 mux 24MHz */
         { 0x144, 0x02 },               /* FMC clock enable */
         { 0x16C, 0x02 },               /* ETH clock enable */
+        { 0x78,  (1 << 2) | (1 << 4) },
+                                        /* CPU1 + DBG1 in reset (kernel clears bit 2 for SMP) */
     },
+
+    .gzip_base          = 0x11200000,
+
+    .cpu_srst_offset    = 0x78,         /* REG_CPU_SRST_CRG for SMP bringup */
 
     .num_regbanks       = 10,
     .regbanks           = {
@@ -1847,9 +1858,13 @@ static void hisilicon_common_init(MachineState *machine,
     /* RAM */
     memory_region_add_subregion(sysmem, c->ram_base, machine->ram);
 
-    /* CPUs */
+    /* CPUs — secondary CPUs start halted (held in reset until kernel brings them up) */
     for (n = 0; n < smp_cpus; n++) {
         cpuobj[n] = object_new(machine->cpu_type);
+        if (n > 0) {
+            object_property_set_bool(cpuobj[n], "start-powered-off", true,
+                                     &error_fatal);
+        }
         qdev_realize(DEVICE(cpuobj[n]), NULL, &error_fatal);
         cpu[n] = ARM_CPU(cpuobj[n]);
     }
@@ -1927,6 +1942,15 @@ static void hisilicon_common_init(MachineState *machine,
     /* CRG */
     {
         DeviceState *crg = qdev_new("hisi-crg");
+        if (c->cpu_srst_offset) {
+            qdev_prop_set_uint32(crg, "cpu-srst-offset", c->cpu_srst_offset);
+            if (c->max_cpus > 1) {
+                qdev_prop_set_uint32(crg, "smp-bootreg-addr",
+                                     c->sram_base + 0x100);
+                /* Address 0x4: where kernel writes secondary_startup addr */
+                qdev_prop_set_uint32(crg, "smp-entry-addr", 0x4);
+            }
+        }
         sysbus_realize_and_unref(SYS_BUS_DEVICE(crg), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(crg), 0, c->crg_base);
 
