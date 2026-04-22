@@ -1,0 +1,20 @@
+diff --git a/hw/intc/arm_gic.c b/hw/intc/arm_gic.c
+index 899f133..aa6bfb4 100644
+--- a/hw/intc/arm_gic.c
++++ b/hw/intc/arm_gic.c
+@@ -1339,11 +1339,11 @@ static void gic_dist_writeb(void *opaque, hwaddr offset,
+                 continue; /* Ignore Non-secure access of Group0 IRQ */
+             }
+ 
+-            /* ??? This currently clears the pending bit for all CPUs, even
+-               for per-CPU interrupts.  It's unclear whether this is the
+-               correct behavior.  */
+             if (value & (1 << i)) {
+-                GIC_DIST_CLEAR_PENDING(irq + i, ALL_CPU_MASK);
++                /* For per-CPU interrupts (PPIs), only clear the pending
++                 * bit for the writing CPU.  For SPIs, clear all. */
++                int cm = (irq + i < GIC_INTERNAL) ? (1 << cpu) : ALL_CPU_MASK;
++                GIC_DIST_CLEAR_PENDING(irq + i, cm);
+             }
+         }
+     } else if (offset < 0x380) {
