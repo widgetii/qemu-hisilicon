@@ -49,14 +49,19 @@ static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
         return 0;
     case 0x8C: /* REG_SYSSTAT — boot mode (0 = SPI NOR boot) */
         return s->regs[0x8C / 4];
-    case 0xEE0: /* SCSYSID0 */
-        return s->soc_id & 0xFF;
-    case 0xEE4: /* SCSYSID1 */
-        return (s->soc_id >> 8) & 0xFF;
+    case 0xEE0: /* SCSYSID0 — full 32-bit chip ID */
+        /*
+         * Vendor SDK (e.g. EV200 sys.o SYS_HAL_GetChipID) reads this as
+         * a single u32 and expects the packed chip ID (e.g. 0x3516E200).
+         * On real silicon SCSYSID0..3 are four contiguous bytes; reading
+         * 0xEE0 as a word naturally yields the full ID. We return the
+         * whole 32-bit value here for the same reason.
+         */
+        return s->soc_id;
+    case 0xEE4: /* SCSYSID1 — second word of the SCSYSID block, unused */
     case 0xEE8: /* SCSYSID2 */
-        return (s->soc_id >> 16) & 0xFF;
     case 0xEEC: /* SCSYSID3 */
-        return (s->soc_id >> 24) & 0xFF;
+        return 0;
     default:
         if (offset < HISI_SYSCTL_MMIO_SIZE) {
             return s->regs[offset / 4];
