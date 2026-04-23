@@ -107,9 +107,10 @@ typedef struct HisiSoCConfig {
     hwaddr          sdhci_bases[HISI_MAX_SDHCI];
     int             sdhci_irqs[HISI_MAX_SDHCI];
 
-    /* I2C (HiBVT) */
+    /* I2C (HiBVT for V2+, register-poll "hisi-i2c-v1" for CV100 family) */
     int             num_i2c;
     hwaddr          i2c_bases[HISI_MAX_I2C];
+    const char     *i2c_type;       /* NULL = "hisi-i2c", or "hisi-i2c-v1" */
 
     /* MIPI RX (CSI-2 / LVDS receiver) */
     hwaddr          mipi_rx_base;   /* 0 = no MIPI RX */
