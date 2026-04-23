@@ -160,8 +160,10 @@ static const HisiSoCConfig hi3516cv100_soc = {
     .himci_bases        = { 0x10020000 },
     .himci_irqs         = { 18 },
 
-    /* No I2C buses in V1 platform headers */
-    .num_i2c            = 0,
+    /* V1 register-poll I2C controller (vendor hi_i2c.ko target). */
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x200D0000 },
+    .i2c_type           = "hisi-i2c-v1",
 
     .wdt_base           = 0x20040000,
     .wdt_irq            = -1,
@@ -190,13 +192,12 @@ static const HisiSoCConfig hi3516cv100_soc = {
      * hardware during init.  Without mapped regions, reads return 0
      * from QEMU's "unimplemented" handler, causing poll loops to hang.
      */
-    .num_regbanks       = 9,
+    .num_regbanks       = 8,
     .regbanks           = {
         { "hisi-misc",   0x20120000, 0x10000 },
         { "hisi-ddr",    0x20110000, 0x10000 },
         { "hisi-pwm",    0x20130000, 0x10000 },
         { "hisi-nandc",  0x10000000, 0x10000 },
-        { "hisi-i2c-v1", 0x200D0000, 0x1000 },
         { "hisi-viu",    0x20580000, 0x40000 },
         { "hisi-vpss",   0x20600000, 0x10000 },
         { "hisi-vedu",   0x20620000, 0x10000 },
@@ -2093,10 +2094,11 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
-    /* I2C (HiBVT) */
+    /* I2C — HiBVT for V2+, register-poll "hisi-i2c-v1" for CV100 family. */
+    const char *i2c_type = c->i2c_type ? c->i2c_type : "hisi-i2c";
     DeviceState *i2c_devs[HISI_MAX_I2C] = { NULL };
     for (n = 0; n < c->num_i2c; n++) {
-        i2c_devs[n] = qdev_new("hisi-i2c");
+        i2c_devs[n] = qdev_new(i2c_type);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(i2c_devs[n]), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(i2c_devs[n]), 0, c->i2c_bases[n]);
     }
@@ -2175,17 +2177,6 @@ static void hisilicon_common_init(MachineState *machine,
             if (!strcmp(c->regbanks[n].name, "hisi-nandc")) {
                 address_space_stl(&address_space_memory,
                                   c->regbanks[n].base + 0x20, 0x01,
-                                  MEMTXATTRS_UNSPECIFIED, NULL);
-            }
-            /*
-             * V1 I2C controller: pre-set I2C_OVER_INTR (bit 0) in the
-             * status register (offset 0x0C) so poll loops in the vendor
-             * hi_i2c.ko module exit immediately instead of spinning
-             * through 4096-iteration timeouts per I2C probe address.
-             */
-            if (!strcmp(c->regbanks[n].name, "hisi-i2c-v1")) {
-                address_space_stl(&address_space_memory,
-                                  c->regbanks[n].base + 0x0C, 0x01,
                                   MEMTXATTRS_UNSPECIFIED, NULL);
             }
             /*
