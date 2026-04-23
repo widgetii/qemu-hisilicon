@@ -2197,20 +2197,86 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
-    /* Sensor auto-attach via -machine sensor=imx335 */
+    /* Sensor auto-attach via -machine sensor=<name>
+     *
+     * I2C addresses below are 7-bit slave addresses (vendor docs use 8-bit
+     * which is shifted left by one).  All SmartSens sensors share addr 0x30
+     * so only one can be attached at a time — the user picks which one
+     * via the machine arg.
+     */
     {
         HisiMachineState *hms = (HisiMachineState *)machine;
         if (hms->sensor && c->num_i2c > 0 && i2c_devs[0]) {
+            BusState *i2c_bus = qdev_get_child_bus(i2c_devs[0], "i2c");
+            DeviceState *sensor = NULL;
+            uint8_t i2c_addr = 0;
+
             if (!strcmp(hms->sensor, "imx335")) {
-                BusState *i2c_bus = qdev_get_child_bus(i2c_devs[0], "i2c");
-                DeviceState *sensor = qdev_new("hisi-imx335");
-                qdev_prop_set_uint8(sensor, "address", 0x1A);
-                qdev_realize_and_unref(sensor, i2c_bus, &error_fatal);
+                sensor = qdev_new("hisi-imx335");
+                i2c_addr = 0x1A;
+            } else if (!strcmp(hms->sensor, "imx307")) {
+                sensor = qdev_new("hisi-imx307");
+                i2c_addr = 0x1A;
+            } else if (!strcmp(hms->sensor, "f37")) {
+                sensor = qdev_new("hisi-f37");
+                i2c_addr = 0x40;
+            } else if (!strcmp(hms->sensor, "gc2053")) {
+                sensor = qdev_new("hisi-gc2053");
+                i2c_addr = 0x37;
+            } else if (!strcmp(hms->sensor, "sp2305")) {
+                sensor = qdev_new("hisi-sp2305");
+                i2c_addr = 0x3C;
+            } else if (!strcmp(hms->sensor, "mis2006")) {
+                sensor = qdev_new("hisi-mis2006");
+                i2c_addr = 0x30;
+            } else if (!strcmp(hms->sensor, "sc2315e")) {
+                sensor = qdev_new("hisi-smartsens");
+                qdev_prop_set_uint8(sensor, "id_high", 0x22);
+                qdev_prop_set_uint8(sensor, "id_low",  0x38);
+                i2c_addr = 0x30;
+            } else if (!strcmp(hms->sensor, "sc2315")) {
+                sensor = qdev_new("hisi-smartsens");
+                qdev_prop_set_uint8(sensor, "id_high", 0x23);
+                qdev_prop_set_uint8(sensor, "id_low",  0x11);
+                i2c_addr = 0x30;
+            } else if (!strcmp(hms->sensor, "sc2235p")) {
+                sensor = qdev_new("hisi-smartsens");
+                qdev_prop_set_uint8(sensor, "id_high", 0x22);
+                qdev_prop_set_uint8(sensor, "id_low",  0x32);
+                qdev_prop_set_uint8(sensor, "disc",    0x01);
+                i2c_addr = 0x30;
+            } else if (!strcmp(hms->sensor, "sc2235e")) {
+                sensor = qdev_new("hisi-smartsens");
+                qdev_prop_set_uint8(sensor, "id_high", 0x22);
+                qdev_prop_set_uint8(sensor, "id_low",  0x32);
+                qdev_prop_set_uint8(sensor, "disc",    0x20);
+                i2c_addr = 0x30;
+            } else if (!strcmp(hms->sensor, "sc2335")) {
+                sensor = qdev_new("hisi-smartsens");
+                qdev_prop_set_uint8(sensor, "id_high", 0xCB);
+                qdev_prop_set_uint8(sensor, "id_low",  0x14);
+                i2c_addr = 0x30;
+            } else if (!strcmp(hms->sensor, "sc2239")) {
+                sensor = qdev_new("hisi-smartsens");
+                qdev_prop_set_uint8(sensor, "id_high", 0xCB);
+                qdev_prop_set_uint8(sensor, "id_low",  0x10);
+                i2c_addr = 0x30;
+            } else if (!strcmp(hms->sensor, "sc307h")) {
+                sensor = qdev_new("hisi-smartsens");
+                qdev_prop_set_uint8(sensor, "id_high", 0xCB);
+                qdev_prop_set_uint8(sensor, "id_low",  0x1C);
+                i2c_addr = 0x30;
             } else {
-                error_report("Unknown sensor '%s' (supported: imx335)",
+                error_report("Unknown sensor '%s' (supported: imx335, "
+                             "imx307, f37, gc2053, sp2305, mis2006, "
+                             "sc2235p, sc2235e, sc2315, sc2315e, "
+                             "sc2335, sc2239, sc307h)",
                              hms->sensor);
                 exit(1);
             }
+
+            qdev_prop_set_uint8(sensor, "address", i2c_addr);
+            qdev_realize_and_unref(sensor, i2c_bus, &error_fatal);
         }
     }
 
