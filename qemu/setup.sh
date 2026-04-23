@@ -57,6 +57,8 @@ cp qemu/hw/i2c/hisi-gc2053.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-sp2305.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-mis2006.c      "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-smartsens.c    "$QEMU_DIR/hw/i2c/"
+cp qemu/hw/ssi/hisi-spi.c          "$QEMU_DIR/hw/ssi/"
+cp qemu/hw/ssi/hisi-imx122.c       "$QEMU_DIR/hw/ssi/"
 
 # Apply patches to upstream QEMU files
 for p in qemu/patches/*.patch; do
@@ -79,7 +81,7 @@ config HISILICON
     select PL011
     select ARM_TIMER
     select PL061
-    select PL022
+    select HISI_SPI
     select PL080
     select UNIMP
     select SDHCI
@@ -92,7 +94,15 @@ config HISILICON
 KCONFIG
     echo "  patched hw/arm/Kconfig"
 else
-    echo "  hw/arm/Kconfig already patched"
+    # Existing tree may still have "select PL022" from an older setup.sh
+    # — swap it for HISI_SPI inside the HISILICON block only.
+    if grep -q '^    select PL022$' "$QEMU_DIR/hw/arm/Kconfig"; then
+        sed -i '/^config HISILICON$/,/^$/ s/^    select PL022$/    select HISI_SPI/' \
+            "$QEMU_DIR/hw/arm/Kconfig"
+        echo "  hw/arm/Kconfig: swapped PL022 -> HISI_SPI in HISILICON block"
+    else
+        echo "  hw/arm/Kconfig already patched"
+    fi
 fi
 
 # hw/arm/meson.build
@@ -176,6 +186,28 @@ if ! grep -q hisi-i2c "$QEMU_DIR/hw/i2c/meson.build"; then
     echo "  patched hw/i2c/meson.build"
 else
     echo "  hw/i2c/meson.build already patched"
+fi
+
+# hw/ssi/Kconfig
+if ! grep -q HISI_SPI "$QEMU_DIR/hw/ssi/Kconfig"; then
+    cat >> "$QEMU_DIR/hw/ssi/Kconfig" <<'KCONFIG'
+
+config HISI_SPI
+    bool
+    select SSI
+KCONFIG
+    echo "  patched hw/ssi/Kconfig"
+else
+    echo "  hw/ssi/Kconfig already patched"
+fi
+
+# hw/ssi/meson.build
+if ! grep -q hisi-spi "$QEMU_DIR/hw/ssi/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_HISI_SPI', if_true: files('hisi-spi.c', 'hisi-imx122.c'))" \
+        >> "$QEMU_DIR/hw/ssi/meson.build"
+    echo "  patched hw/ssi/meson.build"
+else
+    echo "  hw/ssi/meson.build already patched"
 fi
 
 # ── 4. Patch QEMU SD card model to accept 1.8V ─────────────────────────

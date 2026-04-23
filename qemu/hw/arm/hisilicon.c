@@ -1997,9 +1997,14 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
-    /* SPI (PL022) */
+    /* SPI (HiSilicon variant of PL022) */
+    DeviceState *spi_devs[HISI_MAX_SPIS] = { NULL };
     for (n = 0; n < c->num_spis; n++) {
-        sysbus_create_simple("pl022", c->spi_bases[n], pic[c->spi_irqs[n]]);
+        spi_devs[n] = qdev_new("hisi-spi");
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(spi_devs[n]), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(spi_devs[n]), 0, c->spi_bases[n]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(spi_devs[n]), 0,
+                           pic[c->spi_irqs[n]]);
     }
 
     /* DMA (PL080) */
@@ -2206,7 +2211,21 @@ static void hisilicon_common_init(MachineState *machine,
      */
     {
         HisiMachineState *hms = (HisiMachineState *)machine;
-        if (hms->sensor && c->num_i2c > 0 && i2c_devs[0]) {
+        /* SPI sensors (Sony 3-wire, e.g. CV100 + ssp_sony.ko) take
+         * precedence — IMX122/IMX222 share one device that ipctool
+         * always reports as "IMX122". */
+        if (hms->sensor &&
+            (!strcmp(hms->sensor, "imx122") ||
+             !strcmp(hms->sensor, "imx222"))) {
+            if (c->num_spis == 0 || !spi_devs[0]) {
+                error_report("sensor '%s' requires an SPI controller on "
+                             "this SoC", hms->sensor);
+                exit(1);
+            }
+            BusState *ssi_bus = qdev_get_child_bus(spi_devs[0], "ssi");
+            DeviceState *sensor = qdev_new("hisi-imx122");
+            qdev_realize_and_unref(sensor, ssi_bus, &error_fatal);
+        } else if (hms->sensor && c->num_i2c > 0 && i2c_devs[0]) {
             BusState *i2c_bus = qdev_get_child_bus(i2c_devs[0], "i2c");
             DeviceState *sensor = NULL;
             uint8_t i2c_addr = 0;
@@ -2270,13 +2289,17 @@ static void hisilicon_common_init(MachineState *machine,
                 error_report("Unknown sensor '%s' (supported: imx335, "
                              "imx307, f37, gc2053, sp2305, mis2006, "
                              "sc2235p, sc2235e, sc2315, sc2315e, "
-                             "sc2335, sc2239, sc307h)",
+                             "sc2335, sc2239, sc307h, imx122, imx222)",
                              hms->sensor);
                 exit(1);
             }
 
             qdev_prop_set_uint8(sensor, "address", i2c_addr);
             qdev_realize_and_unref(sensor, i2c_bus, &error_fatal);
+        } else if (hms->sensor) {
+            error_report("sensor '%s' requested but this SoC has no I2C "
+                         "or matching SPI controller", hms->sensor);
+            exit(1);
         }
     }
 
