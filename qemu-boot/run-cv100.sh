@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 QEMU="$REPO_ROOT/qemu-src/build/qemu-system-arm"
 
-exec "$QEMU" -M hi3516cv100 -m 64M \
+exec "$QEMU" -M hi3516cv100,sensor=imx222 -m 64M \
     -kernel "$SCRIPT_DIR/uImage.hi3516cv100" \
     -initrd "$SCRIPT_DIR/rootfs.squashfs.hi3516cv100" \
     -nographic -serial mon:stdio \
