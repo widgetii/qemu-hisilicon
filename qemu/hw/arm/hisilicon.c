@@ -2063,13 +2063,38 @@ static void hisilicon_common_init(MachineState *machine,
     /* GPIOs (PL061) */
     for (n = 0; n < c->gpio_count; n++) {
         qemu_irq irq;
+        hwaddr gpio_base = c->gpio_base + n * c->gpio_stride;
+        DeviceState *pl061;
+        SysBusDevice *sbd;
+
         if (c->gpio_irq_start) {
             irq = pic[c->gpio_irq_start + n]; /* per-port IRQs (GIC) */
         } else {
             irq = pic[c->gpio_irq];           /* shared IRQ (VIC or GIC) */
         }
-        sysbus_create_simple("pl061",
-                             c->gpio_base + n * c->gpio_stride, irq);
+
+        pl061 = qdev_new("pl061");
+        sbd = SYS_BUS_DEVICE(pl061);
+        sysbus_realize_and_unref(sbd, &error_fatal);
+        sysbus_mmio_map(sbd, 0, gpio_base);
+        sysbus_connect_irq(sbd, 0, irq);
+
+        /*
+         * V1/V2/V2A GPIO DTB nodes declare reg size 0x10000 even though
+         * the PL061 only has 0x1000 of registers.  Linux's AMBA bus probe
+         * reads PrimeCell IDs at resource_end - 0x20 (offset 0xFFE0).
+         * Alias the PL061 register page at offset 0xF000 within the 64 KiB
+         * window so IDs at 0xFE0..0xFFF also appear at 0xFFE0..0xFFFF.
+         */
+        if (c->gpio_stride >= 0x10000) {
+            MemoryRegion *pl061_mr = sysbus_mmio_get_region(sbd, 0);
+            MemoryRegion *alias = g_new0(MemoryRegion, 1);
+
+            memory_region_init_alias(alias, OBJECT(pl061),
+                                     "pl061-primecell-id-alias",
+                                     pl061_mr, 0, 0x1000);
+            memory_region_add_subregion(sysmem, gpio_base + 0xF000, alias);
+        }
     }
 
     /* FEMAC */
