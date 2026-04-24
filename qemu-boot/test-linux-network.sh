@@ -66,12 +66,16 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ -z "$SOC" ] || [ -z "$MACHINE" ] || [ -z "$MEM_MB" ] || [ -z "$APPEND" ]; then
+if [ -z "$SOC" ] || [ -z "$MACHINE" ] || [ -z "$APPEND" ]; then
     usage >&2
     exit 2
 fi
 
+# --mem is optional — when omitted, QEMU uses the machine's default
+# ram_size from the HisiSoCConfig table.
 MEM_MB="${MEM_MB%M}"
+MEM_ARG=""
+[ -n "$MEM_MB" ] && MEM_ARG="-m ${MEM_MB}M"
 
 if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_DIR="/tmp/linux-network-${SOC}-$$"
@@ -159,7 +163,7 @@ fi
 
 mkfifo "$SER_IN" "$SER_OUT"
 "$QEMU" \
-    -M "$MACHINE" -m "${MEM_MB}M" \
+    -M "$MACHINE" $MEM_ARG \
     -kernel "$REPO_ROOT/qemu-boot/uImage.${SOC}" \
     -initrd "$REPO_ROOT/qemu-boot/rootfs.squashfs.${SOC}" \
     -nographic -serial "pipe:${SER_PREFIX}" \

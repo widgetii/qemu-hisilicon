@@ -125,10 +125,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # mem/kernel_mem_mb/MMZ layout now lives in HisiSoCConfig; no -m
+          # override here so CI exercises the same defaults as the run
+          # scripts and real users.
           - name: hi3516cv100
             soc: hi3516cv100
             machine: hi3516cv100
-            mem: 64M
             append: "console=ttyAMA0,115200 root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),2048k(kernel),5120k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516cv100-universal.bin
@@ -137,7 +139,6 @@ jobs:
           - name: hi3516cv200
             soc: hi3516cv200
             machine: hi3516cv200
-            mem: 64M
             append: "console=ttyAMA0,115200 root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516cv200-universal.bin
@@ -146,14 +147,12 @@ jobs:
           - name: hi3516av100
             soc: hi3516av100
             machine: hi3516av100
-            mem: 256M
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
-            # ping_linux blocked by vendor module crash (#30)
+            ping_linux: true
 
           - name: hi3516cv300
             soc: hi3516cv300
             machine: hi3516cv300
-            mem: 128M
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516cv300-universal.bin
@@ -162,19 +161,16 @@ jobs:
           - name: hi3516cv500
             soc: hi3516cv500
             machine: hi3516cv500
-            mem: 128M
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
 
           - name: hi3519v101
             soc: hi3519v101
             machine: hi3519v101
-            mem: 256M
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
 
           - name: hi3516ev300
             soc: hi3516ev300
             machine: hi3516ev300
-            mem: 128M
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516ev300-universal.bin
@@ -230,11 +226,15 @@ jobs:
           tar xzf "openipc.${{ matrix.soc }}-nor-lite.tgz"
 
       - name: "OpenIPC kernel + rootfs boot"
-        timeout-minutes: 6
+        timeout-minutes: 3
         run: |
+          # All SoCs now reach login in <30 s with the default memory
+          # layout from HisiSoCConfig (measured: CV100 ~20 s, CV200
+          # ~18 s, AV100 ~15 s, CV300/CV500/3519V101 <30 s, EV300 ~7 s).
+          # 120 s gives us a 4× margin over the measured worst case.
           QEMU=./qemu-src/build/qemu-system-arm
-          timeout 300 $QEMU \
-            -M ${{ matrix.machine }} -m ${{ matrix.mem }} \
+          timeout 120 $QEMU \
+            -M ${{ matrix.machine }} \
             -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
             -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
             -nographic -serial mon:stdio \
@@ -244,7 +244,7 @@ jobs:
           QEMU_PID=$!
 
           # Wait for login prompt
-          for i in $(seq 1 300); do
+          for i in $(seq 1 120); do
             if grep -qE "login:|#\s*$" boot-output.txt 2>/dev/null; then
               echo ""
               echo "=== Boot successful: login prompt reached ==="
@@ -262,17 +262,16 @@ jobs:
 
       - name: "Linux ping + curl test"
         if: matrix.ping_linux
-        timeout-minutes: 8
+        timeout-minutes: 4
         run: |
           bash qemu-boot/test-linux-network.sh \
             --soc "${{ matrix.soc }}" \
             --machine "${{ matrix.machine }}" \
-            --mem "${{ matrix.mem }}" \
             --append '${{ matrix.append }}' \
             --qemu ./qemu-src/build/qemu-system-arm \
             --tap tap0 \
             --host-ip 10.0.10.1 \
-            --login-timeout 240 \
+            --login-timeout 120 \
             --ping-timeout 45 \
             --curl-timeout 100 \
             --curl-max-time 90 \
@@ -295,8 +294,15 @@ jobs:
 
           mkfifo /tmp/ub.in /tmp/ub.out
           FLASH_TYPE="${{ matrix.flash_type || 'hisi-fmc' }}"
+          # flash_mem overrides the machine-default ram size for
+          # U-Boot flash-boot (some SoCs need more RAM than the
+          # kernel-default to fit U-Boot + decompressed kernel).
+          MEM_ARG=""
+          if [ -n "${{ matrix.flash_mem }}" ]; then
+            MEM_ARG="-m ${{ matrix.flash_mem }}"
+          fi
           $QEMU \
-            -M ${{ matrix.machine }} -m ${{ matrix.flash_mem || matrix.mem }} \
+            -M ${{ matrix.machine }} $MEM_ARG \
             -global ${FLASH_TYPE}.flash-file=$FLASH \
             -nographic -serial pipe:/tmp/ub -nic tap,ifname=tap0,script=no,downscript=no \
             -monitor none &
