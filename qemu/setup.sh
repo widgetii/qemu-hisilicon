@@ -58,6 +58,7 @@ cp qemu/hw/i2c/hisi-sp2305.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-mis2006.c      "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-smartsens.c    "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-i2c-v1.c       "$QEMU_DIR/hw/i2c/"
+cp qemu/hw/i2c/hisi-i2c-dw.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/ssi/hisi-spi.c          "$QEMU_DIR/hw/ssi/"
 cp qemu/hw/ssi/hisi-imx122.c       "$QEMU_DIR/hw/ssi/"
 
@@ -182,16 +183,21 @@ fi
 
 # hw/i2c/meson.build
 if ! grep -q hisi-i2c "$QEMU_DIR/hw/i2c/meson.build"; then
-    echo "system_ss.add(when: 'CONFIG_HISI_I2C', if_true: files('hisi-i2c.c', 'hisi-i2c-v1.c', 'hisi-imx335.c', 'hisi-imx307.c', 'hisi-f37.c', 'hisi-gc2053.c', 'hisi-sp2305.c', 'hisi-mis2006.c', 'hisi-smartsens.c'))" \
+    echo "system_ss.add(when: 'CONFIG_HISI_I2C', if_true: files('hisi-i2c.c', 'hisi-i2c-v1.c', 'hisi-i2c-dw.c', 'hisi-imx335.c', 'hisi-imx307.c', 'hisi-f37.c', 'hisi-gc2053.c', 'hisi-sp2305.c', 'hisi-mis2006.c', 'hisi-smartsens.c'))" \
         >> "$QEMU_DIR/hw/i2c/meson.build"
     echo "  patched hw/i2c/meson.build"
-elif ! grep -q hisi-i2c-v1 "$QEMU_DIR/hw/i2c/meson.build"; then
-    # Existing tree from an older setup.sh — splice in the new file.
-    sed -i "s/'hisi-i2c.c', 'hisi-imx335.c'/'hisi-i2c.c', 'hisi-i2c-v1.c', 'hisi-imx335.c'/" \
-        "$QEMU_DIR/hw/i2c/meson.build"
-    echo "  hw/i2c/meson.build: added hisi-i2c-v1.c"
 else
-    echo "  hw/i2c/meson.build already patched"
+    # Existing tree — splice in any new files that aren't already listed.
+    if ! grep -q hisi-i2c-v1 "$QEMU_DIR/hw/i2c/meson.build"; then
+        sed -i "s/'hisi-i2c.c', 'hisi-imx335.c'/'hisi-i2c.c', 'hisi-i2c-v1.c', 'hisi-imx335.c'/" \
+            "$QEMU_DIR/hw/i2c/meson.build"
+        echo "  hw/i2c/meson.build: added hisi-i2c-v1.c"
+    fi
+    if ! grep -q hisi-i2c-dw "$QEMU_DIR/hw/i2c/meson.build"; then
+        sed -i "s/'hisi-i2c-v1.c', 'hisi-imx335.c'/'hisi-i2c-v1.c', 'hisi-i2c-dw.c', 'hisi-imx335.c'/" \
+            "$QEMU_DIR/hw/i2c/meson.build"
+        echo "  hw/i2c/meson.build: added hisi-i2c-dw.c"
+    fi
 fi
 
 # hw/ssi/Kconfig
