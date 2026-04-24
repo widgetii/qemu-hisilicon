@@ -227,6 +227,9 @@ static const HisiSoCConfig hi3516cv200_soc = {
      * 0x82000000 free. */
     .ram_size_default   = 128 * MiB,
     .kernel_mem_mb      = 32,
+    /* CV200 kernel uses the DesignWare-derived i2c-hisilicon driver
+     * (CON/TAR/DATA_CMD/AUTO/TX_RX layout) rather than HiBVT. */
+    .i2c_type           = "hisi-i2c-dw",
 
     .ram_base           = 0x80000000,
     .sram_base          = 0x04010000,
