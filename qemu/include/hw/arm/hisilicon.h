@@ -26,6 +26,7 @@
 #define HISI_MAX_I2C      8
 #define HISI_MAX_REGBANKS 16
 #define HISI_MAX_CRG_DEFAULTS 8
+#define HISI_MAX_GPIO_EXTRAS 4
 
 typedef struct HisiRegbankEntry {
     const char *name;
@@ -99,6 +100,13 @@ typedef struct HisiSoCConfig {
     int             gpio_stride;    /* address step between ports (0x1000 or 0x10000) */
     int             gpio_irq;       /* VIC: shared IRQ for all ports */
     int             gpio_irq_start; /* GIC: first SPI, one per port */
+
+    /*
+     * Extra GPIO ports at non-contiguous addresses or with
+     * non-sequential IRQs (e.g. AV100 port 15, CV500 port 11).
+     * An entry with .base == 0 terminates the list.
+     */
+    struct { hwaddr base; int irq; } gpio_extras[HISI_MAX_GPIO_EXTRAS];
 
     /* DMA (PL080) */
     hwaddr          dma_base;       /* 0 = no DMA controller */

@@ -364,9 +364,12 @@ static const HisiSoCConfig hi3516av100_soc = {
     .fmc_type           = "hisi-sfc350",    /* HISFC350, same as CV100 */
 
     .gpio_base          = 0x20140000,
-    .gpio_count         = 15,               /* ports 0-14, skip port 15 at 0x20260000 */
+    .gpio_count         = 15,               /* ports 0-14 contiguous */
     .gpio_stride        = 0x10000,
     .gpio_irq           = 47,               /* shared IRQ for all ports (GIC) */
+    .gpio_extras        = {
+        { 0x20260000, 49 },                 /* port 15: non-contiguous, IRQ 49 */
+    },
 
     .gmac_base          = 0x10090000,
     .gmac_irq           = 25,
@@ -520,9 +523,12 @@ static const HisiSoCConfig hi3516cv500_soc = {
     .fmc_mem_base       = 0x14000000,
 
     .gpio_base          = 0x120D0000,
-    .gpio_count         = 11,
+    .gpio_count         = 11,           /* ports 0-10, sequential IRQs 16..26 */
     .gpio_stride        = 0x1000,
     .gpio_irq_start     = 16,           /* per-port: SPI 16..26 (GIC) */
+    .gpio_extras        = {
+        { 0x120DB000, 80 },             /* port 11: IRQ 80 (non-sequential) */
+    },
 
     .femac_base         = 0x10010000,
     .femac_irq          = 32,
@@ -1840,6 +1846,33 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
                             MEMTXATTRS_UNSPECIFIED, rom, sizeof(rom));
 }
 
+/*
+ * Instantiate a PL061 GPIO bank at @base.  When stride >= 0x10000 the DTB
+ * declares a 64 KiB reg window and Linux's AMBA bus probe reads PrimeCell
+ * IDs at resource_end - 0x20 (offset 0xFFE0).  Alias the 0x1000 register
+ * page at offset 0xF000 so IDs at 0xFE0..0xFFF also appear at 0xFFE0..0xFFFF.
+ */
+static void hisilicon_create_pl061(MemoryRegion *sysmem, hwaddr base,
+                                   int stride, qemu_irq irq)
+{
+    DeviceState *pl061 = qdev_new("pl061");
+    SysBusDevice *sbd = SYS_BUS_DEVICE(pl061);
+
+    sysbus_realize_and_unref(sbd, &error_fatal);
+    sysbus_mmio_map(sbd, 0, base);
+    sysbus_connect_irq(sbd, 0, irq);
+
+    if (stride >= 0x10000) {
+        MemoryRegion *pl061_mr = sysbus_mmio_get_region(sbd, 0);
+        MemoryRegion *alias = g_new0(MemoryRegion, 1);
+
+        memory_region_init_alias(alias, OBJECT(pl061),
+                                 "pl061-primecell-id-alias",
+                                 pl061_mr, 0, 0x1000);
+        memory_region_add_subregion(sysmem, base + 0xF000, alias);
+    }
+}
+
 static void hisilicon_common_init(MachineState *machine,
                                   const HisiSoCConfig *c)
 {
@@ -2064,37 +2097,23 @@ static void hisilicon_common_init(MachineState *machine,
     for (n = 0; n < c->gpio_count; n++) {
         qemu_irq irq;
         hwaddr gpio_base = c->gpio_base + n * c->gpio_stride;
-        DeviceState *pl061;
-        SysBusDevice *sbd;
 
         if (c->gpio_irq_start) {
             irq = pic[c->gpio_irq_start + n]; /* per-port IRQs (GIC) */
         } else {
             irq = pic[c->gpio_irq];           /* shared IRQ (VIC or GIC) */
         }
+        hisilicon_create_pl061(sysmem, gpio_base, c->gpio_stride, irq);
+    }
 
-        pl061 = qdev_new("pl061");
-        sbd = SYS_BUS_DEVICE(pl061);
-        sysbus_realize_and_unref(sbd, &error_fatal);
-        sysbus_mmio_map(sbd, 0, gpio_base);
-        sysbus_connect_irq(sbd, 0, irq);
-
-        /*
-         * V1/V2/V2A GPIO DTB nodes declare reg size 0x10000 even though
-         * the PL061 only has 0x1000 of registers.  Linux's AMBA bus probe
-         * reads PrimeCell IDs at resource_end - 0x20 (offset 0xFFE0).
-         * Alias the PL061 register page at offset 0xF000 within the 64 KiB
-         * window so IDs at 0xFE0..0xFFF also appear at 0xFFE0..0xFFFF.
-         */
-        if (c->gpio_stride >= 0x10000) {
-            MemoryRegion *pl061_mr = sysbus_mmio_get_region(sbd, 0);
-            MemoryRegion *alias = g_new0(MemoryRegion, 1);
-
-            memory_region_init_alias(alias, OBJECT(pl061),
-                                     "pl061-primecell-id-alias",
-                                     pl061_mr, 0, 0x1000);
-            memory_region_add_subregion(sysmem, gpio_base + 0xF000, alias);
+    /* Extra GPIO ports at non-contiguous addresses / IRQs */
+    for (n = 0; n < HISI_MAX_GPIO_EXTRAS; n++) {
+        if (!c->gpio_extras[n].base) {
+            break;
         }
+        hisilicon_create_pl061(sysmem, c->gpio_extras[n].base,
+                               c->gpio_stride,
+                               pic[c->gpio_extras[n].irq]);
     }
 
     /* FEMAC */
