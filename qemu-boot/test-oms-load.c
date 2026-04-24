@@ -51,7 +51,10 @@ int __fgetc_unlocked(FILE *stream) { return fgetc(stream); }
 typedef struct { uint64_t phys, virt; uint32_t size, pad; } xnn_mem_t;
 
 extern int mpi_ive_xnn_loadmodel(void *model_mem, void *tmp_mem, void *model_params);
-extern int mpi_ive_xnn_forward_slice(void *buf);
+/* 8 args: handle, src, dst, model, tmp_buf, report, ctrl, instant */
+extern int mpi_ive_xnn_forward_slice(
+    void *handle, void *src, void *dst, void *model,
+    void *tmp, void *report, void *ctrl, int instant);
 extern void mpi_ive_xnn_unloadmodel(void *model_params);
 extern int mp_ive_svp_alg_proc_init(void *a, void *b);
 extern void mp_ive_svp_alg_proc_exit(void);
@@ -159,6 +162,39 @@ int main(int argc, char **argv) {
 
     if (ret == 0) {
         fprintf(stderr, "SUCCESS! Model loaded.\n");
+
+        /* Dump Xnn_Task buffer from vendor driver BEFORE forward */
+        {
+            FILE *mm = fopen("/proc/media-mem", "r");
+            if (mm) {
+                char line[256];
+                while (fgets(line, sizeof(line), mm)) {
+                    unsigned int p1, p2;
+                    char name[64] = {0};
+                    if (sscanf(line, "   |-MMB: phys(0x%x, 0x%x)%*[^,], length=%*[^,],%*[ ]name=\"%63[^\"]\"",
+                               &p1, &p2, name) == 3) {
+                        uint32_t len = p2 - p1 + 1;
+                        if (strstr(name, "Xnn") || strstr(name, "IVE_TEMP") || strstr(name, "IVE_QUEUE")) {
+                            void *v = HI_MPI_SYS_Mmap(p1, len);
+                            if (v) {
+                                uint32_t dumplen = len > 512 ? 512 : len;
+                                fprintf(stderr, "\n=== %s phys=0x%x len=%u (before forward) ===\n", name, p1, len);
+                                uint8_t *p = (uint8_t *)v;
+                                for (uint32_t i = 0; i < dumplen; i += 16) {
+                                    fprintf(stderr, "%04x:", i);
+                                    for (int j = 0; j < 16 && i+j < dumplen; j++)
+                                        fprintf(stderr, " %02x", p[i+j]);
+                                    fprintf(stderr, "\n");
+                                }
+                                HI_MPI_SYS_Munmap(v, len);
+                            }
+                        }
+                    }
+                }
+                fclose(mm);
+            }
+        }
+
         fprintf(stderr, "  model_params[0x04] (tmp_size): %u\n",
                 *(uint32_t *)(model_params + 0x04));
         fprintf(stderr, "  model_params[0x08] (src_num):  %u\n",
@@ -268,17 +304,8 @@ int main(int argc, char **argv) {
             /* is_instant: a1[602] = 602*4 = 2408 = 0x968 */
             *(uint32_t *)(fwd + 0x968) = 1;  /* synchronous */
 
-            /* Find IVE fd */
-            int ive_fd = -1;
-            char path[64], link[64];
-            for (int fd = 3; fd < 64; fd++) {
-                snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
-                int n = readlink(path, link, sizeof(link) - 1);
-                if (n > 0) { link[n] = '\0'; if (strstr(link, "ive")) { ive_fd = fd; break; } }
-            }
-
-            if (ive_fd >= 0) {
-                fprintf(stderr, "\nRunning forward (fd=%d, %ux%u)...\n", ive_fd, in_w, in_h);
+            {
+                fprintf(stderr, "\nRunning forward (%ux%u)...\n", in_w, in_h);
                 /* Verify buffer before ioctl */
                 fprintf(stderr, "  fwd+0x958: src=%u dst=%u\n",
                         *(uint32_t *)(fwd + 0x958), *(uint32_t *)(fwd + 0x95C));
@@ -286,13 +313,51 @@ int main(int argc, char **argv) {
                         *(uint32_t *)(fwd + 0x960), *(uint32_t *)(fwd + 0x968));
                 fprintf(stderr, "  fwd+0x340 dst_tpl: type=%u stride=%u\n",
                         *(uint32_t *)(fwd + 0x340), *(uint32_t *)(fwd + 0x344));
-                ret = ioctl(ive_fd, 0xc9704638, fwd);
-                fprintf(stderr, "  forward ret=%d\n", ret);
-                /* Wait for task completion via MPI API (handles ref_cnt cleanup) */
-                {
-                    int handle = *(int32_t *)fwd; /* handle from ioctl output */
+                /* Build args for mpi_ive_xnn_forward_slice (8-arg function).
+                 * It handles ioctl + task completion + ref_cnt cleanup. */
+                int32_t fwd_handle = 0;
+
+                /* src blob (48 bytes on stack) */
+                uint8_t src_blob[48];
+                memcpy(src_blob, fwd + 0x008, 48);
+
+                /* dst blob template */
+                uint8_t dst_blob[48];
+                memcpy(dst_blob, fwd + 0x340, 48);
+
+                /* ctrl: {padding, src_num, has_roi, dst_num, ...} from +0x958 */
+                uint32_t ctrl[4];
+                ctrl[0] = 0;  /* a5[0] */
+                ctrl[1] = 1;  /* a5[1] = src_num */
+                ctrl[2] = 0;  /* a5[2] = has_roi */
+                ctrl[3] = 1;  /* a5[3] = dst_num */
+
+                /* tmp_buf descriptor (24 bytes) */
+                xnn_mem_t fwd_tmp = tmp_mem;
+
+                ret = mpi_ive_xnn_forward_slice(
+                    &fwd_handle,    /* r0: handle out */
+                    src_blob,       /* r1: src blobs */
+                    dst_blob,       /* r2: dst blobs */
+                    model_params,   /* r3: model params from loadmodel */
+                    &fwd_tmp,       /* [sp+0]: tmp buffer */
+                    dst_blob,       /* [sp+4]: report/output blob */
+                    ctrl,           /* [sp+8]: ctrl */
+                    1);             /* [sp+12]: instant */
+                fprintf(stderr, "  forward ret=0x%x handle=%d\n", ret, fwd_handle);
+                /* Wait for completion — same pattern as svp_alg_forward_slice:
+                 * retry HI_MPI_IVE_Query with usleep(100) until not TIMEOUT */
+                if (ret == 0) {
                     int finished = 0;
-                    HI_MPI_IVE_Query(handle, &finished, 1 /* block */);
+                    int qret = HI_MPI_IVE_Query(fwd_handle, &finished, 1);
+                    int retries = 0;
+                    while (qret == (int)0xa01d8041 && retries < 1000) {
+                        usleep(100);
+                        qret = HI_MPI_IVE_Query(fwd_handle, &finished, 1);
+                        retries++;
+                    }
+                    fprintf(stderr, "  query ret=0x%x finished=%d retries=%d\n",
+                            qret, finished, retries);
                 }
 
                 /* Check tmp_buf for output */
@@ -383,7 +448,9 @@ int main(int argc, char **argv) {
             HI_MPI_SYS_MmzFree(frm_p, (void *)(uintptr_t)frm_v);
         }
 
+        /* Unload model — may need to call twice if forward incremented ref_cnt */
         mpi_ive_xnn_unloadmodel(model_params);
+        mpi_ive_xnn_unloadmodel(model_params); /* second call for ref_cnt=2 */
     } else {
         fprintf(stderr, "FAILED. Error 0x%x\n", ret);
         /* Common errors:

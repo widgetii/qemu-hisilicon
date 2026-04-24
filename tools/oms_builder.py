@@ -96,7 +96,8 @@ def make_preproc(input_h, input_w, input_c, out_tmp_offset, need_vgs=1):
 def make_conv(input_c, input_h, input_w, output_c, output_h, output_w,
               kernel_size, pool_mode, af_mode, arg_len_cumulative, arg_offset,
               in_tmp_offset, out_tmp_offset, layer_index,
-              in_fmt=0, out_fmt=1, in_bond_num=1):
+              in_fmt=0, out_fmt=1, in_bond_num=1,
+              requant_scale=0x26000, requant_mult=0x7fff):
     """Build an 80-byte Conv layer descriptor.
 
     Conv descriptor layout (from IDA RE of ive_xnn_check_conv_layer):
@@ -144,7 +145,10 @@ def make_conv(input_c, input_h, input_w, output_c, output_h, output_w,
     # s[6..15] = desc[20..59] as u32 words
     struct.pack_into('<I', d, 20, arg_len_cumulative)   # s[6] = a1+24
     struct.pack_into('<I', d, 24, arg_offset)           # s[7] = a1+28
-    # s[8]=desc[28..31], s[9]=desc[32..35], s[10]=desc[36..39] — reserved
+    # s[8]=desc[28..31] → node[12]: offset to int8 weights within segment
+    # Vendor points this to the actual weight bytes (after biases+padding in arg_data)
+    # Set to 0 here; build_segment patches it to arg_data_off + bias_size + pad_size
+    struct.pack_into('<I', d, 28, 0)  # patched by build_segment
     struct.pack_into('<I', d, 40, in_tmp_offset)        # s[11] = a1+44
     struct.pack_into('<I', d, 44, out_tmp_offset)       # s[12] = a1+48
     # in_stride must be exactly align16(input_w) (vendor check: must equal X)
@@ -157,8 +161,15 @@ def make_conv(input_c, input_h, input_w, output_c, output_h, output_w,
     struct.pack_into('<I', d, 52, input_h * in_stride_w)  # s[14] = in_stride_c
     struct.pack_into('<I', d, 56, output_h * out_stride_w) # s[15] = out_stride_c
     # s[16] = {desc[60..61] as u16, desc[62] as byte}
+    d[60] = 128  # LOBYTE(s[16]) — output zero-point/activation (vendor=128)
     d[61] = kernel_size  # BYTE1 of LOWORD(s[16]) — MUST be 1 or 3
     d[62] = in_bond_num  # BYTE2(s[16])
+    # s[10] = desc[36..39] — negative shift mask (vendor uses 0xFFF80000 = -(1<<19))
+    struct.pack_into('<i', d, 36, -(1 << 19))
+    # s[17] = desc[64..67] — requantization scale (HIWORD=2, LOWORD=scale)
+    struct.pack_into('<I', d, 64, 0x20000 | (requant_scale & 0xFFFF))
+    # s[18] = desc[68..71] — requantization multiplier
+    struct.pack_into('<I', d, 68, requant_mult)
     # s[19] = {desc[72] as byte, desc[73..74] as u16}
     # desc[72] = is_bottom_from_user (1 if this Conv reads from model input)
     # desc[73..74] = input_node_name_id (which src_node this references)
@@ -282,9 +293,9 @@ def make_unpack(out_c, out_h, out_w, in_tmp_offset, out_tmp_offset,
     struct.pack_into('<H', d, 10, out_w)
     # in_stride: internal format (int8/int32), needs >= out_w * elem_size
     in_stride = align16(max(out_w * 4, 16))
-    # out_stride: external format, computed as align16((out_fmt_sz * out_w) >> 3), min 16
-    # out_fmt=1 → 1 byte per elem → (1 * out_w) >> 3 → small; min is 16
-    out_stride = align16(max(out_w, 16))  # vendor minimum is out_w, 16-byte aligned
+    # out_stride: vendor node uses 4 bytes/element but the OMS descriptor
+    # validation expects align16(out_w). The node builder adjusts at runtime.
+    out_stride = align16(max(out_w, 16))
     struct.pack_into('<H', d, 12, in_stride)
     struct.pack_into('<H', d, 14, out_stride)
     struct.pack_into('<I', d, 16, out_h * in_stride)   # in_stride_c
@@ -338,9 +349,34 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     v70 = 32 * dst_num + v61  # layer desc start
 
     layer_desc_end = v70 + len(layers_desc)
-    weight_data_off = max(align16(layer_desc_end + 16), 1)  # must be >= 1
+    # Layout: [descs] [arg_data] [weight_data] [hw_weight_area] [names]
+    # arg_data: Conv biases+pad+weights (right after descs)
+    # weight_data: bulk blob (for FC weights or vendor validation)
+    # hw_weight_area: free space for loadmodel to store transformed Conv weights
+    arg_data_off = align16(layer_desc_end)
+    weight_data_off = max(align16(arg_data_off + len(weight_data) + 16), 1)
     weight_data_end = weight_data_off + len(weight_data)
-    name_table_off = align16(weight_data_end + 16)
+    # Reserve space for HW int24 weights at s[8] offset.
+    # Format: 3-byte int24 = round(float_weight * 2^20), packed in 40-byte records
+    # Each record = one 2D filter (k*k weights * 3 bytes + padding to 40 bytes)
+    hw_weight_off = align16(weight_data_end + 16)
+    # Compute hw weight blob size from layer descriptors
+    hw_weight_size = 0
+    _off = 0
+    for _ in range(total_layers):
+        if layers_desc[_off] == 0:  # Conv
+            _ic = struct.unpack_from('<H', layers_desc, _off + 8)[0]
+            _oc = struct.unpack_from('<H', layers_desc, _off + 14)[0]
+            _k = layers_desc[_off + 61]
+            hw_weight_size += _oc * _ic * 40  # 40 bytes per 2D filter
+            _off += 80
+        elif layers_desc[_off] == 5: _off += 48
+        elif layers_desc[_off] == 1: _off += 48
+        elif layers_desc[_off] == 2: _off += 64
+        elif layers_desc[_off] == 4: _off += 64
+        else: _off += 80
+    hw_weight_end = hw_weight_off + max(hw_weight_size, len(weight_data))
+    name_table_off = align16(hw_weight_end + 16)
     segment_end = name_table_off + len(name_entries)
     segment_size = align16(segment_end)
 
@@ -395,8 +431,63 @@ def build_segment(layers_desc: bytes, weight_data: bytes,
     # Layer descriptors
     seg[v70:v70 + len(layers_desc)] = layers_desc
 
-    # Weight data
+    # Fixup arg_offset for each layer type:
+    # - Conv: arg_offset = weight_data_off (weight metadata right after descs)
+    # - FC: arg_offset += weight_data_off (relative to weight blob start)
+    off = v70
+    for _ in range(total_layers):
+        ltype = seg[off]
+        if ltype == 0:  # Conv: patch arg_offset and s[8]
+            struct.pack_into('<I', seg, off + 24, arg_data_off)
+            # s[8] = offset to HW weight area (free space for loadmodel to
+            # store transformed weights). Must be separate from arg_data.
+            struct.pack_into('<I', seg, off + 28, hw_weight_off)
+            off += 80
+        elif ltype == 2:  # FC: arg_offset relative to weight blob
+            old = struct.unpack_from('<I', seg, off + 20)[0]
+            struct.pack_into('<I', seg, off + 20, old + weight_data_off)
+            off += 64
+        elif ltype == 4:  off += 64  # Unpack
+        elif ltype == 5:  off += 48  # Preproc
+        elif ltype == 1:  off += 48  # Flatten
+        else:             off += 80
+
+    # Weight/arg data: placed at arg_data_off (right after descs)
+    seg[arg_data_off:arg_data_off + len(weight_data)] = weight_data
+    # Also place at weight_data_off (vendor validation needs data here)
     seg[weight_data_off:weight_data_off + len(weight_data)] = weight_data
+
+    # Generate int24 HW weights at hw_weight_off.
+    # Format: round(float_weight * 2^20) as 3-byte LE signed, in 40-byte records.
+    # For int8 source weights: float ≈ int8 / 127, so int24 ≈ int8 * (2^20 / 127) ≈ int8 * 8257
+    _off = v70
+    _hw_off = hw_weight_off
+    for _ in range(total_layers):
+        ltype = seg[_off]
+        if ltype == 0:  # Conv
+            _ic = struct.unpack_from('<H', seg, _off + 8)[0]
+            _oc = struct.unpack_from('<H', seg, _off + 14)[0]
+            _k = seg[_off + 61]
+            _arg_off = struct.unpack_from('<I', seg, _off + 24)[0]
+            # int8 weights start at arg_data + 64
+            for filt in range(_oc * _ic):
+                for w in range(_k * _k):
+                    w8 = seg[_arg_off + 64 + filt * _k * _k + w]
+                    if w8 > 127: w8 -= 256  # unsigned→signed
+                    # Convert: int24 = int8 * (2^20 / 127) for unit-scale int8
+                    w24 = int(round(w8 * (1 << 20) / 127.0))
+                    w24 = max(-8388608, min(8388607, w24))
+                    struct.pack_into('<i', seg, _hw_off + w * 3, 0)  # clear 4 bytes first
+                    seg[_hw_off + w*3] = w24 & 0xFF
+                    seg[_hw_off + w*3 + 1] = (w24 >> 8) & 0xFF
+                    seg[_hw_off + w*3 + 2] = (w24 >> 16) & 0xFF
+                _hw_off += 40  # advance to next 40-byte record
+            _off += 80
+        elif ltype == 5: _off += 48
+        elif ltype == 1: _off += 48
+        elif ltype == 2: _off += 64
+        elif ltype == 4: _off += 64
+        else: _off += 80
 
     # Name table
     seg[name_table_off:name_table_off + len(name_entries)] = name_entries
@@ -623,7 +714,7 @@ def build_conv_test(output_path):
     Uses identity-like weights (center=127, rest=0) so the Conv output
     is approximately 127× the input — predictable for HW verification.
     """
-    input_h, input_w = 8, 8  # small for easy debugging
+    input_h, input_w = 32, 32  # match reference Preproc (32×32)
     input_c = 1  # grayscale
     kernel_size = 3
     output_c = 1
@@ -636,8 +727,19 @@ def build_conv_test(output_path):
     w[0, 0, 1, 1] = 1  # center pixel only
     b = np.zeros(output_c, dtype=np.int32)
 
-    # Weight blob: 1 byte pad + weights + bias
-    weight_blob = b'\x00' + w.tobytes() + b.tobytes()
+    # Weight blob (vendor format): int8 weights always start at offset 64
+    # [int32 biases] [0x80 padding to offset 64] [int8 weights] [align]
+    bias_data = b.tobytes()  # output_c × 4 bytes
+    pad_to_64 = 64 - len(bias_data)
+    pad_data = b'\x80' * pad_to_64  # pad with 0x80 up to offset 64
+    weight_data = w.tobytes()
+    weight_blob = bias_data + pad_data + weight_data
+    # Pad to minimum 288 bytes
+    while len(weight_blob) < 288:
+        weight_blob += b'\x00'
+    # Align total to 16 bytes
+    while len(weight_blob) % 16:
+        weight_blob += b'\x00'
     weight_size = len(weight_blob)
     print(f'Conv test: {input_h}×{input_w}×{input_c} → 3×3 → {output_h}×{output_w}×{output_c}')
     print(f'Weight blob: {weight_size} bytes')
@@ -648,7 +750,9 @@ def build_conv_test(output_path):
     conv_out_off = align16(preproc_out)
     unpack_in_off = conv_out_off
     unpack_out_off = align16(conv_out_off + align16(output_w) * output_h * output_c)
-    tmp_buf_size = unpack_out_off + 4096
+    # VGS preproc needs large working memory (~144*H*W + overhead)
+    vgs_overhead = input_h * input_w * 144 + 65536
+    tmp_buf_size = max(unpack_out_off + 4096, vgs_overhead)
 
     # Build layer descriptors
     layers = bytearray()
@@ -657,12 +761,13 @@ def build_conv_test(output_path):
     layers += make_preproc(input_h, input_w, 3, 0)
 
     # Layer 1: Conv 3×3
+    # arg_offset will be patched by build_segment to point to weight_data_off
     layers += make_conv(
         input_c=input_c, input_h=input_h, input_w=input_w,
         output_c=output_c, output_h=output_h, output_w=output_w,
         kernel_size=kernel_size, pool_mode=0, af_mode=0,
         arg_len_cumulative=weight_size,
-        arg_offset=1,  # skip 1-byte pad
+        arg_offset=0,  # will be patched to weight_data_off by build_segment
         in_tmp_offset=conv_in_off,
         out_tmp_offset=conv_out_off,
         layer_index=1)
