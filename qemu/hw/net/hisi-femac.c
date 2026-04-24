@@ -86,6 +86,13 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiFemacState, HISI_FEMAC)
 #define REG_HIETH_TX_Q_STAT    0x0488
 #define REG_HIETH_TX_Q_CTRL    0x0490
 
+/*
+ * Vendor init/enable register at 0x3a4.  Not in upstream hisi_femac.c;
+ * vendor BSPs for CV200/CV300/CV500 do a one-shot read-modify-write that
+ * sets bit 31 during port bring-up.  Model as a plain RAM register.
+ */
+#define REG_PORT_VENDOR_INIT   0x03a4
+
 /* Linux kernel MDIO registers (separate MDIO base) */
 #define REG_MDIO_RWCTRL         0x1100
 #define REG_MDIO_RO_DATA        0x1104
@@ -179,6 +186,7 @@ struct HisiFemacState {
     uint32_t irq_raw;
     uint32_t endian_mod;
     uint32_t tx_ipgctrl;
+    uint32_t port_vendor_init;
     uint32_t mac_filter[16];
 
     /* Periodic RX poll timer for polled (non-IRQ) drivers like U-Boot */
@@ -488,6 +496,9 @@ static uint64_t hisi_femac_read(void *opaque, hwaddr offset, unsigned size)
     case REG_HIETH_TX_Q_STAT:
         return 0;
 
+    case REG_PORT_VENDOR_INIT:
+        return s->port_vendor_init;
+
     /* U-Boot per-port MDIO config registers */
     case REG_U_MDIO_PHYADDR:
         return s->u_mdio_phyaddr;
@@ -600,6 +611,10 @@ static void hisi_femac_write(void *opaque, hwaddr offset, uint64_t val,
     /* hieth-sf TX queue writes are no-ops: TX is instantaneous */
     case REG_HIETH_TX_Q_STAT:
     case REG_HIETH_TX_Q_CTRL:
+        break;
+
+    case REG_PORT_VENDOR_INIT:
+        s->port_vendor_init = val;
         break;
 
     /* U-Boot per-port MDIO config registers */
