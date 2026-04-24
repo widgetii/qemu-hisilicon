@@ -325,7 +325,12 @@ static const HisiSoCConfig hi3516av100_soc = {
     .desc               = "HiSilicon Hi3516AV100 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_AV100,
-    .ram_size_default   = 128 * MiB,   /* real AV100 boards ship 128+ MiB */
+    /* Real AV100 boards ship 128 MiB DDR; OpenIPC firmware's
+     * load_hisilicon defaults to osmem=32 so mmz.ko takes the upper
+     * 96 MiB at 0x82000000.  Cap kernel at 32 MiB to avoid the
+     * conflict, matching CV100/CV200. */
+    .ram_size_default   = 128 * MiB,
+    .kernel_mem_mb      = 32,
 
     .ram_base           = 0x80000000,
     .sram_base          = 0x04010000,
@@ -372,6 +377,9 @@ static const HisiSoCConfig hi3516av100_soc = {
 
     .num_i2c            = 3,
     .i2c_bases          = { 0x200D0000, 0x20240000, 0x20250000 },
+    /* AV100 kernel uses the same DesignWare-derived i2c-hisilicon
+     * driver as CV200 (vendor #ifdef CONFIG_ARCH_HI3516A). */
+    .i2c_type           = "hisi-i2c-dw",
 
     .mipi_rx_base       = 0x20680000,
     .mipi_rx_irq        = 34,
