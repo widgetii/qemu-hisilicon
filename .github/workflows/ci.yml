@@ -90,11 +90,11 @@ jobs:
         timeout-minutes: 2
         run: |
           timeout 60 ./qemu-src/build/qemu-system-arm \
-            -M hi3516ev300 -m 128M \
+            -M hi3516ev300 \
             -kernel qemu-boot/uImage.hi3516ev300 \
             -initrd qemu-boot/test-ive.cpio \
             -nographic -serial mon:stdio \
-            -append "console=ttyAMA0,115200 mem=96M mmz_allocator=hisi mmz=anonymous,0,0x46000000,32M" \
+            -append "console=ttyAMA0,115200" \
             2>&1 | tee ive-output.txt || true
 
           echo ""
@@ -129,7 +129,7 @@ jobs:
             soc: hi3516cv100
             machine: hi3516cv100
             mem: 64M
-            append: "console=ttyAMA0,115200 mem=64M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),2048k(kernel),5120k(rootfs),-(rootfs_data)"
+            append: "console=ttyAMA0,115200 root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),2048k(kernel),5120k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516cv100-universal.bin
             flash_type: hisi-sfc350
@@ -138,7 +138,7 @@ jobs:
             soc: hi3516cv200
             machine: hi3516cv200
             mem: 64M
-            append: "console=ttyAMA0,115200 mem=32M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            append: "console=ttyAMA0,115200 root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516cv200-universal.bin
             flash_mem: 256M
@@ -147,14 +147,14 @@ jobs:
             soc: hi3516av100
             machine: hi3516av100
             mem: 256M
-            append: "console=ttyAMA0,115200 earlyprintk mem=256M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             # ping_linux blocked by vendor module crash (#30)
 
           - name: hi3516cv300
             soc: hi3516cv300
             machine: hi3516cv300
             mem: 128M
-            append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516cv300-universal.bin
             flash_mem: 256M
@@ -163,19 +163,19 @@ jobs:
             soc: hi3516cv500
             machine: hi3516cv500
             mem: 128M
-            append: "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
 
           - name: hi3519v101
             soc: hi3519v101
             machine: hi3519v101
             mem: 256M
-            append: "console=ttyAMA0,115200 earlyprintk mem=256M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
 
           - name: hi3516ev300
             soc: hi3516ev300
             machine: hi3516ev300
             mem: 128M
-            append: "console=ttyAMA0,115200 earlyprintk mem=96M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data) mmz_allocator=hisi mmz=anonymous,0,0x46000000,32M"
+            append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516ev300-universal.bin
             flash_mem: 128M

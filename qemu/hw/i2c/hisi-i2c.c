@@ -1,238 +1,526 @@
 /*
  * HiSilicon HiBVT I2C controller emulation.
  *
- * Translates hibvt register-level I2C protocol into QEMU I2CBus
- * transactions, allowing I2CSlave devices (sensors, EEPROMs, etc.)
- * to be attached.
+ * Drives a QEMU I2C bus from the vendor "hibvt" register-level
+ * interface used on V2+ SoCs (CV200 family, AV100, CV300, EV300,
+ * CV500, CV610, ...).  The Linux driver (drivers/i2c/busses/i2c-hibvt.c)
+ * programs a command queue at CMD_BASE (offsets 0x30..0xAC, 32 slots of
+ * 4 bytes each) and then sets CTRL1.START; the hardware walks the
+ * queue, generating START/STOP/data bytes accordingly.
  *
- * Register layout matches i2c-hibvt.c from the HiSilicon SDK kernel.
+ * Command opcodes (see vendor driver):
+ *   0x00 EXIT       end of program
+ *   0x01 TX_S       emit START
+ *   0x04 TX_D1_2    transmit high byte of DATA1 (10-bit addr only)
+ *   0x05 TX_D1_1    transmit low byte of DATA1 (slave addr + R/W)
+ *   0x09 TX_FIFO    transmit one byte from TX FIFO
+ *   0x12 RX_FIFO    receive one byte into RX FIFO
+ *   0x13 RX_ACK     expect ACK from slave (abort on NACK)
+ *   0x15 IGN_ACK    don't abort on NACK
+ *   0x16 TX_ACK     transmit ACK (master-to-slave on reads, non-last)
+ *   0x17 TX_NACK    transmit NACK (last byte of a read)
+ *   0x18 JMP1       loop-back: if LOOP1 > 0, decrement & jump to DST1
+ *   0x1D UP_TXF     update TX FIFO pointer (DMA-only; no-op here)
+ *   0x1E TX_RS      emit REPEATED START
+ *   0x1F TX_P       emit STOP
+ *
+ * In QEMU's I2C model, START+address are merged into a single
+ * i2c_start_send()/i2c_start_recv() call, so TX_S / TX_RS just set a
+ * pending-start flag and the subsequent TX_D1_1 actually opens the
+ * bus.  ACK/NACK opcodes are status flow-control on real silicon; we
+ * treat them as no-ops because the bus abstraction handles them.
+ *
+ * Execution model: when the guest sets CTRL1.START, the program runs
+ * synchronously until it either terminates (EXIT / end of slots) or
+ * stalls at a TX_FIFO opcode with an empty TX FIFO.  A subsequent
+ * write to TXF resumes execution.  RX_FIFO opcodes push bytes the
+ * guest later drains via RXF reads.
  *
  * Copyright (c) 2026 OpenIPC.
- * Written by Dmitry Ilyin
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
 #include "hw/i2c/i2c.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #define TYPE_HISI_I2C "hisi-i2c"
 OBJECT_DECLARE_SIMPLE_TYPE(HisiI2cState, HISI_I2C)
 
 #define HISI_I2C_REG_SIZE   0x1000
-#define HISI_I2C_REG_COUNT  (HISI_I2C_REG_SIZE / 4)
 
 /* Register offsets */
-#define HIBVT_I2C_DATA1     0x10
-#define HIBVT_I2C_TXF       0x20
-#define HIBVT_I2C_RXF       0x24
-#define HIBVT_I2C_LOOP1     0xB0
-#define HIBVT_I2C_CTRL1     0xD0
-#define HIBVT_I2C_CTRL2     0xD4
-#define HIBVT_I2C_STAT      0xD8
-#define HIBVT_I2C_INTR_RAW  0xE0
-#define HIBVT_I2C_INTR_EN   0xE4
-#define HIBVT_I2C_INTR_STAT 0xE8
+#define R_GLB           0x000
+#define R_SCL_H         0x004
+#define R_SCL_L         0x008
+#define R_DATA1         0x010
+#define R_TXF           0x020
+#define R_RXF           0x024
+#define R_CMD_BASE      0x030     /* 32 command slots, 4 bytes each */
+#define R_CMD_END       0x0B0
+#define R_LOOP1         0x0B0
+#define R_DST1          0x0B4
+#define R_TX_WATER      0x0C8
+#define R_RX_WATER      0x0CC
+#define R_CTRL1         0x0D0
+#define R_CTRL2         0x0D4
+#define R_STAT          0x0D8
+#define R_INTR_RAW      0x0E0
+#define R_INTR_EN       0x0E4
+#define R_INTR_STAT     0x0E8
 
-/* Bit masks */
-#define STAT_RXF_NOE        (1 << 16)   /* RX FIFO not empty */
-#define STAT_TXF_NOF        (1 << 19)   /* TX FIFO not full */
-#define CTRL1_CMD_START     (1 << 0)
-#define CTRL2_CHECK_SDA_IN  (1 << 16)
-#define INTR_CMD_DONE       (1 << 12)
-#define INTR_ABORT          ((1 << 0) | (1 << 11))
+/* GLB register */
+#define GLB_EN          (1U << 0)
 
-#define I2C_TX_BUF_SIZE     64
-#define I2C_RX_BUF_SIZE     64
+/* STAT register */
+#define STAT_RXF_NOE    (1U << 16)
+#define STAT_TXF_NOF    (1U << 19)
+
+/* CTRL1 register */
+#define CTRL1_CMD_START (1U << 0)
+
+/* CTRL2 register */
+#define CTRL2_SDA_IN    (1U << 16)   /* read-back SDA line level */
+
+/* INTR bits (shared across RAW/EN/STAT) */
+#define INTR_ABORT_MASK ((1U << 0) | (1U << 11))
+#define INTR_RX_MASK    (1U << 2)
+#define INTR_TX_MASK    (1U << 4)
+#define INTR_CMD_DONE   (1U << 12)
+
+/* Command opcodes */
+#define CMD_EXIT        0x00
+#define CMD_TX_S        0x01
+#define CMD_TX_D1_2     0x04
+#define CMD_TX_D1_1     0x05
+#define CMD_TX_FIFO     0x09
+#define CMD_RX_FIFO     0x12
+#define CMD_RX_ACK      0x13
+#define CMD_IGN_ACK     0x15
+#define CMD_TX_ACK      0x16
+#define CMD_TX_NACK     0x17
+#define CMD_JMP1        0x18
+#define CMD_UP_TXF      0x1D
+#define CMD_TX_RS       0x1E
+#define CMD_TX_P        0x1F
+
+#define CMD_SLOTS       32
+
+#define FIFO_DEPTH      64
 
 struct HisiI2cState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
-    I2CBus *bus;
-    uint32_t regs[HISI_I2C_REG_COUNT];
-    uint32_t intr_raw;
+    I2CBus      *bus;
+    qemu_irq     irq;
 
-    /* I2C transfer state */
-    uint8_t  slave_addr;
-    bool     is_read;
-    bool     transfer_active;
-    bool     loop1_written;
+    uint32_t     glb;
+    uint32_t     scl_h;
+    uint32_t     scl_l;
+    uint32_t     data1;
+    uint32_t     loop1;
+    uint32_t     dst1;
+    uint32_t     tx_water;
+    uint32_t     rx_water;
+    uint32_t     ctrl1;
+    uint32_t     ctrl2;
+    uint32_t     intr_raw;
+    uint32_t     intr_en;
 
-    uint8_t  tx_buf[I2C_TX_BUF_SIZE];
-    uint32_t tx_count;
+    uint32_t     cmds[CMD_SLOTS];
 
-    uint8_t  rx_buf[I2C_RX_BUF_SIZE];
-    uint32_t rx_count;
-    uint32_t rx_ptr;
+    /* FIFOs (kept as simple byte buffers, size bounded by FIFO_DEPTH) */
+    uint8_t      txf[FIFO_DEPTH];
+    uint32_t     txf_len;
+    uint8_t      rxf[FIFO_DEPTH];
+    uint32_t     rxf_head;   /* next byte to dequeue on RXF read */
+    uint32_t     rxf_len;    /* bytes queued */
+
+    /* Command-queue execution state */
+    bool         running;
+    bool         active;     /* an i2c_start_* has been issued and not ended */
+    bool         is_read;
+    bool         pending_start;
+    bool         pending_restart;
+    uint32_t     pc;
 };
 
-static void hisi_i2c_do_write_transfer(HisiI2cState *s)
+static void hisi_i2c_update_irq(HisiI2cState *s)
 {
-    if (i2c_start_send(s->bus, s->slave_addr) != 0) {
-        s->intr_raw |= INTR_ABORT;
-        return;
-    }
-    s->transfer_active = true;
-
-    /* Send any pre-buffered TX bytes */
-    for (uint32_t i = 0; i < s->tx_count; i++) {
-        i2c_send(s->bus, s->tx_buf[i]);
-    }
-    s->tx_count = 0;
+    qemu_set_irq(s->irq, (s->intr_raw & s->intr_en) != 0);
 }
 
-static void hisi_i2c_do_read_transfer(HisiI2cState *s)
+static void hisi_i2c_run(HisiI2cState *s);
+
+static uint8_t hisi_i2c_txf_pop(HisiI2cState *s)
 {
-    uint32_t loop1 = s->regs[HIBVT_I2C_LOOP1 / 4];
+    uint8_t v = s->txf[0];
+    memmove(s->txf, s->txf + 1, s->txf_len - 1);
+    s->txf_len--;
+    return v;
+}
 
-    if (s->loop1_written) {
-        s->rx_count = loop1 + 2;
+static void hisi_i2c_rxf_push(HisiI2cState *s, uint8_t v)
+{
+    if (s->rxf_len < FIFO_DEPTH) {
+        s->rxf[(s->rxf_head + s->rxf_len) % FIFO_DEPTH] = v;
+        s->rxf_len++;
+    }
+}
+
+static void hisi_i2c_do_start(HisiI2cState *s, bool restart)
+{
+    uint8_t addr = (s->data1 >> 1) & 0x7F;
+    bool want_read = (s->data1 & 1) != 0;
+    int ret;
+
+    if (s->active && restart) {
+        i2c_end_transfer(s->bus);
+        s->active = false;
+    }
+
+    ret = want_read ? i2c_start_recv(s->bus, addr)
+                    : i2c_start_send(s->bus, addr);
+    if (ret == 0) {
+        s->active = true;
+        s->is_read = want_read;
     } else {
-        s->rx_count = 1;
+        /* No slave acked — flag abort for guest. */
+        s->intr_raw |= INTR_ABORT_MASK;
+        s->active = false;
     }
+}
 
-    if (s->rx_count > I2C_RX_BUF_SIZE) {
-        s->rx_count = I2C_RX_BUF_SIZE;
-    }
+static void hisi_i2c_finish_program(HisiI2cState *s)
+{
+    s->running = false;
+    s->intr_raw |= INTR_CMD_DONE;
+    s->ctrl1 &= ~CTRL1_CMD_START;
+    hisi_i2c_update_irq(s);
+}
 
-    s->rx_ptr = 0;
-
-    if (i2c_start_recv(s->bus, s->slave_addr) != 0) {
-        /* No device at this address — signal NACK/abort */
-        s->rx_count = 0;
-        s->intr_raw |= INTR_ABORT;
+static void hisi_i2c_run(HisiI2cState *s)
+{
+    if (!s->running) {
         return;
     }
 
-    for (uint32_t i = 0; i < s->rx_count; i++) {
-        s->rx_buf[i] = i2c_recv(s->bus);
+    while (s->pc < CMD_SLOTS) {
+        uint32_t cmd = s->cmds[s->pc] & 0x1F;
+        bool advance = true;
+
+        switch (cmd) {
+        case CMD_EXIT:
+            hisi_i2c_finish_program(s);
+            return;
+
+        case CMD_TX_S:
+            s->pending_start = true;
+            s->pending_restart = false;
+            break;
+
+        case CMD_TX_RS:
+            s->pending_restart = true;
+            s->pending_start = false;
+            break;
+
+        case CMD_TX_D1_2:
+            /* 10-bit addressing — high byte of DATA1 gets emitted after
+             * the start sequence on real silicon.  We only support 7-bit
+             * addressing in QEMU's I2C model; skip. */
+            break;
+
+        case CMD_TX_D1_1:
+            if (s->pending_start || s->pending_restart) {
+                hisi_i2c_do_start(s, s->pending_restart);
+                s->pending_start = false;
+                s->pending_restart = false;
+                if (s->intr_raw & INTR_ABORT_MASK) {
+                    hisi_i2c_finish_program(s);
+                    return;
+                }
+            } else if (s->active && !s->is_read) {
+                i2c_send(s->bus, s->data1 & 0xFF);
+            }
+            break;
+
+        case CMD_TX_FIFO:
+            if (s->txf_len == 0) {
+                /* Stall until guest refills TXF. */
+                return;
+            }
+            if (s->active && !s->is_read) {
+                i2c_send(s->bus, hisi_i2c_txf_pop(s));
+            } else {
+                /* Drain regardless to keep FIFO accounting consistent. */
+                (void)hisi_i2c_txf_pop(s);
+            }
+            if (s->txf_len < s->tx_water) {
+                s->intr_raw |= INTR_TX_MASK;
+            }
+            break;
+
+        case CMD_RX_FIFO:
+            if (s->active && s->is_read) {
+                hisi_i2c_rxf_push(s, i2c_recv(s->bus));
+                if (s->rxf_len >= s->rx_water) {
+                    s->intr_raw |= INTR_RX_MASK;
+                }
+            }
+            break;
+
+        case CMD_RX_ACK:
+        case CMD_IGN_ACK:
+        case CMD_TX_ACK:
+        case CMD_TX_NACK:
+            /* Flow-control markers — QEMU's I2C bus abstraction handles
+             * ACK/NACK implicitly through i2c_start_*() return codes. */
+            break;
+
+        case CMD_JMP1:
+            if (s->loop1 > 0) {
+                s->loop1--;
+                s->pc = s->dst1;
+                advance = false;
+            }
+            break;
+
+        case CMD_UP_TXF:
+            /* DMA-mode TX FIFO update — no-op for PIO. */
+            break;
+
+        case CMD_TX_P:
+            if (s->active) {
+                i2c_end_transfer(s->bus);
+                s->active = false;
+            }
+            break;
+
+        default:
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "hisi-i2c: unknown command 0x%x at pc=%u\n",
+                          cmd, s->pc);
+            s->intr_raw |= INTR_ABORT_MASK;
+            hisi_i2c_finish_program(s);
+            return;
+        }
+
+        if (advance) {
+            s->pc++;
+        }
     }
-    i2c_end_transfer(s->bus);
+
+    /* Fell off the end of the command array — treat as EXIT. */
+    hisi_i2c_finish_program(s);
 }
 
 static uint64_t hisi_i2c_read(void *opaque, hwaddr offset, unsigned size)
 {
     HisiI2cState *s = HISI_I2C(opaque);
 
-    if (offset >= HISI_I2C_REG_SIZE) {
-        return 0;
+    if (offset >= R_CMD_BASE && offset < R_CMD_END) {
+        return s->cmds[(offset - R_CMD_BASE) >> 2];
     }
 
     switch (offset) {
-    case HIBVT_I2C_RXF:
-        if (s->rx_ptr < s->rx_count) {
-            return s->rx_buf[s->rx_ptr++];
+    case R_GLB:
+        return s->glb;
+    case R_SCL_H:
+        return s->scl_h;
+    case R_SCL_L:
+        return s->scl_l;
+    case R_DATA1:
+        return s->data1;
+    case R_TXF:
+        return 0;
+    case R_RXF: {
+        uint8_t v;
+        if (s->rxf_len == 0) {
+            return 0;
         }
-        return 0xFF;
-    case HIBVT_I2C_STAT:
-        return STAT_TXF_NOF |
-               (s->rx_ptr < s->rx_count ? STAT_RXF_NOE : 0);
-    case HIBVT_I2C_CTRL2:
-        return s->regs[offset / 4] | CTRL2_CHECK_SDA_IN;
-    case HIBVT_I2C_INTR_RAW:
+        v = s->rxf[s->rxf_head];
+        s->rxf_head = (s->rxf_head + 1) % FIFO_DEPTH;
+        s->rxf_len--;
+        /* Reading may have drained the FIFO and allowed the program to
+         * progress, but RX_FIFO opcodes are self-contained so no resume
+         * needed here. */
+        return v;
+    }
+    case R_LOOP1:
+        return s->loop1;
+    case R_DST1:
+        return s->dst1;
+    case R_TX_WATER:
+        return s->tx_water;
+    case R_RX_WATER:
+        return s->rx_water;
+    case R_CTRL1:
+        return s->ctrl1;
+    case R_CTRL2:
+        /* Mirror SDA high when idle so the rescue path doesn't spin. */
+        return s->ctrl2 | CTRL2_SDA_IN;
+    case R_STAT: {
+        uint32_t v = 0;
+        if (s->rxf_len > 0) {
+            v |= STAT_RXF_NOE;
+        }
+        if (s->txf_len < FIFO_DEPTH) {
+            v |= STAT_TXF_NOF;
+        }
+        return v;
+    }
+    case R_INTR_RAW:
         return s->intr_raw;
-    case HIBVT_I2C_INTR_STAT:
-        return s->intr_raw & s->regs[HIBVT_I2C_INTR_EN / 4];
+    case R_INTR_EN:
+        return s->intr_en;
+    case R_INTR_STAT:
+        return s->intr_raw & s->intr_en;
     default:
-        return s->regs[offset / 4];
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "hisi-i2c: bad read offset 0x%x\n", (int)offset);
+        return 0;
     }
 }
 
 static void hisi_i2c_write(void *opaque, hwaddr offset,
-                            uint64_t val, unsigned size)
+                           uint64_t value, unsigned size)
 {
     HisiI2cState *s = HISI_I2C(opaque);
 
-    if (offset >= HISI_I2C_REG_SIZE) {
+    if (offset >= R_CMD_BASE && offset < R_CMD_END) {
+        s->cmds[(offset - R_CMD_BASE) >> 2] = value & 0x1F;
         return;
     }
 
     switch (offset) {
-    case HIBVT_I2C_DATA1:
-        /* End any previous transfer */
-        if (s->transfer_active) {
-            i2c_end_transfer(s->bus);
-            s->transfer_active = false;
+    case R_GLB:
+        s->glb = value;
+        break;
+    case R_SCL_H:
+        s->scl_h = value;
+        break;
+    case R_SCL_L:
+        s->scl_l = value;
+        break;
+    case R_DATA1:
+        s->data1 = value & 0x3FF;
+        break;
+    case R_TXF:
+        if (s->txf_len < FIFO_DEPTH) {
+            s->txf[s->txf_len++] = value & 0xFF;
         }
-        s->slave_addr = (val >> 1) & 0x7F;
-        s->is_read = val & 1;
-        s->tx_count = 0;
-        s->rx_ptr = 0;
-        s->rx_count = 0;
-        s->loop1_written = false;
-        s->regs[offset / 4] = val;
+        /* A write to TXF may satisfy a stalled TX_FIFO opcode. */
+        hisi_i2c_run(s);
         break;
-
-    case HIBVT_I2C_TXF:
-        if (s->transfer_active && !s->is_read) {
-            /* Write transfer already started — send directly */
-            i2c_send(s->bus, val & 0xFF);
-        } else if (s->tx_count < I2C_TX_BUF_SIZE) {
-            /* Buffer for later */
-            s->tx_buf[s->tx_count++] = val & 0xFF;
+    case R_LOOP1:
+        s->loop1 = value;
+        break;
+    case R_DST1:
+        s->dst1 = value & (CMD_SLOTS - 1);
+        break;
+    case R_TX_WATER:
+        s->tx_water = value & 0x7F;
+        break;
+    case R_RX_WATER:
+        s->rx_water = value & 0x7F;
+        break;
+    case R_CTRL1:
+        s->ctrl1 = value & ~CTRL1_CMD_START;
+        if (value & CTRL1_CMD_START) {
+            /*
+             * Kick off a fresh program run.  The active/is_read state
+             * carries over from the previous program: the kernel
+             * emits one program per I2C message and uses CMD_TX_RS in
+             * subsequent messages to restart the bus without an
+             * intervening STOP, so we must not drop the open transfer
+             * here.
+             */
+            s->running = true;
+            s->pending_start = false;
+            s->pending_restart = false;
+            s->pc = 0;
+            hisi_i2c_run(s);
         }
         break;
-
-    case HIBVT_I2C_LOOP1:
-        s->regs[offset / 4] = val;
-        s->loop1_written = true;
+    case R_CTRL2:
+        s->ctrl2 = value;
         break;
-
-    case HIBVT_I2C_CTRL1:
-        s->regs[offset / 4] = val;
-        if (val & CTRL1_CMD_START) {
-            if (s->is_read) {
-                hisi_i2c_do_read_transfer(s);
-            } else {
-                hisi_i2c_do_write_transfer(s);
-            }
-            s->intr_raw |= INTR_CMD_DONE;
-            s->regs[offset / 4] &= ~CTRL1_CMD_START;
-        }
+    case R_INTR_RAW:
+        /* write-1-to-clear */
+        s->intr_raw &= ~value;
+        hisi_i2c_update_irq(s);
         break;
-
-    case HIBVT_I2C_INTR_RAW:
-        s->intr_raw &= ~val;  /* W1C */
+    case R_INTR_EN:
+        s->intr_en = value;
+        hisi_i2c_update_irq(s);
         break;
-
+    case R_RXF:
+    case R_STAT:
+    case R_INTR_STAT:
+        /* Read-only. */
+        break;
     default:
-        s->regs[offset / 4] = val;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "hisi-i2c: bad write offset 0x%x val=0x%x\n",
+                      (int)offset, (unsigned)value);
         break;
     }
 }
 
 static const MemoryRegionOps hisi_i2c_ops = {
-    .read = hisi_i2c_read,
+    .read  = hisi_i2c_read,
     .write = hisi_i2c_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid.min_access_size = 4,
     .valid.max_access_size = 4,
 };
 
-static void hisi_i2c_init(Object *obj)
-{
-    HisiI2cState *s = HISI_I2C(obj);
-
-    memory_region_init_io(&s->iomem, obj, &hisi_i2c_ops, s,
-                          TYPE_HISI_I2C, HISI_I2C_REG_SIZE);
-    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
-    s->bus = i2c_init_bus(DEVICE(obj), "i2c");
-}
-
 static void hisi_i2c_reset(DeviceState *dev)
 {
     HisiI2cState *s = HISI_I2C(dev);
-    memset(s->regs, 0, sizeof(s->regs));
+
+    if (s->active) {
+        i2c_end_transfer(s->bus);
+    }
+    memset(s->cmds, 0, sizeof(s->cmds));
+    s->glb = 0;
+    s->scl_h = 0;
+    s->scl_l = 0;
+    s->data1 = 0;
+    s->loop1 = 0;
+    s->dst1 = 0;
+    s->tx_water = 32;
+    s->rx_water = 1;
+    s->ctrl1 = 0;
+    s->ctrl2 = 0;
     s->intr_raw = 0;
-    s->slave_addr = 0;
+    s->intr_en = 0;
+    s->txf_len = 0;
+    s->rxf_head = 0;
+    s->rxf_len = 0;
+    s->running = false;
+    s->active = false;
     s->is_read = false;
-    s->transfer_active = false;
-    s->loop1_written = false;
-    s->tx_count = 0;
-    s->rx_count = 0;
-    s->rx_ptr = 0;
+    s->pending_start = false;
+    s->pending_restart = false;
+    s->pc = 0;
+    hisi_i2c_update_irq(s);
+}
+
+static void hisi_i2c_init(Object *obj)
+{
+    HisiI2cState *s = HISI_I2C(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
+    memory_region_init_io(&s->iomem, obj, &hisi_i2c_ops, s,
+                          TYPE_HISI_I2C, HISI_I2C_REG_SIZE);
+    sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->irq);
+    s->bus = i2c_init_bus(DEVICE(obj), "i2c");
 }
 
 static void hisi_i2c_class_init(ObjectClass *klass, const void *data)

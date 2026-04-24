@@ -25,7 +25,7 @@ shift 2>/dev/null  # consume $1 so "$@" passes only extra args
 
 NIC_ARGS="-nic user"
 
-exec "$QEMU" -M hi3516cv100 -m 64M \
+exec "$QEMU" -M hi3516cv100 \
     -global hisi-sfc350.flash-file="$FLASH_FILE" \
     -nographic -serial mon:stdio \
     $NIC_ARGS \

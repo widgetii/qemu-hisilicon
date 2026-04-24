@@ -15,11 +15,11 @@ else
     echo "TAP not available; using SLIRP user-mode networking"
 fi
 
-exec "$QEMU" -M hi3516cv300 -m 128M \
+exec "$QEMU" -M hi3516cv300 \
     -kernel "$SCRIPT_DIR/uImage.hi3516cv300" \
     -initrd "$SCRIPT_DIR/rootfs.squashfs.hi3516cv300" \
     -nographic -serial mon:stdio \
-    -append "console=ttyAMA0,115200 earlyprintk mem=128M root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)" \
+    -append "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)" \
     $NIC_ARGS \
     -d unimp,guest_errors -D "$SCRIPT_DIR/qemu-cv300.log" \
     "$@"
