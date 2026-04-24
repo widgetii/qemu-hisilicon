@@ -76,6 +76,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiFemacState, HISI_FEMAC)
 /* MAC TX/RX IPG control (U-Boot uses these) */
 #define REG_U_MAC_TX_IPGCTRL   0x0218
 
+/*
+ * V1/V2 hieth-sf TX descriptor queue.  CV100's 3.0.8 kernel uses the
+ * older hieth-sf driver which pushes TX descriptors via 0x488 and arms
+ * the queue via 0x490.  Our V3/V4 FEMAC model handles TX instantaneously
+ * through REG_EQ_ADDR/REG_EQFRM_LEN, so reads of 0x488 returning 0 ("queue
+ * empty") let hieth-sf exit its busy-poll immediately; writes are no-ops.
+ */
+#define REG_HIETH_TX_Q_STAT    0x0488
+#define REG_HIETH_TX_Q_CTRL    0x0490
+
 /* Linux kernel MDIO registers (separate MDIO base) */
 #define REG_MDIO_RWCTRL         0x1100
 #define REG_MDIO_RO_DATA        0x1104
@@ -474,6 +484,10 @@ static uint64_t hisi_femac_read(void *opaque, hwaddr offset, unsigned size)
     case REG_U_MAC_TX_IPGCTRL:
         return s->tx_ipgctrl;
 
+    /* hieth-sf TX queue: instantaneous TX model ⇒ always "empty" */
+    case REG_HIETH_TX_Q_STAT:
+        return 0;
+
     /* U-Boot per-port MDIO config registers */
     case REG_U_MDIO_PHYADDR:
         return s->u_mdio_phyaddr;
@@ -581,6 +595,11 @@ static void hisi_femac_write(void *opaque, hwaddr offset, uint64_t val,
         break;
     case REG_U_MAC_TX_IPGCTRL:
         s->tx_ipgctrl = val;
+        break;
+
+    /* hieth-sf TX queue writes are no-ops: TX is instantaneous */
+    case REG_HIETH_TX_Q_STAT:
+    case REG_HIETH_TX_Q_CTRL:
         break;
 
     /* U-Boot per-port MDIO config registers */
