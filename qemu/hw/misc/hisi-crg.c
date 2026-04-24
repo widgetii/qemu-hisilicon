@@ -5,10 +5,10 @@
  * driver can probe without hanging. PLL status registers always
  * report "locked" (bit 28 set).
  *
- * When cpu_srst_offset is set (e.g. 0x78 for CV500/DV300), monitors
- * writes to the CPU soft-reset register.  On CPU1 reset deassert,
- * writes the kernel's secondary_startup address to smp_bootreg_addr,
- * waking CPU1 from QEMU's WFI-poll loop.
+ * When cpu_srst_offset is set (e.g. 0x78 for CV500/DV300), the CPU
+ * soft-reset register is initialized with secondary CPUs held in
+ * reset.  SMP bringup is handled by the boot stub polling address 0x4
+ * where the kernel writes secondary_startup.
  *
  * Copyright (c) 2026 OpenIPC.
  * Written by Dmitry Ilyin
@@ -20,7 +20,9 @@
 #include "hw/sysbus.h"
 #include "hw/qdev-properties.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "system/address-spaces.h"
+#include "target/arm/arm-powerctl.h"
 
 #define TYPE_HISI_CRG "hisi-crg"
 OBJECT_DECLARE_SIMPLE_TYPE(HisiCrgState, HISI_CRG)
@@ -28,33 +30,23 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiCrgState, HISI_CRG)
 #define HISI_CRG_REG_SIZE  0x10000
 #define HISI_CRG_REG_COUNT (HISI_CRG_REG_SIZE / 4)
 
-/*
- * CPU soft-reset register bits (from SDK: arch/arm/mach-hibvt/).
- * Bit 2 = CPU1 reset request, bit 4 = CPU1 debug reset request.
- * Clearing CPU1_SRST_REQ releases CPU1 from reset.
- */
 #define CPU1_SRST_REQ  (1 << 2)
 #define DBG1_SRST_REQ  (1 << 4)
 
-/*
- * PLL lock bit — HiSilicon CRG drivers check bit 28 of PLL status
- * registers to confirm PLL has locked before using the clock.
- */
 #define PLL_LOCK_BIT  (1 << 28)
 
-/* Known PLL status register offsets (from SDK clock drivers) */
-#define HISI_PLL_APLL_STATUS  0x0004  /* APLL */
-#define HISI_PLL_DPLL_STATUS  0x0014  /* DPLL */
-#define HISI_PLL_VPLL_STATUS  0x0024  /* VPLL */
-#define HISI_PLL_EPLL_STATUS  0x0034  /* EPLL */
+#define HISI_PLL_APLL_STATUS  0x0004
+#define HISI_PLL_DPLL_STATUS  0x0014
+#define HISI_PLL_VPLL_STATUS  0x0024
+#define HISI_PLL_EPLL_STATUS  0x0034
 
 struct HisiCrgState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     uint32_t regs[HISI_CRG_REG_COUNT];
-    uint32_t cpu_srst_offset;   /* 0 = disabled, e.g. 0x78 for CV500 */
-    uint32_t smp_bootreg_addr;  /* QEMU WFI-poll loop's boot register */
-    uint32_t smp_entry_addr;    /* phys addr where kernel puts entry (0x4) */
+    uint32_t cpu_srst_offset;
+    uint32_t smp_entry_addr;
+    QEMUTimer *smp_timer;
 };
 
 static bool is_pll_status_reg(hwaddr offset)
@@ -82,12 +74,9 @@ static uint64_t hisi_crg_read(void *opaque, hwaddr offset, unsigned size)
     }
 
     uint32_t val = s->regs[offset / 4];
-
-    /* PLL status registers always report locked */
     if (is_pll_status_reg(offset)) {
         val |= PLL_LOCK_BIT;
     }
-
     return val;
 }
 
@@ -106,32 +95,25 @@ static void hisi_crg_write(void *opaque, hwaddr offset,
     uint32_t old = s->regs[offset / 4];
     s->regs[offset / 4] = (uint32_t)val;
 
-    /*
-     * CPU soft-reset register: the vendor kernel's SMP bringup
-     * (platsmp.c → hi35xx_set_cpu) clears CPU1_SRST_REQ (bit 2)
-     * to release CPU1 from reset.  Before doing so, it writes a
-     * trampoline at physical address 0x0 with secondary_startup
-     * address at offset 0x4.
-     *
-     * We read the entry point from smp_entry_addr (captured by the
-     * rom_device trap page at 0x0) and write it to smp_bootreg_addr.
-     * CPU1 is running QEMU's WFI-poll loop and wakes up to jump there.
-     */
-    if (s->cpu_srst_offset && offset == s->cpu_srst_offset) {
-        /* CPU1 reset deasserted (bit 2: 1→0) */
-        if ((old & CPU1_SRST_REQ) && !(val & CPU1_SRST_REQ)) {
-            if (s->smp_bootreg_addr && s->smp_entry_addr) {
-                uint32_t entry = address_space_ldl(&address_space_memory,
-                                    s->smp_entry_addr,
-                                    MEMTXATTRS_UNSPECIFIED, NULL);
-                qemu_log_mask(LOG_UNIMP,
-                              "hisi_crg: CPU1 reset released, entry=0x%x\n",
-                              entry);
-                address_space_stl(&address_space_memory,
-                                  s->smp_bootreg_addr, entry,
-                                  MEMTXATTRS_UNSPECIFIED, NULL);
-            }
+    /* Deferred CPU1 start: when bit 2 transitions 1->0, schedule
+     * arm_set_cpu_on after 1 second to let kernel finish init */
+    if (s->cpu_srst_offset && offset == s->cpu_srst_offset &&
+        s->smp_entry_addr && s->smp_timer) {
+        if ((old & (1 << 2)) && !(val & (1 << 2))) {
+            timer_mod(s->smp_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)
+                      + NANOSECONDS_PER_SECOND);
         }
+    }
+}
+
+static void hisi_crg_smp_cb(void *opaque)
+{
+    HisiCrgState *s = HISI_CRG(opaque);
+    uint32_t entry = address_space_ldl(&address_space_memory,
+                        s->smp_entry_addr, MEMTXATTRS_UNSPECIFIED, NULL);
+    if (entry >= 0x80000000) {
+        arm_set_cpu_on(1, entry, 0, 1, false);
     }
 }
 
@@ -146,21 +128,22 @@ static const MemoryRegionOps hisi_crg_ops = {
 static void hisi_crg_init(Object *obj)
 {
     HisiCrgState *s = HISI_CRG(obj);
-
     memory_region_init_io(&s->iomem, obj, &hisi_crg_ops, s,
                           TYPE_HISI_CRG, HISI_CRG_REG_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
+static void hisi_crg_realize(DeviceState *dev, Error **errp)
+{
+    HisiCrgState *s = HISI_CRG(dev);
+    if (s->smp_entry_addr) {
+        s->smp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, hisi_crg_smp_cb, s);
+    }
+}
+
 static void hisi_crg_reset(DeviceState *dev)
 {
     HisiCrgState *s = HISI_CRG(dev);
-
-    /*
-     * Don't zero regs — CRG defaults (clock enables for UART, FMC, ETH)
-     * are written during machine init and must survive machine reset.
-     * Only reinitialize the CPU reset register for SMP bringup detection.
-     */
     if (s->cpu_srst_offset) {
         s->regs[s->cpu_srst_offset / 4] = CPU1_SRST_REQ | DBG1_SRST_REQ;
     }
@@ -168,7 +151,6 @@ static void hisi_crg_reset(DeviceState *dev)
 
 static const Property hisi_crg_properties[] = {
     DEFINE_PROP_UINT32("cpu-srst-offset", HisiCrgState, cpu_srst_offset, 0),
-    DEFINE_PROP_UINT32("smp-bootreg-addr", HisiCrgState, smp_bootreg_addr, 0),
     DEFINE_PROP_UINT32("smp-entry-addr", HisiCrgState, smp_entry_addr, 0),
 };
 
@@ -177,6 +159,7 @@ static void hisi_crg_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     device_class_set_props(dc, hisi_crg_properties);
     device_class_set_legacy_reset(dc, hisi_crg_reset);
+    dc->realize = hisi_crg_realize;
 }
 
 static const TypeInfo hisi_crg_info = {
