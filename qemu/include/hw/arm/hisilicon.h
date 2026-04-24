@@ -41,6 +41,21 @@ typedef struct HisiSoCConfig {
     ram_addr_t      ram_size_default;
     int             max_cpus;       /* 0 = 1 (default) */
 
+    /*
+     * Size in MiB the Linux kernel is told to use via "mem=<N>M" on
+     * the command line.  Real IP cameras ship 128 MiB DDR with a
+     * 64 MiB / 64 MiB split between kernel and vendor MMZ.  Setting
+     * this to 0 leaves the kernel with the full ram_size_default.
+     */
+    uint32_t        kernel_mem_mb;
+
+    /*
+     * Extra kernel command-line arguments injected by machine init
+     * (e.g. "mmz_allocator=hisi mmz=anonymous,0,0x44000000,64M" to
+     * point the vendor MMZ driver at the upper 64 MiB).  NULL = none.
+     */
+    const char     *extra_cmdline;
+
     /* Memory regions */
     hwaddr          ram_base;
     hwaddr          sram_base;

@@ -33,7 +33,7 @@ else
     echo "TAP not available; using SLIRP user-mode networking"
 fi
 
-exec "$QEMU" -M hi3516ev300 -m 128M \
+exec "$QEMU" -M hi3516ev300 \
     -global hisi-fmc.flash-file="$FLASH_FILE" \
     -nographic -serial mon:stdio \
     $NIC_ARGS \
