@@ -117,6 +117,59 @@ jobs:
           path: ive-output.txt
           retention-days: 7
 
+  sofia-isp:
+    name: Sofia ISP regression (hi3516ev200, sc2315e)
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 dnsmasq-base curl
+
+      - name: Download QEMU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/
+
+      - name: Make QEMU executable
+        run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Download EV200 firmware
+        run: |
+          cd qemu-boot
+          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.hi3516ev200-nor-lite.tgz" \
+              -o openipc.hi3516ev200-nor-lite.tgz
+          tar xzf openipc.hi3516ev200-nor-lite.tgz
+
+      - name: Run Sofia ISP regression test
+        timeout-minutes: 5
+        env:
+          # Tag of the qemu-hisilicon GitHub release that holds the
+          # Sofia binary, fonts, and isp-profile fixtures.  Bump when
+          # republishing.
+          FIXTURES_TAG: sofia-fixtures-v1
+          FIXTURES_REPO: ${{ github.repository }}
+          ISP_READY_TIMEOUT: 45
+          QEMU_TIMEOUT: 240
+        run: |
+          bash qemu-boot/sofia-isp-ci-test.sh
+
+      - name: Upload Sofia test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sofia-isp-log
+          path: |
+            /tmp/sofia-ci-*/qemu-output.txt
+            /tmp/sofia-ci-*/qemu-debug.log
+            /tmp/sofia-ci-*/http.log
+          retention-days: 7
+
   boot:
     name: Boot ${{ matrix.name }}
     needs: build
