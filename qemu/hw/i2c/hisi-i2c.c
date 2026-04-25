@@ -189,9 +189,20 @@ static void hisi_i2c_do_start(HisiI2cState *s, bool restart)
         s->active = true;
         s->is_read = want_read;
     } else {
-        /* No slave acked — flag abort for guest. */
+        /*
+         * No slave acked — flag abort for guest.  Drain any TX FIFO
+         * bytes the guest queued for this aborted transaction;
+         * otherwise they pile up across consecutive failed probes
+         * (Sofia walks ~10 sensor addresses at startup, most NACK)
+         * and eventually corrupt the TX stream of subsequent
+         * successful transactions when the FIFO overflows.  Real
+         * hardware drivers typically reset the FIFO after an abort
+         * via a soft-reset register; clearing it on abort here gives
+         * equivalent behaviour without modelling that register.
+         */
         s->intr_raw |= INTR_ABORT_MASK;
         s->active = false;
+        s->txf_len = 0;
     }
 }
 
@@ -407,7 +418,18 @@ static void hisi_i2c_write(void *opaque, hwaddr offset,
         s->scl_l = value;
         break;
     case R_DATA1:
+        /*
+         * The kernel hibvt-i2c driver writes DATA1 once per transaction
+         * (before queueing TXF bytes and setting CTRL1.START).  Clear
+         * any TX FIFO leftovers from a previous program so this fresh
+         * transaction sees only its own bytes.  Without this, Sofia's
+         * sensor probe sequence (which intentionally queues 1 extra
+         * byte per write program — likely an SDK quirk that real HW
+         * tolerates because the FIFO is reset between transactions)
+         * gradually corrupts subsequent transactions.
+         */
         s->data1 = value & 0x3FF;
+        s->txf_len = 0;
         break;
     case R_TXF:
         if (s->txf_len < FIFO_DEPTH) {
