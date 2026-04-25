@@ -7,7 +7,14 @@
 # the output to the lab NFS share.
 #
 # Usage:
-#   bash qemu-boot/run-ev200-capture.sh --sensor sc2315e [--mode day|night]
+#   bash qemu-boot/run-ev200-capture.sh --sensor sc2315e [--mode day|night] [--debug]
+#
+# --debug exports XMVIDEO_DEBUG_ON / XMCAP_DEBUG_ON / XMIMP_DEBUG_ON
+#         / JSON_PARSE_RES_OUTPUT into Sofia's environment so its
+#         high-level state events trace into /tmp/sofia.log inside
+#         the guest (useful for cross-checking which ISP attrs are
+#         being touched — though raw HI_MPI_ISP_* per-call tracing
+#         needs gdb breakpoints).
 #
 # Output: /mnt/noc/isp-captures/<sensor>_qemu_<mode>.isp on the host
 # (i.e. /utils/isp-captures/<sensor>_qemu_<mode>.isp inside the guest).
@@ -41,6 +48,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 SENSOR=""
 MODE="day"
+DEBUG=""
 NFS_HOST="${NFS_HOST:-10.216.128.227}"
 NFS_PATH="${NFS_PATH:-/srv/nfsroot}"
 NFS_LOCAL="${NFS_LOCAL:-/mnt/noc}"
@@ -59,6 +67,7 @@ while [ $# -gt 0 ]; do
         --sensor=*) SENSOR="${1#--sensor=}"; shift;;
         --mode)     MODE="$2"; shift 2;;
         --mode=*)   MODE="${1#--mode=}"; shift;;
+        --debug)    DEBUG=1; shift;;
         --nfs)      NFS_HOST="$2"; shift 2;;
         -h|--help)
             sed -n '/^# /,/^[a-z]/p' "$0" | sed 's/^# \?//'
@@ -131,7 +140,8 @@ for m in sys_config hi_osal hi3516ev200_base hi3516ev200_sys \\
     insmod \${m}.ko \$ARGS > /dev/null 2>&1
 done
 
-chroot /tmp/vendor /Sofia > /tmp/sofia.log 2>&1 &
+${DEBUG:+XMVIDEO_DEBUG_ON=1 XMCAP_DEBUG_ON=1 XMIMP_DEBUG_ON=1 JSON_PARSE_RES_OUTPUT=1} \\
+    chroot /tmp/vendor /Sofia > /tmp/sofia.log 2>&1 &
 SPID=\$!
 
 for i in \$(seq 1 ${ISP_READY_TIMEOUT}); do
