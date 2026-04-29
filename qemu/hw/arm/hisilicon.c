@@ -116,6 +116,7 @@ static const HisiSoCConfig hi3516cv100_soc = {
     .desc               = "HiSilicon Hi3516CV100 (ARM926EJ-S)",
     .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
     .soc_id             = HISI_SOC_ID_CV100,
+    .chipid_byte_layout = true,            /* V1: byte-wise SCSYSID0..3 */
     /* 128 MiB DDR total, kernel gets 32 MiB — matches OpenIPC V1
      * firmware's load_hisilicon defaults (totalmem=64, osmem=32),
      * so mmz.ko's implicit 0x82000000 region is left untouched. */
@@ -222,6 +223,8 @@ static const HisiSoCConfig hi3516cv200_soc = {
     .desc               = "HiSilicon Hi3516CV200 (ARM926EJ-S)",
     .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
     .soc_id             = HISI_SOC_ID_CV200,
+    .chipid_byte_layout = true,            /* V2: byte-wise SCSYSID0..3 */
+    .chip_variant       = 1,               /* 1 = 3516CV200 (vs 2=18EV200, 3=18EV201) */
     /* 128 MiB DDR total, kernel gets 32 MiB — matches firmware's
      * load_hisilicon defaults (osmem=32), leaving mmz.ko's 32 MiB at
      * 0x82000000 free. */
@@ -325,6 +328,7 @@ static const HisiSoCConfig hi3516av100_soc = {
     .desc               = "HiSilicon Hi3516AV100 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_AV100,
+    .chipid_byte_layout = true,            /* V2A: byte-wise SCSYSID0..3 */
     /* Real AV100 boards ship 128 MiB DDR; OpenIPC firmware's
      * load_hisilicon defaults to osmem=32 so mmz.ko takes the upper
      * 96 MiB at 0x82000000.  Cap kernel at 32 MiB to avoid the
@@ -427,6 +431,7 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .desc               = "HiSilicon Hi3516CV300 (ARM926EJ-S)",
     .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
     .soc_id             = HISI_SOC_ID_CV300,
+    .chipid_byte_layout = true,            /* V3: byte-wise SCSYSID0..3 */
     .ram_size_default   = 128 * MiB,   /* stock CV300 cameras ship 128 MiB */
 
     .ram_base           = 0x80000000,
@@ -605,6 +610,7 @@ static const HisiSoCConfig hi3519v101_soc = {
     .desc               = "HiSilicon Hi3519V101 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_19V101,
+    .chipid_byte_layout = true,            /* V3A: byte-wise SCSYSID0..3 */
     .ram_size_default   = 256 * MiB,   /* 4K/WDR boards typically ship 256 MiB */
 
     .ram_base           = 0x80000000,
@@ -2010,6 +2016,8 @@ static void hisilicon_common_init(MachineState *machine,
     {
         DeviceState *sysctl = qdev_new("hisi-sysctl");
         qdev_prop_set_uint32(sysctl, "soc-id", c->soc_id);
+        qdev_prop_set_bit(sysctl, "byte-layout-id", c->chipid_byte_layout);
+        qdev_prop_set_uint8(sysctl, "chip-variant", c->chip_variant);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(sysctl), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(sysctl), 0, c->sysctl_base);
     }

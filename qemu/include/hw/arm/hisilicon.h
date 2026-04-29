@@ -73,6 +73,25 @@ typedef struct HisiSoCConfig {
     hwaddr          sysctl_base;
     hwaddr          crg_base;
 
+    /*
+     * SCSYSID register layout selector.
+     *   false — V4+: SCSYSID0 returns the full 32-bit soc_id as a word.
+     *   true  — V1/V2/V2A/V3/V3A: SCSYSID0..3 each return one byte of
+     *           soc_id (low byte first), matching real silicon and the
+     *           layout expected by vendor V3 sys.ko / ipctool.
+     */
+    bool            chipid_byte_layout;
+
+    /*
+     * Chip sub-variant byte placed in SCSYSID0[31:24] when
+     * chipid_byte_layout is set.  ipctool / vendor sys.ko use it to
+     * disambiguate SoCs that share a family ID — e.g. 0x3518E200
+     * is CV200 (variant 1), 18EV200 (2), or 18EV201 (3).  A value of
+     * 0 covers CV300, AV100 and 19V101 whose default sub-variant maps
+     * to the expected chip name.
+     */
+    uint8_t         chip_variant;
+
     /* UARTs (PL011) */
     int             num_uarts;
     hwaddr          uart_bases[HISI_MAX_UARTS];
