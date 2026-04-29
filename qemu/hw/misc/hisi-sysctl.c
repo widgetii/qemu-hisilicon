@@ -35,6 +35,8 @@ struct HisiSysctlState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     uint32_t soc_id;
+    bool byte_layout;
+    uint8_t chip_variant;
     uint32_t regs[HISI_SYSCTL_NREGS];
 };
 
@@ -49,19 +51,34 @@ static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
         return 0;
     case 0x8C: /* REG_SYSSTAT — boot mode (0 = SPI NOR boot) */
         return s->regs[0x8C / 4];
-    case 0xEE0: /* SCSYSID0 — full 32-bit chip ID */
-        /*
-         * Vendor SDK (e.g. EV200 sys.o SYS_HAL_GetChipID) reads this as
-         * a single u32 and expects the packed chip ID (e.g. 0x3516E200).
-         * On real silicon SCSYSID0..3 are four contiguous bytes; reading
-         * 0xEE0 as a word naturally yields the full ID. We return the
-         * whole 32-bit value here for the same reason.
-         */
-        return s->soc_id;
-    case 0xEE4: /* SCSYSID1 — second word of the SCSYSID block, unused */
+    /*
+     * SCSYSID0..3 chip identification block. Two layouts coexist:
+     *
+     *   word layout (V4+, e.g. EV200/EV300/CV500): SCSYSID0 returns the
+     *     full 32-bit packed ID (e.g. 0x3516E300); SCSYSID1..3 unused.
+     *     Vendor V4 sys.o SYS_HAL_GetChipID reads SCSYSID0 as one u32.
+     *
+     *   byte layout (V1/V2/V2A/V3/V3A): each register returns one byte
+     *     of the family ID, low byte first; SCSYSID0 also carries the
+     *     chip sub-variant byte at bits 24-31. ipctool's
+     *     hisi_detect_cpu() and the vendor V3 sys.ko's SYS_HAL_GetChipID
+     *     rely on this — the latter reads SCSYSID0 >> 24 as the variant
+     *     (0 = CV300, 1 = CV200, 4 = EV100, etc.).
+     *
+     * The active layout is chosen per-SoC via the byte-layout-id
+     * property (default = word); chip-variant supplies the sub-variant
+     * byte and defaults to 0.
+     */
+    case 0xEE0: /* SCSYSID0 */
+        return s->byte_layout
+            ? (((uint32_t)s->chip_variant << 24) | (s->soc_id & 0xff))
+            : s->soc_id;
+    case 0xEE4: /* SCSYSID1 */
+        return s->byte_layout ? ((s->soc_id >> 8) & 0xff) : 0;
     case 0xEE8: /* SCSYSID2 */
+        return s->byte_layout ? ((s->soc_id >> 16) & 0xff) : 0;
     case 0xEEC: /* SCSYSID3 */
-        return 0;
+        return s->byte_layout ? ((s->soc_id >> 24) & 0xff) : 0;
     default:
         if (offset < HISI_SYSCTL_MMIO_SIZE) {
             return s->regs[offset / 4];
@@ -109,6 +126,8 @@ static void hisi_sysctl_init(Object *obj)
 
 static const Property hisi_sysctl_properties[] = {
     DEFINE_PROP_UINT32("soc-id", HisiSysctlState, soc_id, 0),
+    DEFINE_PROP_BOOL("byte-layout-id", HisiSysctlState, byte_layout, false),
+    DEFINE_PROP_UINT8("chip-variant", HisiSysctlState, chip_variant, 0),
 };
 
 static void hisi_sysctl_class_init(ObjectClass *klass, const void *data)

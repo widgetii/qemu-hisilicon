@@ -302,6 +302,20 @@ jobs:
               echo ""
               echo "=== Boot successful: login prompt reached ==="
               kill $QEMU_PID 2>/dev/null || true
+
+              # Regression: openhisilicon#66 — Wrong chip-id: hiunknown.
+              # Caused by hisi-sysctl returning the packed 32-bit chip ID
+              # at SCSYSID0 for V1/V2/V2A/V3/V3A SoCs that use a byte
+              # layout on real silicon. Boot reaching login is not
+              # enough — the firmware's chip-id check must succeed too,
+              # otherwise load_hisilicon short-circuits before any
+              # vendor module loads.
+              if grep -qE "Wrong chip-id|hiunknown" boot-output.txt; then
+                echo "=== FAIL: chip-id detection broken (openhisilicon#66) ==="
+                grep -nE "Wrong chip-id|hiunknown" boot-output.txt
+                exit 1
+              fi
+              echo "=== Chip-id detection OK ==="
               exit 0
             fi
             sleep 1
