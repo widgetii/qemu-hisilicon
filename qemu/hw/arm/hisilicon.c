@@ -1666,6 +1666,39 @@ static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
 
 static struct arm_boot_info hisilicon_binfo;
 
+/*
+ * SMP secondary boot stub: WFE-poll loop without GIC CPU interface init.
+ *
+ * The default boot.c stub enables the GIC CPU interface before WFI,
+ * but doing this before the kernel's GIC driver initializes the
+ * distributor corrupts CPU0's timer interrupt delivery in QEMU's
+ * GICv2 model.  This stub uses WFE (no GIC needed) — the kernel's
+ * `dsb; sev` after writing the entry point wakes CPU1.
+ */
+static void __attribute__((unused)) hisilicon_write_secondary_boot(ARMCPU *cpu,
+                                            const struct arm_boot_info *info)
+{
+    AddressSpace *as = arm_boot_address_space(cpu, info);
+    uint32_t fixupcontext[FIXUP_MAX];
+
+    static const ARMInsnFixup smpboot[] = {
+        { 0xe59f0014 },       /* ldr r0, bootreg_addr       */
+        { 0xf57ff04f },       /* dsb sy                     */
+        { 0xe320f002 },       /* wfe                        */
+        { 0xe5901000 },       /* ldr r1, [r0]               */
+        { 0xe1110001 },       /* tst r1, r1                 */
+        { 0x0afffffb },       /* beq wfe                    */
+        { 0xe12fff11 },       /* bx  r1                     */
+        { 0, FIXUP_BOOTREG }, /* bootreg_addr: .word 0x...  */
+        { 0, FIXUP_TERMINATOR }
+    };
+
+    fixupcontext[FIXUP_BOOTREG] = info->smp_bootreg_addr;
+
+    arm_write_bootloader("smpboot", as, info->smp_loader_start,
+                          smpboot, fixupcontext);
+}
+
 /* ARM instruction encoding helpers for boot ROM generation */
 static inline uint32_t arm_movw(int rd, uint16_t imm16)
 {
@@ -1826,7 +1859,7 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
     }
 
     MemoryRegion *bootrom = g_new(MemoryRegion, 1);
-    if (armv7) {
+    if (armv7 && c->max_cpus <= 1) {
         /* Cortex-A7+ uses VBAR for exception vectors, so address 0 can be
          * ROM.  Firmware with NULL pointer bugs that write to address 0
          * will have writes silently dropped — same as real silicon. */
@@ -1885,14 +1918,13 @@ static void hisilicon_common_init(MachineState *machine,
     int num_pic = 0;
     int n;
     bool flash_boot = false;  /* true when booting from SPI NOR flash dump */
+    bool smp_capable = (c->max_cpus > 1 && c->use_gic);
 
     /* SRAM */
-    {
-        MemoryRegion *sram = g_new(MemoryRegion, 1);
-        memory_region_init_ram(sram, NULL, "hisilicon.sram",
-                               c->sram_size, &error_fatal);
-        memory_region_add_subregion(sysmem, c->sram_base, sram);
-    }
+    MemoryRegion *sram = g_new(MemoryRegion, 1);
+    memory_region_init_ram(sram, NULL, "hisilicon.sram",
+                           c->sram_size, &error_fatal);
+    memory_region_add_subregion(sysmem, c->sram_base, sram);
 
     /* Flash controller (HiFMC V100 or HISFC350) */
     if (c->fmc_ctrl_base) {
@@ -1919,6 +1951,19 @@ static void hisilicon_common_init(MachineState *machine,
      */
     if (flash_boot) {
         hisilicon_write_bootrom(sysmem, c, machine);
+    } else if (smp_capable) {
+        /*
+         * SMP SoCs: alias SRAM to address 0, matching real hardware
+         * where the boot ROM maps internal SRAM here.  The kernel's
+         * SMP code (hi35xx_set_scu_boot_addr) uses ioremap(0) to
+         * write a trampoline — this fails if address 0 is plain RAM
+         * (Linux refuses to ioremap system RAM).  An SRAM alias makes
+         * the region I/O-like so ioremap succeeds.
+         */
+        MemoryRegion *sram_alias = g_new(MemoryRegion, 1);
+        memory_region_init_alias(sram_alias, NULL, "hisilicon.sram_at_zero",
+                                 sram, 0, 0x1000);
+        memory_region_add_subregion(sysmem, 0, sram_alias);
     } else {
         MemoryRegion *trap = g_new(MemoryRegion, 1);
         memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
@@ -1933,7 +1978,11 @@ static void hisilicon_common_init(MachineState *machine,
     /* RAM */
     memory_region_add_subregion(sysmem, c->ram_base, machine->ram);
 
-    /* CPUs — secondary CPUs start halted (held in reset until kernel brings them up) */
+    /*
+     * CPUs — for SMP-capable SoCs with GIC, secondary CPUs run the
+     * boot.c WFE-poll stub from machine start (NOT start-powered-off).
+     * For non-SMP SoCs, secondary CPUs (if any) stay powered off.
+     */
     for (n = 0; n < smp_cpus; n++) {
         cpuobj[n] = object_new(machine->cpu_type);
         if (n > 0) {
@@ -1970,10 +2019,10 @@ static void hisilicon_common_init(MachineState *machine,
                                qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_VFIQ));
         }
 
-        /* CPU timer PPIs → GIC (boot CPU only) */
-        {
-            DeviceState *cpudev = DEVICE(cpu[0]);
-            int ppibase = c->gic_num_spi + GIC_NR_SGIS;
+        /* CPU timer PPIs + PMU → GIC (all CPUs) */
+        for (n = 0; n < smp_cpus; n++) {
+            DeviceState *cpudev = DEVICE(cpu[n]);
+            int ppibase = c->gic_num_spi + n * GIC_INTERNAL + GIC_NR_SGIS;
             const int timer_ppi[] = {
                 [GTIMER_PHYS] = HISI_PPI_PHYSTIMER,
                 [GTIMER_VIRT] = HISI_PPI_VIRTTIMER,
@@ -2019,12 +2068,8 @@ static void hisilicon_common_init(MachineState *machine,
         DeviceState *crg = qdev_new("hisi-crg");
         if (c->cpu_srst_offset) {
             qdev_prop_set_uint32(crg, "cpu-srst-offset", c->cpu_srst_offset);
-            if (c->max_cpus > 1) {
-                qdev_prop_set_uint32(crg, "smp-bootreg-addr",
-                                     c->sram_base + 0x100);
-                /* Address 0x4: where kernel writes secondary_startup addr */
+            if (c->max_cpus > 1)
                 qdev_prop_set_uint32(crg, "smp-entry-addr", 0x4);
-            }
         }
         sysbus_realize_and_unref(SYS_BUS_DEVICE(crg), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(crg), 0, c->crg_base);
@@ -2434,6 +2479,7 @@ static void hisilicon_common_init(MachineState *machine,
             hisilicon_binfo.ram_size = (hwaddr)c->kernel_mem_mb * MiB;
         }
         hisilicon_binfo.loader_start = c->ram_base;
+        /* SMP handled by CRG deferred arm_set_cpu_on */
         arm_load_kernel(cpu[0], machine, &hisilicon_binfo);
     }
 }
