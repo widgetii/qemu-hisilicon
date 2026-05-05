@@ -223,7 +223,10 @@ jobs:
 
           - name: hi3516ev300
             soc: hi3516ev300
-            machine: hi3516ev300
+            # sensor=none skips the SoC-default IMX335 attach so OpenIPC's
+            # /usr/sbin/load_hisilicon does not insmod the vendor MPP blob
+            # (which segfaults on QEMU and prevents reaching login).
+            machine: hi3516ev300,sensor=none
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516ev300-universal.bin

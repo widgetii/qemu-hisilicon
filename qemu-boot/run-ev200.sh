@@ -2,9 +2,10 @@
 #
 # Boot OpenIPC on emulated Hi3516EV200 (vendor-blob testing).
 #
-# Memory layout (mem=96M + mmz=…,0x46000000,32M) is now defined in the
-# SoC table (qemu/hw/arm/hisilicon.c) and injected automatically — do
-# not pass -m / mem= / mmz= here unless overriding.
+# Memory layout (mem= / mmz=) and the default IMX307 sensor are now
+# defined in the SoC table (qemu/hw/arm/hisilicon.c) and injected
+# automatically.  To attach a different sensor, append
+# `-M hi3516ev200,sensor=NAME` (or sensor=none to skip).
 #
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -20,19 +21,12 @@ else
 fi
 
 INIT="${INIT:-}"
-SENSOR="${SENSOR:-}"
-
-MACHINE_ARGS="-M hi3516ev200"
-if [ -n "$SENSOR" ]; then
-    MACHINE_ARGS="-M hi3516ev200,sensor=$SENSOR"
-fi
-
 CMDLINE="console=ttyAMA0,115200 earlyprintk vdso=0 root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
 if [ -n "$INIT" ]; then
     CMDLINE="$CMDLINE init=$INIT"
 fi
 
-exec "$QEMU" $MACHINE_ARGS \
+exec "$QEMU" -M hi3516ev200 \
     -kernel "$SCRIPT_DIR/uImage.hi3516ev200" \
     -initrd "$SCRIPT_DIR/rootfs.squashfs.hi3516ev200" \
     -nographic -serial mon:stdio \
