@@ -2761,10 +2761,19 @@ static void hisilicon_common_init(MachineState *machine,
          */
         const char *user_cmdline = machine->kernel_cmdline ?: "";
         bool has_mem = strstr(user_cmdline, "mem=") != NULL;
+        bool has_mmz = strstr(user_cmdline, "mmz=") != NULL ||
+                       strstr(user_cmdline, "mmz_allocator=") != NULL;
+        /* If the user shrank -m below the SoC default, our SoC-default
+         * extra_cmdline (e.g. "mmz=anonymous,0,0x82000000,224M") would
+         * pin a CMA region past the actual end of memory and the kernel
+         * would panic before producing any console output.  Treat the
+         * smaller -m as opt-out from the default MMZ pin. */
+        bool ram_overridden = machine->ram_size < c->ram_size_default;
         bool has_extra = c->extra_cmdline &&
                          strstr(user_cmdline, c->extra_cmdline) != NULL;
         bool want_mem = c->kernel_mem_mb && !has_mem;
-        bool want_extra = c->extra_cmdline && !has_extra;
+        bool want_extra = c->extra_cmdline && !has_extra &&
+                          !has_mmz && !ram_overridden;
 
         if (want_mem || want_extra) {
             GString *cl = g_string_new(user_cmdline);
