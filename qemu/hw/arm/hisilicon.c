@@ -117,11 +117,13 @@ static const HisiSoCConfig hi3516cv100_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
     .soc_id             = HISI_SOC_ID_CV100,
     .chipid_byte_layout = true,            /* V1: byte-wise SCSYSID0..3 */
-    /* 128 MiB DDR total, kernel gets 32 MiB — matches OpenIPC V1
-     * firmware's load_hisilicon defaults (totalmem=64, osmem=32),
-     * so mmz.ko's implicit 0x82000000 region is left untouched. */
-    .ram_size_default   = 128 * MiB,
+    /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
+     * claims the upper 32 MiB at 0x82000000 — matches OpenIPC V1
+     * firmware's load_hisilicon defaults (totalmem=64, osmem=32). */
+    .ram_size_default   = 64 * MiB,
     .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,32M",
 
     .ram_base           = 0x80000000,
     .sram_base          = 0x04010000,
@@ -225,11 +227,12 @@ static const HisiSoCConfig hi3516cv200_soc = {
     .soc_id             = HISI_SOC_ID_CV200,
     .chipid_byte_layout = true,            /* V2: byte-wise SCSYSID0..3 */
     .chip_variant       = 1,               /* 1 = 3516CV200 (vs 2=18EV200, 3=18EV201) */
-    /* 128 MiB DDR total, kernel gets 32 MiB — matches firmware's
-     * load_hisilicon defaults (osmem=32), leaving mmz.ko's 32 MiB at
-     * 0x82000000 free. */
-    .ram_size_default   = 128 * MiB,
+    /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
+     * claims the upper 32 MiB at 0x82000000. */
+    .ram_size_default   = 64 * MiB,
     .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,32M",
     /* CV200 kernel uses the DesignWare-derived i2c-hisilicon driver
      * (CON/TAR/DATA_CMD/AUTO/TX_RX layout) rather than HiBVT. */
     .i2c_type           = "hisi-i2c-dw",
@@ -329,12 +332,13 @@ static const HisiSoCConfig hi3516av100_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_AV100,
     .chipid_byte_layout = true,            /* V2A: byte-wise SCSYSID0..3 */
-    /* Real AV100 boards ship 128 MiB DDR; OpenIPC firmware's
-     * load_hisilicon defaults to osmem=32 so mmz.ko takes the upper
-     * 96 MiB at 0x82000000.  Cap kernel at 32 MiB to avoid the
-     * conflict, matching CV100/CV200. */
+    /* AV100 has no on-chip DDR (external DDR3/3L up to 512 MiB).
+     * Typical OpenIPC AV100 cameras ship 128 MiB.  Kernel gets 32 MiB,
+     * vendor mmz.ko claims the upper 96 MiB at 0x82000000. */
     .ram_size_default   = 128 * MiB,
     .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,96M",
 
     .ram_base           = 0x80000000,
     .sram_base          = 0x04010000,
@@ -432,7 +436,13 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
     .soc_id             = HISI_SOC_ID_CV300,
     .chipid_byte_layout = true,            /* V3: byte-wise SCSYSID0..3 */
-    .ram_size_default   = 128 * MiB,   /* stock CV300 cameras ship 128 MiB */
+    /* CV300 has no on-chip DDR (external DDR3/3L up to 512 MiB).
+     * Stock CV300 cameras ship 128 MiB.  Kernel gets 32 MiB, vendor
+     * mmz.ko claims the upper 96 MiB at 0x82000000. */
+    .ram_size_default   = 128 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,96M",
 
     .ram_base           = 0x80000000,
     .sram_base          = 0x04010000,
@@ -497,7 +507,13 @@ static const HisiSoCConfig hi3516cv500_soc = {
     .desc               = "HiSilicon Hi3516CV500 (Cortex-A7, dual-core)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_CV500,
-    .ram_size_default   = 64 * MiB,
+    /* CV500 has no on-chip DDR (external DDR3(L)/DDR4 up to 1 GiB).
+     * Stock CV500 cameras ship 128 MiB.  Kernel gets 32 MiB, vendor
+     * mmz.ko claims the upper 96 MiB at 0x82000000. */
+    .ram_size_default   = 128 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,96M",
     .max_cpus           = 2,
 
     .ram_base           = 0x80000000,
@@ -611,7 +627,13 @@ static const HisiSoCConfig hi3519v101_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_19V101,
     .chipid_byte_layout = true,            /* V3A: byte-wise SCSYSID0..3 */
-    .ram_size_default   = 256 * MiB,   /* 4K/WDR boards typically ship 256 MiB */
+    /* 3519V101 has no on-chip DDR (external DDR4/3/3L up to 2 GiB dual).
+     * 4K/WDR boards typically ship 256 MiB.  Kernel gets 32 MiB, vendor
+     * mmz.ko claims the upper 224 MiB at 0x82000000. */
+    .ram_size_default   = 256 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,224M",
 
     .ram_base           = 0x80000000,
     .sram_base          = 0x04010000,
@@ -705,12 +727,13 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .desc               = "HiSilicon Hi3516EV300 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_EV300,
-    /* 128 MiB DDR, 96 MiB for Linux, 32 MiB for mmz.ko at 0x46000000
-     * — matches stock OpenIPC EV300-class firmware defaults. */
+    /* 128 MiB on-chip DDR3L (1Gb).  Kernel gets 32 MiB, vendor mmz.ko
+     * claims 96 MiB at 0x42000000 — matches the canonical EV300 layout
+     * documented in OpenIPC's /usr/bin/load_hisilicon. */
     .ram_size_default   = 128 * MiB,
-    .kernel_mem_mb      = 96,
+    .kernel_mem_mb      = 32,
     .extra_cmdline      = "mmz_allocator=hisi "
-                          "mmz=anonymous,0,0x46000000,32M",
+                          "mmz=anonymous,0,0x42000000,96M",
 
     .ram_base           = 0x40000000,
     .sram_base          = 0x04010000,
@@ -801,10 +824,13 @@ static const HisiSoCConfig hi3516ev200_soc = {
     .desc               = "HiSilicon Hi3516EV200 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_EV200,
-    .ram_size_default   = 128 * MiB,
-    .kernel_mem_mb      = 96,
+    /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
+     * claims the upper 32 MiB at 0x42000000 — matches the canonical
+     * EV200 layout documented in OpenIPC's /usr/bin/load_hisilicon. */
+    .ram_size_default   = 64 * MiB,
+    .kernel_mem_mb      = 32,
     .extra_cmdline      = "mmz_allocator=hisi "
-                          "mmz=anonymous,0,0x46000000,32M",
+                          "mmz=anonymous,0,0x42000000,32M",
 
     .ram_base           = 0x40000000,
     .sram_base          = 0x04010000,
@@ -877,10 +903,13 @@ static const HisiSoCConfig hi3518ev300_soc = {
     .desc               = "HiSilicon Hi3518EV300 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_18EV300,
-    .ram_size_default   = 128 * MiB,
-    .kernel_mem_mb      = 96,
+    /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
+     * claims the upper 32 MiB at 0x42000000 — matches the canonical
+     * 18EV300 layout documented in OpenIPC's /usr/bin/load_hisilicon. */
+    .ram_size_default   = 64 * MiB,
+    .kernel_mem_mb      = 32,
     .extra_cmdline      = "mmz_allocator=hisi "
-                          "mmz=anonymous,0,0x46000000,32M",
+                          "mmz=anonymous,0,0x42000000,32M",
 
     .ram_base           = 0x40000000,
     .sram_base          = 0x04010000,
@@ -950,10 +979,13 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .desc               = "HiSilicon Hi3516DV200 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_DV200,
+    /* DV200 has no on-chip DDR (external DDR3/3L up to 512 MiB).
+     * Stock OpenIPC DV200 cameras ship 128 MiB.  Kernel gets 32 MiB,
+     * vendor mmz.ko claims the upper 96 MiB at 0x42000000. */
     .ram_size_default   = 128 * MiB,
-    .kernel_mem_mb      = 96,
+    .kernel_mem_mb      = 32,
     .extra_cmdline      = "mmz_allocator=hisi "
-                          "mmz=anonymous,0,0x46000000,32M",
+                          "mmz=anonymous,0,0x42000000,96M",
 
     .ram_base           = 0x40000000,
     .sram_base          = 0x04010000,
@@ -1041,16 +1073,13 @@ static const HisiSoCConfig hi3516dv200_soc = {
 
 /* Common V4 peripheral block — shared by all V4 & Goke configs.
  *
- * 128 MiB DDR matching the OpenIPC EV300-class firmware defaults:
- * kernel owns 96 MiB (0x40000000..0x46000000), mmz.ko claims 32 MiB
- * at 0x46000000 via the cmdline hint.
+ * Memory layout (ram_size_default / kernel_mem_mb / extra_cmdline) is
+ * intentionally NOT included: each Goke variant ships a different DDR
+ * size (64 MiB on EV200/18EV300 dies, 128 MiB on EV300/DV200 dies, etc.)
+ * and must declare its own.  Other peripheral addresses are identical.
  */
 #define HISI_V4_COMMON_PERIPH                               \
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),   \
-    .ram_size_default   = 128 * MiB,                        \
-    .kernel_mem_mb      = 96,                               \
-    .extra_cmdline      = "mmz_allocator=hisi "             \
-                          "mmz=anonymous,0,0x46000000,32M", \
     .ram_base           = 0x40000000,                       \
     .sram_base          = 0x04010000,                       \
     .sram_size          = 64 * KiB,                         \
@@ -1111,11 +1140,28 @@ static const HisiSoCConfig hi3516dv200_soc = {
         { "hisi-vpss",       0x11400000, 0x10000 },         \
     }
 
+/* Per-die DDR layouts shared by V4 and Goke variants.
+ * V4_DDR_64M:  on-chip 512Mb DDR2 (EV200-class dies)
+ * V4_DDR_128M: on-chip 1Gb DDR3L or external 128 MiB (EV300/DV200-class)
+ */
+#define HISI_V4_DDR_64M                                     \
+    .ram_size_default   = 64 * MiB,                         \
+    .kernel_mem_mb      = 32,                               \
+    .extra_cmdline      = "mmz_allocator=hisi "             \
+                          "mmz=anonymous,0,0x42000000,32M"
+
+#define HISI_V4_DDR_128M                                    \
+    .ram_size_default   = 128 * MiB,                        \
+    .kernel_mem_mb      = 32,                               \
+    .extra_cmdline      = "mmz_allocator=hisi "             \
+                          "mmz=anonymous,0,0x42000000,96M"
+
 static const HisiSoCConfig gk7205v200_soc = {
     .name               = "gk7205v200",
     .desc               = "Goke GK7205V200 (Cortex-A7, ~Hi3516EV200)",
     .soc_id             = GOKE_SOC_ID_7205V200,
     .gpio_count         = 8,
+    HISI_V4_DDR_64M,                /* EV200 die: 512Mb DDR2 */
     HISI_V4_COMMON_PERIPH,
 };
 
@@ -1124,6 +1170,7 @@ static const HisiSoCConfig gk7205v300_soc = {
     .desc               = "Goke GK7205V300 (Cortex-A7, ~Hi3516EV300)",
     .soc_id             = GOKE_SOC_ID_7205V300,
     .gpio_count         = 10,
+    HISI_V4_DDR_128M,               /* EV300 die: 1Gb DDR3L */
     HISI_V4_COMMON_PERIPH,
 };
 
@@ -1132,6 +1179,7 @@ static const HisiSoCConfig gk7202v300_soc = {
     .desc               = "Goke GK7202V300 (Cortex-A7, ~Hi3518EV300)",
     .soc_id             = GOKE_SOC_ID_7202V300,
     .gpio_count         = 8,
+    HISI_V4_DDR_64M,                /* 18EV300 die: 512Mb DDR2 */
     HISI_V4_COMMON_PERIPH,
 };
 
@@ -1140,6 +1188,7 @@ static const HisiSoCConfig gk7605v100_soc = {
     .desc               = "Goke GK7605V100 (Cortex-A7, ~Hi3516DV200)",
     .soc_id             = GOKE_SOC_ID_7605V100,
     .gpio_count         = 10,
+    HISI_V4_DDR_128M,               /* DV200 die: external 128 MiB typical */
     HISI_V4_COMMON_PERIPH,
 };
 
@@ -1161,6 +1210,7 @@ static const HisiSoCConfig gk7205v500_soc = {
     .desc               = "Goke GK7205V500 (Cortex-A7, 0.5 TOPS NPU)",
     .soc_id             = GOKE_SOC_ID_7205V500,
     .gpio_count         = 8,
+    HISI_V4_DDR_64M,                /* 512Mb DDR2 MCP */
     HISI_V4_COMMON_PERIPH,
 };
 
@@ -1169,6 +1219,7 @@ static const HisiSoCConfig gk7205v510_soc = {
     .desc               = "Goke GK7205V510 (Cortex-A7, 1.0 TOPS NPU)",
     .soc_id             = GOKE_SOC_ID_7205V510,
     .gpio_count         = 8,
+    HISI_V4_DDR_128M,               /* 1Gb DDR3 MCP */
     HISI_V4_COMMON_PERIPH,
 };
 
@@ -1177,6 +1228,7 @@ static const HisiSoCConfig gk7205v530_soc = {
     .desc               = "Goke GK7205V530 (Cortex-A7, 1.0 TOPS NPU, ext DDR)",
     .soc_id             = GOKE_SOC_ID_7205V530,
     .gpio_count         = 8,
+    HISI_V4_DDR_128M,               /* external DDR, 128 MiB typical */
     HISI_V4_COMMON_PERIPH,
 };
 
@@ -1185,6 +1237,7 @@ static const HisiSoCConfig gk7202v330_soc = {
     .desc               = "Goke GK7202V330 (Cortex-A7, 0.5 TOPS NPU, no FEPHY)",
     .soc_id             = GOKE_SOC_ID_7202V330,
     .gpio_count         = 8,
+    HISI_V4_DDR_64M,                /* 512Mb DDR2 MCP */
     HISI_V4_COMMON_PERIPH,
 };
 
@@ -1211,7 +1264,12 @@ static const HisiSoCConfig hi3516cv608_soc = {
     .desc               = "HiSilicon Hi3516CV608 (Cortex-A7 MP2, ~CV610)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_CV608,
+    /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
+     * claims the upper 32 MiB at 0x42000000. */
     .ram_size_default   = 64 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x42000000,32M",
 
     .ram_base           = 0x40000000,
     .sram_base          = 0x04020000,
@@ -1297,7 +1355,12 @@ static const HisiSoCConfig hi3516cv610_soc = {
     .desc               = "HiSilicon Hi3516CV610 (Cortex-A7 MP2)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_CV610,
+    /* 128 MiB on-chip DDR3/3L (1Gb) on CV610-20S/20G.  Kernel gets 32 MiB,
+     * vendor mmz.ko claims the upper 96 MiB at 0x42000000. */
     .ram_size_default   = 128 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x42000000,96M",
 
     .ram_base           = 0x40000000,
     .sram_base          = 0x04020000,
@@ -1377,7 +1440,12 @@ static const HisiSoCConfig hi3516cv613_soc = {
     .desc               = "HiSilicon Hi3516CV613 (Cortex-A7 MP2, ~CV610)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_CV613,
+    /* CV613 is the 4K-capable V5 die (no public datasheet); follow CV610-20S.
+     * Kernel gets 32 MiB, vendor mmz.ko claims upper 96 MiB at 0x42000000. */
     .ram_size_default   = 128 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x42000000,96M",
 
     .ram_base           = 0x40000000,
     .sram_base          = 0x04020000,

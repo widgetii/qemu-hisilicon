@@ -43,17 +43,20 @@ typedef struct HisiSoCConfig {
     int             max_cpus;       /* 0 = 1 (default) */
 
     /*
-     * Size in MiB the Linux kernel is told to use via "mem=<N>M" on
-     * the command line.  Real IP cameras ship 128 MiB DDR with a
-     * 64 MiB / 64 MiB split between kernel and vendor MMZ.  Setting
-     * this to 0 leaves the kernel with the full ram_size_default.
+     * Size in MiB the Linux kernel is told to use via "mem=<N>M".
+     * OpenIPC's /usr/bin/load_hisilicon defaults to osmem=32 (and rejects
+     * boots where mem= exceeds the totalmem U-Boot env, which is unset on
+     * QEMU and falls back to 64), so 32 is the safe value across chips.
+     * Setting this to 0 leaves the kernel with the full ram_size_default.
      */
     uint32_t        kernel_mem_mb;
 
     /*
      * Extra kernel command-line arguments injected by machine init
-     * (e.g. "mmz_allocator=hisi mmz=anonymous,0,0x44000000,64M" to
-     * point the vendor MMZ driver at the upper 64 MiB).  NULL = none.
+     * — the HiSilicon-patched kernel reserves a CMA region from the
+     * mmz= hint, and the vendor mmz.ko / open_osal.ko then claim it.
+     * Pin MMZ at ram_base+32M with size = ram_size - 32M to match the
+     * canonical OpenIPC layout (osmem=32, mmz=rest).  NULL = none.
      */
     const char     *extra_cmdline;
 
