@@ -188,6 +188,11 @@ typedef struct HisiSoCConfig {
     /* Hardware GZIP decompressor */
     hwaddr          gzip_base;      /* 0 = no GZIP engine */
 
+    /* Hardware True Random Number Generator
+     * (HISEC_TRNG_CTRL on V3+, RNG_GEN on V2) */
+    hwaddr          hwrng_base;        /* 0 = no HWRNG on this SoC */
+    uint32_t        hwrng_data_offset; /* 0x204 V3+, 0x004 V2 */
+
     /* CPU soft-reset register offset in CRG (for SMP bringup) */
     uint32_t        cpu_srst_offset; /* 0 = disabled, e.g. 0x78 for CV500 */
 

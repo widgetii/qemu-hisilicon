@@ -228,6 +228,10 @@ static const HisiSoCConfig hi3516cv200_soc = {
     .soc_id             = HISI_SOC_ID_CV200,
     .chipid_byte_layout = true,            /* V2: byte-wise SCSYSID0..3 */
     .chip_variant       = 1,               /* 1 = 3516CV200 (vs 2=18EV200, 3=18EV201) */
+    /* V2 RNG_GEN block — different layout from V3+ HISEC_TRNG_CTRL,
+     * data register at +0x004 instead of +0x204. */
+    .hwrng_base         = 0x20280000,
+    .hwrng_data_offset  = 0x004,
     /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims the upper 32 MiB at 0x82000000. */
     .ram_size_default   = 64 * MiB,
@@ -438,6 +442,8 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .soc_id             = HISI_SOC_ID_CV300,
     .chipid_byte_layout = true,            /* V3: byte-wise SCSYSID0..3 */
     .default_sensor     = "imx291",        /* Sony 1080p Starvis on V3 ref boards */
+    .hwrng_base         = 0x120C0000,      /* HISEC_TRNG_CTRL (V3) */
+    .hwrng_data_offset  = 0x204,
     /* CV300 has no on-chip DDR (external DDR3/3L up to 512 MiB).
      * Stock CV300 cameras ship 128 MiB.  Kernel gets 32 MiB, vendor
      * mmz.ko claims the upper 96 MiB at 0x82000000. */
@@ -509,6 +515,10 @@ static const HisiSoCConfig hi3516cv500_soc = {
     .desc               = "HiSilicon Hi3516CV500 (Cortex-A7, dual-core)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_CV500,
+    /* HISEC_TRNG_CTRL block at 0x10090000 (RSA at 0x10080000 displaces
+     * TRNG up by 0x10000 vs V4); data register at +0x204. */
+    .hwrng_base         = 0x10090000,
+    .hwrng_data_offset  = 0x204,
     /* CV500 has no on-chip DDR (external DDR3(L)/DDR4 up to 1 GiB).
      * Stock CV500 cameras ship 128 MiB.  Kernel gets 32 MiB, vendor
      * mmz.ko claims the upper 96 MiB at 0x82000000. */
@@ -625,6 +635,9 @@ static const HisiSoCConfig hi3516av300_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_AV300,
     .default_sensor     = "imx415",        /* Sony 4K Starvis on AV300 ref boards */
+    /* Inherits CV500 family TRNG layout (no separate AV300 datasheet). */
+    .hwrng_base         = 0x10090000,
+    .hwrng_data_offset  = 0x204,
     /* Same memory layout as CV500: external DDR, 128 MiB typical. */
     .ram_size_default   = 128 * MiB,
     .kernel_mem_mb      = 32,
@@ -741,6 +754,8 @@ static const HisiSoCConfig hi3519v101_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_19V101,
     .chipid_byte_layout = true,            /* V3A: byte-wise SCSYSID0..3 */
+    .hwrng_base         = 0x120C0000,      /* HISEC_TRNG_CTRL (V3A) */
+    .hwrng_data_offset  = 0x204,
     /* 3519V101 has no on-chip DDR (external DDR4/3/3L up to 2 GiB dual).
      * 4K/WDR boards typically ship 256 MiB.  Kernel gets 32 MiB, vendor
      * mmz.ko claims the upper 224 MiB at 0x82000000. */
@@ -847,6 +862,8 @@ static const HisiSoCConfig hi3516av200_soc = {
     .chipid_byte_layout = true,
     .chip_variant       = 5,                     /* SCSYSID0 byte 5 = 3516AV200 */
     .default_sensor     = "imx385",              /* Sony 1080p Starvis on AV200 ref boards */
+    .hwrng_base         = 0x120C0000,            /* same as 3519V101 family */
+    .hwrng_data_offset  = 0x204,
     .ram_size_default   = 256 * MiB,
     .kernel_mem_mb      = 32,
     .extra_cmdline      = "mmz_allocator=hisi "
@@ -942,6 +959,8 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_EV300,
     .default_sensor     = "imx335",        /* Sony 5MP on EV300 ref boards */
+    .hwrng_base         = 0x10080000,      /* HISEC_TRNG_CTRL (V4) */
+    .hwrng_data_offset  = 0x204,
     /* 128 MiB on-chip DDR3L (1Gb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims 96 MiB at 0x42000000 — matches the canonical EV300 layout
      * documented in OpenIPC's /usr/bin/load_hisilicon. */
@@ -1040,6 +1059,8 @@ static const HisiSoCConfig hi3516ev200_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_EV200,
     .default_sensor     = "imx307",        /* Sony 1080p Starvis on EV200 ref boards */
+    .hwrng_base         = 0x10080000,      /* HISEC_TRNG_CTRL (V4) */
+    .hwrng_data_offset  = 0x204,
     /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims the upper 32 MiB at 0x42000000 — matches the canonical
      * EV200 layout documented in OpenIPC's /usr/bin/load_hisilicon. */
@@ -1119,6 +1140,8 @@ static const HisiSoCConfig hi3518ev300_soc = {
     .desc               = "HiSilicon Hi3518EV300 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_18EV300,
+    .hwrng_base         = 0x10080000,      /* HISEC_TRNG_CTRL (V4) */
+    .hwrng_data_offset  = 0x204,
     /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims the upper 32 MiB at 0x42000000 — matches the canonical
      * 18EV300 layout documented in OpenIPC's /usr/bin/load_hisilicon. */
@@ -1195,6 +1218,8 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .desc               = "HiSilicon Hi3516DV200 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_DV200,
+    .hwrng_base         = 0x10080000,      /* HISEC_TRNG_CTRL (V4) */
+    .hwrng_data_offset  = 0x204,
     /* DV200 has no on-chip DDR (external DDR3/3L up to 512 MiB).
      * Stock OpenIPC DV200 cameras ship 128 MiB.  Kernel gets 32 MiB,
      * vendor mmz.ko claims the upper 96 MiB at 0x42000000. */
@@ -1337,6 +1362,8 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .wdt_base           = 0x12030000,                       \
     .wdt_irq            = 2,                                \
     .wdt_freq           = 3000000,                          \
+    .hwrng_base         = 0x10080000,                       \
+    .hwrng_data_offset  = 0x204,                            \
     .num_regbanks       = 15,                               \
     .regbanks           = {                                 \
         { "hisi-misc",       0x12028000, 0x8000  },         \
@@ -2509,6 +2536,16 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_mmio_map(busdev, 1, c->jpge_base);
         sysbus_connect_irq(busdev, 0, pic[c->vedu_irq]);
         sysbus_connect_irq(busdev, 1, pic[c->jpge_irq]);
+    }
+
+    /* Hardware True Random Number Generator
+     * (HISEC_TRNG_CTRL on V3+, RNG_GEN on V2) */
+    if (c->hwrng_base) {
+        DeviceState *rng = qdev_new("hisi-hwrng");
+        qdev_prop_set_uint32(rng, "data-offset", c->hwrng_data_offset);
+        SysBusDevice *busdev = SYS_BUS_DEVICE(rng);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->hwrng_base);
     }
 
     /* Watchdog (SP805-compatible, reuse cmsdk-apb-watchdog) */
