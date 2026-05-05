@@ -52,6 +52,7 @@ cp qemu/hw/net/hisi-gmac.c          "$QEMU_DIR/hw/net/"
 cp qemu/hw/i2c/hisi-i2c.c          "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-imx335.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-imx307.c       "$QEMU_DIR/hw/i2c/"
+cp qemu/hw/i2c/hisi-imx291.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-f37.c          "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-gc2053.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-sp2305.c       "$QEMU_DIR/hw/i2c/"
@@ -183,7 +184,7 @@ fi
 
 # hw/i2c/meson.build
 if ! grep -q hisi-i2c "$QEMU_DIR/hw/i2c/meson.build"; then
-    echo "system_ss.add(when: 'CONFIG_HISI_I2C', if_true: files('hisi-i2c.c', 'hisi-i2c-v1.c', 'hisi-i2c-dw.c', 'hisi-imx335.c', 'hisi-imx307.c', 'hisi-f37.c', 'hisi-gc2053.c', 'hisi-sp2305.c', 'hisi-mis2006.c', 'hisi-smartsens.c'))" \
+    echo "system_ss.add(when: 'CONFIG_HISI_I2C', if_true: files('hisi-i2c.c', 'hisi-i2c-v1.c', 'hisi-i2c-dw.c', 'hisi-imx335.c', 'hisi-imx307.c', 'hisi-imx291.c', 'hisi-f37.c', 'hisi-gc2053.c', 'hisi-sp2305.c', 'hisi-mis2006.c', 'hisi-smartsens.c'))" \
         >> "$QEMU_DIR/hw/i2c/meson.build"
     echo "  patched hw/i2c/meson.build"
 else
@@ -197,6 +198,11 @@ else
         sed -i "s/'hisi-i2c-v1.c', 'hisi-imx335.c'/'hisi-i2c-v1.c', 'hisi-i2c-dw.c', 'hisi-imx335.c'/" \
             "$QEMU_DIR/hw/i2c/meson.build"
         echo "  hw/i2c/meson.build: added hisi-i2c-dw.c"
+    fi
+    if ! grep -q hisi-imx291 "$QEMU_DIR/hw/i2c/meson.build"; then
+        sed -i "s/'hisi-imx307.c'/'hisi-imx307.c', 'hisi-imx291.c'/" \
+            "$QEMU_DIR/hw/i2c/meson.build"
+        echo "  hw/i2c/meson.build: added hisi-imx291.c"
     fi
 fi
 

@@ -117,6 +117,7 @@ static const HisiSoCConfig hi3516cv100_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
     .soc_id             = HISI_SOC_ID_CV100,
     .chipid_byte_layout = true,            /* V1: byte-wise SCSYSID0..3 */
+    .default_sensor     = "imx122",        /* Sony 3-wire SPI on V1 ref boards */
     /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims the upper 32 MiB at 0x82000000 — matches OpenIPC V1
      * firmware's load_hisilicon defaults (totalmem=64, osmem=32). */
@@ -436,6 +437,7 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
     .soc_id             = HISI_SOC_ID_CV300,
     .chipid_byte_layout = true,            /* V3: byte-wise SCSYSID0..3 */
+    .default_sensor     = "imx291",        /* Sony 1080p Starvis on V3 ref boards */
     /* CV300 has no on-chip DDR (external DDR3/3L up to 512 MiB).
      * Stock CV300 cameras ship 128 MiB.  Kernel gets 32 MiB, vendor
      * mmz.ko claims the upper 96 MiB at 0x82000000. */
@@ -727,6 +729,7 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .desc               = "HiSilicon Hi3516EV300 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_EV300,
+    .default_sensor     = "imx335",        /* Sony 5MP on EV300 ref boards */
     /* 128 MiB on-chip DDR3L (1Gb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims 96 MiB at 0x42000000 — matches the canonical EV300 layout
      * documented in OpenIPC's /usr/bin/load_hisilicon. */
@@ -824,6 +827,7 @@ static const HisiSoCConfig hi3516ev200_soc = {
     .desc               = "HiSilicon Hi3516EV200 (Cortex-A7)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_EV200,
+    .default_sensor     = "imx307",        /* Sony 1080p Starvis on EV200 ref boards */
     /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims the upper 32 MiB at 0x42000000 — matches the canonical
      * EV200 layout documented in OpenIPC's /usr/bin/load_hisilicon. */
@@ -1161,6 +1165,7 @@ static const HisiSoCConfig gk7205v200_soc = {
     .desc               = "Goke GK7205V200 (Cortex-A7, ~Hi3516EV200)",
     .soc_id             = GOKE_SOC_ID_7205V200,
     .gpio_count         = 8,
+    .default_sensor     = "imx307",     /* same die as EV200 */
     HISI_V4_DDR_64M,                /* EV200 die: 512Mb DDR2 */
     HISI_V4_COMMON_PERIPH,
 };
@@ -1170,6 +1175,7 @@ static const HisiSoCConfig gk7205v300_soc = {
     .desc               = "Goke GK7205V300 (Cortex-A7, ~Hi3516EV300)",
     .soc_id             = GOKE_SOC_ID_7205V300,
     .gpio_count         = 10,
+    .default_sensor     = "imx335",     /* same die as EV300 */
     HISI_V4_DDR_128M,               /* EV300 die: 1Gb DDR3L */
     HISI_V4_COMMON_PERIPH,
 };
@@ -2356,6 +2362,10 @@ static void hisilicon_common_init(MachineState *machine,
 
     /* Sensor auto-attach via -machine sensor=<name>
      *
+     * If the user did not pass -machine sensor=..., fall back to the
+     * SoC's default_sensor (set per-config to mirror the typical
+     * OpenIPC reference board).  Use sensor=none to disable.
+     *
      * I2C addresses below are 7-bit slave addresses (vendor docs use 8-bit
      * which is shifted left by one).  All SmartSens sensors share addr 0x30
      * so only one can be attached at a time — the user picks which one
@@ -2363,94 +2373,104 @@ static void hisilicon_common_init(MachineState *machine,
      */
     {
         HisiMachineState *hms = (HisiMachineState *)machine;
+        const char *sensor_name = hms->sensor;
+        if (!sensor_name && c->default_sensor) {
+            sensor_name = c->default_sensor;
+        } else if (sensor_name && !strcmp(sensor_name, "none")) {
+            sensor_name = NULL;
+        }
         /* SPI sensors (Sony 3-wire, e.g. CV100 + ssp_sony.ko) take
          * precedence — IMX122/IMX222 share one device that ipctool
          * always reports as "IMX122". */
-        if (hms->sensor &&
-            (!strcmp(hms->sensor, "imx122") ||
-             !strcmp(hms->sensor, "imx222"))) {
+        if (sensor_name &&
+            (!strcmp(sensor_name, "imx122") ||
+             !strcmp(sensor_name, "imx222"))) {
             if (c->num_spis == 0 || !spi_devs[0]) {
                 error_report("sensor '%s' requires an SPI controller on "
-                             "this SoC", hms->sensor);
+                             "this SoC", sensor_name);
                 exit(1);
             }
             BusState *ssi_bus = qdev_get_child_bus(spi_devs[0], "ssi");
             DeviceState *sensor = qdev_new("hisi-imx122");
             qdev_realize_and_unref(sensor, ssi_bus, &error_fatal);
-        } else if (hms->sensor && c->num_i2c > 0 && i2c_devs[0]) {
+        } else if (sensor_name && c->num_i2c > 0 && i2c_devs[0]) {
             BusState *i2c_bus = qdev_get_child_bus(i2c_devs[0], "i2c");
             DeviceState *sensor = NULL;
             uint8_t i2c_addr = 0;
 
-            if (!strcmp(hms->sensor, "imx335")) {
+            if (!strcmp(sensor_name, "imx335")) {
                 sensor = qdev_new("hisi-imx335");
                 i2c_addr = 0x1A;
-            } else if (!strcmp(hms->sensor, "imx307")) {
+            } else if (!strcmp(sensor_name, "imx307")) {
                 sensor = qdev_new("hisi-imx307");
                 i2c_addr = 0x1A;
-            } else if (!strcmp(hms->sensor, "f37")) {
+            } else if (!strcmp(sensor_name, "imx291")) {
+                sensor = qdev_new("hisi-imx291");
+                i2c_addr = 0x1A;
+            } else if (!strcmp(sensor_name, "f37")) {
                 sensor = qdev_new("hisi-f37");
                 i2c_addr = 0x40;
-            } else if (!strcmp(hms->sensor, "gc2053")) {
+            } else if (!strcmp(sensor_name, "gc2053")) {
                 sensor = qdev_new("hisi-gc2053");
                 i2c_addr = 0x37;
-            } else if (!strcmp(hms->sensor, "sp2305")) {
+            } else if (!strcmp(sensor_name, "sp2305")) {
                 sensor = qdev_new("hisi-sp2305");
                 i2c_addr = 0x3C;
-            } else if (!strcmp(hms->sensor, "mis2006")) {
+            } else if (!strcmp(sensor_name, "mis2006")) {
                 sensor = qdev_new("hisi-mis2006");
                 i2c_addr = 0x30;
-            } else if (!strcmp(hms->sensor, "sc2315e")) {
+            } else if (!strcmp(sensor_name, "sc2315e")) {
                 sensor = qdev_new("hisi-smartsens");
                 qdev_prop_set_uint8(sensor, "id_high", 0x22);
                 qdev_prop_set_uint8(sensor, "id_low",  0x38);
                 i2c_addr = 0x30;
-            } else if (!strcmp(hms->sensor, "sc2315")) {
+            } else if (!strcmp(sensor_name, "sc2315")) {
                 sensor = qdev_new("hisi-smartsens");
                 qdev_prop_set_uint8(sensor, "id_high", 0x23);
                 qdev_prop_set_uint8(sensor, "id_low",  0x11);
                 i2c_addr = 0x30;
-            } else if (!strcmp(hms->sensor, "sc2235p")) {
+            } else if (!strcmp(sensor_name, "sc2235p")) {
                 sensor = qdev_new("hisi-smartsens");
                 qdev_prop_set_uint8(sensor, "id_high", 0x22);
                 qdev_prop_set_uint8(sensor, "id_low",  0x32);
                 qdev_prop_set_uint8(sensor, "disc",    0x01);
                 i2c_addr = 0x30;
-            } else if (!strcmp(hms->sensor, "sc2235e")) {
+            } else if (!strcmp(sensor_name, "sc2235e")) {
                 sensor = qdev_new("hisi-smartsens");
                 qdev_prop_set_uint8(sensor, "id_high", 0x22);
                 qdev_prop_set_uint8(sensor, "id_low",  0x32);
                 qdev_prop_set_uint8(sensor, "disc",    0x20);
                 i2c_addr = 0x30;
-            } else if (!strcmp(hms->sensor, "sc2335")) {
+            } else if (!strcmp(sensor_name, "sc2335")) {
                 sensor = qdev_new("hisi-smartsens");
                 qdev_prop_set_uint8(sensor, "id_high", 0xCB);
                 qdev_prop_set_uint8(sensor, "id_low",  0x14);
                 i2c_addr = 0x30;
-            } else if (!strcmp(hms->sensor, "sc2239")) {
+            } else if (!strcmp(sensor_name, "sc2239")) {
                 sensor = qdev_new("hisi-smartsens");
                 qdev_prop_set_uint8(sensor, "id_high", 0xCB);
                 qdev_prop_set_uint8(sensor, "id_low",  0x10);
                 i2c_addr = 0x30;
-            } else if (!strcmp(hms->sensor, "sc307h")) {
+            } else if (!strcmp(sensor_name, "sc307h")) {
                 sensor = qdev_new("hisi-smartsens");
                 qdev_prop_set_uint8(sensor, "id_high", 0xCB);
                 qdev_prop_set_uint8(sensor, "id_low",  0x1C);
                 i2c_addr = 0x30;
             } else {
-                error_report("Unknown sensor '%s' (supported: imx335, "
-                             "imx307, f37, gc2053, sp2305, mis2006, "
-                             "sc2235p, sc2235e, sc2315, sc2315e, "
-                             "sc2335, sc2239, sc307h, imx122, imx222)",
-                             hms->sensor);
+                error_report("Unknown sensor '%s' (supported: imx291, "
+                             "imx307, imx335, f37, gc2053, sp2305, "
+                             "mis2006, sc2235p, sc2235e, sc2315, sc2315e, "
+                             "sc2335, sc2239, sc307h, imx122, imx222; "
+                             "or 'none' to disable default)",
+                             sensor_name);
                 exit(1);
             }
 
             qdev_prop_set_uint8(sensor, "address", i2c_addr);
             qdev_realize_and_unref(sensor, i2c_bus, &error_fatal);
-        } else if (hms->sensor) {
+        } else if (sensor_name) {
             error_report("sensor '%s' requested but this SoC has no I2C "
-                         "or matching SPI controller", hms->sensor);
+                         "or matching SPI controller", sensor_name);
             exit(1);
         }
     }

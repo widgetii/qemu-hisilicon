@@ -43,6 +43,15 @@ typedef struct HisiSoCConfig {
     int             max_cpus;       /* 0 = 1 (default) */
 
     /*
+     * Default image sensor model name, applied when the user did not
+     * pass -machine sensor=... on the command line.  Should match the
+     * sensor wired to the typical OpenIPC reference board for this SoC,
+     * so vanilla firmware boots out-of-the-box.  NULL = no default
+     * (user must specify explicitly to attach any sensor).
+     */
+    const char     *default_sensor;
+
+    /*
      * Size in MiB the Linux kernel is told to use via "mem=<N>M".
      * OpenIPC's /usr/bin/load_hisilicon defaults to osmem=32 (and rejects
      * boots where mem= exceeds the totalmem U-Boot env, which is unset on
