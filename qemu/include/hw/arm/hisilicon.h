@@ -193,6 +193,14 @@ typedef struct HisiSoCConfig {
     hwaddr          hwrng_base;        /* 0 = no HWRNG on this SoC */
     uint32_t        hwrng_data_offset; /* 0x204 V3+, 0x004 V2 */
 
+    /* VI frame producer — periodic VI/VPSS IRQ pulses to wake the
+     * vendor MPP pipeline so VENC stops timing out.  MVP scaffolding,
+     * wired only on hi3516ev300 for now. */
+    hwaddr          vi_fp_base;        /* 0 = no frame producer */
+    int             vi_fp_cap_irq;     /* GIC SPI for VI_CAP0 */
+    int             vi_fp_proc_irq;    /* GIC SPI for VI_PROC0 */
+    int             vi_fp_vpss_irq;    /* GIC SPI for VPSS */
+
     /* CPU soft-reset register offset in CRG (for SMP bringup) */
     uint32_t        cpu_srst_offset; /* 0 = disabled, e.g. 0x78 for CV500 */
 

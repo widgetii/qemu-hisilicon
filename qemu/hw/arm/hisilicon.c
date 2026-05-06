@@ -961,6 +961,15 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .default_sensor     = "imx335",        /* Sony 5MP on EV300 ref boards */
     .hwrng_base         = 0x10080000,      /* HISEC_TRNG_CTRL (V4) */
     .hwrng_data_offset  = 0x204,
+    /* MVP video pipeline IRQ heartbeat — pulses VI_CAP0/VI_PROC0/VPSS
+     * at 25 Hz so the vendor MPP modules' IRQ handlers run and Majestic
+     * gets past its "Timeout from venc channel 0" loop.
+     * SPI numbers are GIC absolute IRQ - 32 (per /proc/interrupts the
+     * kernel shows GIC-75/76/78 for VI_CAP0/VI_PROC0/VPSS). */
+    .vi_fp_base         = 0x11FE0000,      /* unused gap above vedu/jpge */
+    .vi_fp_cap_irq      = 43,              /* VI_CAP0  = SPI 43 (GIC 75) */
+    .vi_fp_proc_irq     = 44,              /* VI_PROC0 = SPI 44 (GIC 76) */
+    .vi_fp_vpss_irq     = 46,              /* VPSS     = SPI 46 (GIC 78) */
     /* 128 MiB on-chip DDR3L (1Gb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims 96 MiB at 0x42000000 — matches the canonical EV300 layout
      * documented in OpenIPC's /usr/bin/load_hisilicon. */
@@ -2546,6 +2555,18 @@ static void hisilicon_common_init(MachineState *machine,
         SysBusDevice *busdev = SYS_BUS_DEVICE(rng);
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, c->hwrng_base);
+    }
+
+    /* VI frame producer — periodic VI_CAP/VI_PROC/VPSS IRQ heartbeat
+     * to wake the vendor MPP pipeline.  MVP, EV300 only for now. */
+    if (c->vi_fp_base) {
+        DeviceState *vifp = qdev_new("hisi-vi-fp");
+        SysBusDevice *busdev = SYS_BUS_DEVICE(vifp);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->vi_fp_base);
+        sysbus_connect_irq(busdev, 0, pic[c->vi_fp_cap_irq]);
+        sysbus_connect_irq(busdev, 1, pic[c->vi_fp_proc_irq]);
+        sysbus_connect_irq(busdev, 2, pic[c->vi_fp_vpss_irq]);
     }
 
     /* Watchdog (SP805-compatible, reuse cmsdk-apb-watchdog) */
