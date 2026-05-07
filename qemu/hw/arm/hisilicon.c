@@ -1784,6 +1784,1026 @@ static const HisiSoCConfig hi3516cv613_soc = {
     },
 };
 
+/*
+ * Hi3536DV100 (DVR/NVR family): 2017, single Cortex-A7 @850MHz, decode-only NVR.
+ * H.265/H.264 dec, 4×1080p20, FE Ethernet, 1×SATA 2.0, USB 2.0 host.
+ * First DVR/NVR-class machine in this fork — see plan
+ * /home/dima/.claude/plans/do-exhaustive-research-about-luminous-cat.md
+ *
+ * Memory map and IRQs from vendor kernel
+ * arch/arm/boot/dts/hi3536dv100.dtsi (RichStrong/Hi3536DV100 4.9.37 SDK).
+ * SoC ID confirmed against ipctool hal_hisi.c (0x3536D100, V4+ word layout).
+ * DDR base 0x80000000 / 512 MiB confirmed in hi3536dv100-demb.dts.
+ */
+static const HisiSoCConfig hi3536dv100_soc = {
+    .name               = "hi3536dv100",
+    .desc               = "HiSilicon Hi3536DV100 (Cortex-A7, NVR decode-only)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_3536DV100,
+    .default_sensor     = NULL,             /* NVR has no image sensor */
+    /* DDR3L 16-bit @ 800-933 MHz, max 2 GB.  512 MiB matches the vendor
+     * DEMB reference board (memory@80000000 size=0x20000000).  For boot-
+     * to-shell we let Linux own all 512 MiB — vendor MPP mmz.ko isn't
+     * loaded so no CMA reservation is needed.  When the media pipeline
+     * gets emulated later, switch to kernel_mem_mb=64 + the canonical
+     * "mmz=anonymous,0,0x84000000,448M" reservation. */
+    .ram_size_default   = 512 * MiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12080000, 0x12090000, 0x120a0000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    /* 4× SP804 dual-timer blocks → 8 timers total.  Only timer0 is enabled
+     * in the DEMB DTS, but instantiate all 4 so vendor module-loaded
+     * timers (timer3/4/5 in vendor SDK examples) work. */
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 0,                /* SPI bus exposed via FMC only */
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    /* 6× PL061 GPIO ports, 64KB stride, per-port IRQs starting at SPI 55 */
+    .gpio_base          = 0x12150000,
+    .gpio_count         = 6,
+    .gpio_stride        = 0x10000,
+    .gpio_irq_start     = 55,
+
+    /* HiSilicon DW DMAC (NOT PL080) — stub via regbanks[] below */
+    .dma_base           = 0x11020000,
+    .dma_type           = "hisi-regbank",
+
+    /* FEMAC v2: port at 0x10010000, MDIO + reg-glb at +0x1100/+0x1300 */
+    .femac_base         = 0x10010000,
+    .femac_irq          = 11,
+
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x120c0000 },
+    .i2c_type           = "hisi-i2c",        /* HiBVT IP */
+
+    .rtc_base           = 0x120b0000,
+    .rtc_irq            = 5,
+
+    /* SATA AHCI v1.x, 1 port */
+    .sata_base          = 0x10030000,
+    .sata_irq           = 17,
+    .sata_num_ports     = 1,
+
+    /* USB 2.0 host: EHCI + companion OHCI */
+    .usb_ehci_base      = 0x11010000,
+    .usb_ehci_irq       = 19,
+    .usb_ohci_base      = 0x11000000,
+    .usb_ohci_irq       = 18,
+
+    /* CRG default register state — mimic U-Boot clock init.  Hi3536DV100
+     * register map differs from EV300; offsets verified against vendor
+     * drivers/clk/hisilicon/clk-hi3536dv100.c.  Set conservative defaults
+     * (FMC + ETH + UART clocks ungated) so the kernel finds working
+     * peripherals.  Expand if smoke-test reveals more gates needed. */
+    .num_crg_defaults   = 0,
+
+    /* Stubs for blocks the kernel touches before module-load that aren't
+     * full peripherals: pinmux, USB PHY / misc CRG, DDR controller config,
+     * cipher engine, IR receiver, DMAC (regbank-substituted PL080), and
+     * the media subsystem (VOU/VGS/AUDIO/VDEC/TDE/JPGE/JPGD).  Vendor MPP
+     * modules are loaded later from rootfs and reach for these MMIO
+     * windows; without backing storage their writes vanish and they busy-
+     * loop on the next read. */
+    .num_regbanks       = 12,
+    .regbanks           = {
+        { "hisi-dmac",       0x11020000, 0x1000  },
+        { "hisi-cipher",     0x11030000, 0x10000 },
+        { "hisi-ir",         0x12140000, 0x10000 },
+        { "hisi-ddrc",       0x12110000, 0x10000 },
+        { "hisi-misc",       0x12120000, 0x10000 },
+        { "hisi-pinmux",     0x120F0000, 0x1000  },
+        { "hisi-vou",        0x13020000, 0x10000 },
+        { "hisi-aiao",       0x13040000, 0x10000 },
+        { "hisi-vgs",        0x13100000, 0x10000 },
+        { "hisi-jpgd",       0x13110000, 0x10000 },
+        { "hisi-jpge",       0x13120000, 0x10000 },
+        { "hisi-vdec",       0x13200000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3521A (DVR/NVR family): 2014-2015, single Cortex-A7, hybrid DVR/NVR.
+ * H.264 enc+dec, 4×1080p, GbE, 2× SATA 2.0, USB 2.0 host, AHD/TVI/CVI
+ * analog support via external NVP6124B 4-channel decoder over I2C.
+ *
+ * BDS prose mistakenly calls it "Cortex-A9" — vendor `hi3521a.dtsi`
+ * declares `arm,cortex-a7`.  DTS is authoritative.
+ *
+ * SoC ID 0x35210100 confirmed in ipctool hal_hisi.c.  DDR base
+ * 0x80000000 / 512 MiB confirmed in hi3521a-demb.dts.
+ */
+static const HisiSoCConfig hi3521a_soc = {
+    .name               = "hi3521a",
+    .desc               = "HiSilicon Hi3521A (Cortex-A7, hybrid DVR/NVR)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_3521V100,
+    /* External NVP6124B AHD decoder on I2C0 @ 7-bit addr 0x60. */
+    .default_sensor     = "nvp6124b",
+
+    .ram_size_default   = 512 * MiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12080000, 0x12090000, 0x120a0000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 3000000,
+
+    /* PL022 SPI controller — DEMB DTS attaches two `rohm,dh2228fv` slaves */
+    .num_spis           = 1,
+    .spi_bases          = { 0x120d0000 },
+    .spi_irqs           = { 14 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    /* DMA: HiSilicon DW DMAC at 0x10060000 (NOT 0x11020000 like Hi3536DV100).
+     * Stub via regbanks[] below; the dma_type selector skips PL080. */
+    .dma_base           = 0x10060000,
+    .dma_type           = "hisi-regbank",
+
+    /* Gigabit Ethernet — `higmac` driver, MDIO at +0x3c0 */
+    .gmac_base          = 0x100a0000,
+    .gmac_irq           = 16,
+
+    /* I2C0 — DesignWare register layout (vendor i2c-hisilicon.c driver),
+     * matches the fork's hisi-i2c-dw model. */
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x120c0000 },
+    .i2c_type           = "hisi-i2c-dw",
+
+    .rtc_base           = 0x120b0000,
+    .rtc_irq            = 5,
+
+    /* SATA AHCI v1.x, 2 ports per BDS (1 used in DEMB) */
+    .sata_base          = 0x11010000,
+    .sata_irq           = 17,
+    .sata_num_ports     = 2,
+
+    /* USB 2.0 host: EHCI + companion OHCI (different addresses from Hi3536DV100) */
+    .usb_ehci_base      = 0x10040000,
+    .usb_ehci_irq       = 19,
+    .usb_ohci_base      = 0x10030000,
+    .usb_ohci_irq       = 18,
+
+    .num_crg_defaults   = 0,
+
+    /* Stubs for blocks the kernel touches before module-load:
+     * USB-PHY/misc, DDR controller, DMAC (regbank-substituted), cipher,
+     * VDEC, IR.  Media subsystem (VIU/VOU/VPSS/JPEG/VEDU/AIO/HDMI) is
+     * loaded via vendor MPP modules from rootfs and added later if needed. */
+    .num_regbanks       = 6,
+    .regbanks           = {
+        { "hisi-dmac",       0x10060000, 0x1000  },
+        { "hisi-cipher",     0x10070000, 0x2000  },
+        { "hisi-vdec",       0x10080000, 0x4000  },
+        { "hisi-ir",         0x12140000, 0x10000 },
+        { "hisi-ddrc",       0x12110000, 0x10000 },
+        { "hisi-misc",       0x12120000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3531A (DVR/NVR family): 2016, dual Cortex-A9 SMP @ 1.1 GHz.
+ * H.264 8×1080p enc + 4×1080p dec, 1× GbE, 4× muxed lanes (SATA 3.0 /
+ * PCIe 2.0 / USB 3.0).  Memory map and IRQs from vendor kernel
+ * arch/arm/boot/dts/hi3531a.dtsi (RichStrong Linux 4.9.37).
+ *
+ * Phase-3 boot-to-shell scope: single-CPU boot (max_cpus=1).  Vendor SMP
+ * bringup uses CRG bit 4 (REG_CRG32 / 0x80) which the fork's hisi-crg
+ * model doesn't yet detect — that's a Phase-3.5 follow-up if vendor MPP
+ * modules need both CPUs online.  PCIe controllers stubbed via regbank
+ * (the kernel pcie driver fails enumeration cleanly).
+ */
+static const HisiSoCConfig hi3531a_soc = {
+    .name               = "hi3531a",
+    .desc               = "HiSilicon Hi3531A (Cortex-A9, dual-core, DVR/NVR)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a9"),
+    .soc_id             = HISI_SOC_ID_3531A,
+    .max_cpus           = 1,                /* SMP deferred to Phase 3.5 */
+    .default_sensor     = NULL,             /* multi-channel — no single sensor */
+
+    /* DDR3 32-bit, max 3 GiB.  DEMB board ships 3 GiB at 0x40000000. */
+    .ram_size_default   = 1 * GiB,          /* keep modest for QEMU */
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x40000000,       /* NOT 0x80000000 like Hi3521A/3536DV100 */
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    /* A9 MP-core peripheral block at 0x10300000 (size 0x2000) covers
+     * SCU @+0x000, GIC cpu @+0x100, gtimer @+0x200, mptimer @+0x600,
+     * wdt @+0x620, GIC dist @+0x1000.  Use a9mpcore_priv to keep these
+     * in one container (they overlap as separate sysbus regions). */
+    .gic_mpcore_base    = 0x10300000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    .num_uarts          = 4,
+    .uart_bases         = { 0x12080000, 0x12090000, 0x120a0000, 0x12130000 },
+    .uart_irqs          = { 6, 7, 8, 20 },
+
+    /* 4× SP804 dual-timer.  Vendor kernel binds the first three under the
+     * "hisilicon,hisp804" wrapper (clocksource + per-CPU local timer);
+     * the underlying register layout is plain SP804.  Only timer 3 (the
+     * "dual_timer3@12030000" sp804 instance) is active in DEMB DTS, but
+     * we instantiate all four so the wrapper finds both clocksource and
+     * local-timer regions when compatible matches. */
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 3000000,
+
+    /* PL022 SPI controller — DEMB attaches 4× rohm,dh2228fv slaves */
+    .num_spis           = 1,
+    .spi_bases          = { 0x120d0000 },
+    .spi_irqs           = { 14 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    /* DMA: HiSilicon DW DMAC at 0x10060000 (same address as Hi3521A) */
+    .dma_base           = 0x10060000,
+    .dma_type           = "hisi-regbank",
+
+    /* Gigabit Ethernet — `higmac` driver, MDIO at +0x3c0 */
+    .gmac_base          = 0x100a0000,
+    .gmac_irq           = 16,
+
+    /* 2× I2C — DesignWare register layout */
+    .num_i2c            = 2,
+    .i2c_bases          = { 0x120c0000, 0x122e0000 },
+    .i2c_type           = "hisi-i2c-dw",
+
+    .rtc_base           = 0x120b0000,
+    .rtc_irq            = 5,
+
+    /* SATA AHCI v1.x, 4 ports (1 used in DEMB) */
+    .sata_base          = 0x11010000,
+    .sata_irq           = 17,
+    .sata_num_ports     = 4,
+
+    /* USB 2.0 host: EHCI + companion OHCI in IOCH1 range */
+    .usb_ehci_base      = 0x100c0000,
+    .usb_ehci_irq       = 19,
+    .usb_ohci_base      = 0x100b0000,
+    .usb_ohci_irq       = 18,
+
+    /* USB 3.0 XHCI — first DVR/NVR SoC to expose it */
+    .xhci_base          = 0x11000000,
+    .xhci_irq           = 22,
+    .xhci_slots         = 4,
+    .xhci_intrs         = 1,
+
+    .num_crg_defaults   = 0,
+
+    /* Stub regbanks for blocks the kernel touches before module-load.
+     * PCIe controllers, parallel NAND, L2 cache (PL310 at 0x10700000),
+     * cipher, VDEC, IR, DDR/misc — all stubbed via regbank.  PL310
+     * enumeration may hang on a regbank stub; if so, patch the DT to
+     * disable the L2 node via hisilicon_patch_appended_dtb. */
+    .num_regbanks       = 9,
+    .regbanks           = {
+        { "hisi-dmac",       0x10060000, 0x1000  },
+        { "hisi-cipher",     0x10070000, 0x2000  },
+        { "hisi-vdec",       0x10080000, 0x4000  },
+        { "hisi-nandc",      0x10010000, 0x10000 },
+        { "hisi-pcie0",      0x11020000, 0x10000 },
+        { "hisi-pcie1",      0x11030000, 0x10000 },
+        { "hisi-ir",         0x12140000, 0x10000 },
+        { "hisi-ddrc",       0x12110000, 0x10000 },
+        { "hisi-misc",       0x12120000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3521D V100 (DVR/NVR family): 2017, dual Cortex-A7 SMP @ 1.3 GHz, H.265.
+ * Direct H.265 follow-up to Hi3521A — same peripheral layout per BDS, same
+ * DDR base, same address scheme.  Vendor SDK ships Linux 3.18.20.
+ *
+ * Single-CPU boot for Phase 5 (max_cpus=1) — vendor SMP would need the same
+ * CRG bit-handling extension as Hi3531A's deferred Phase 3.5.
+ */
+static const HisiSoCConfig hi3521dv100_soc = {
+    .name               = "hi3521dv100",
+    .desc               = "HiSilicon Hi3521DV100 (Cortex-A7, dual-core, H.265 DVR)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_3521DV100,
+    .max_cpus           = 1,
+    .default_sensor     = "nvp6124b",       /* analog AHD/TVI/CVI decoder */
+
+    .ram_size_default   = 512 * MiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x80000000,       /* per uImage load addr 0x80008000 */
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12080000, 0x12090000, 0x120a0000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 1,
+    .spi_bases          = { 0x120d0000 },
+    .spi_irqs           = { 14 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .dma_base           = 0x10060000,
+    .dma_type           = "hisi-regbank",
+
+    .gmac_base          = 0x100a0000,
+    .gmac_irq           = 16,
+
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x120c0000 },
+    .i2c_type           = "hisi-i2c-dw",
+
+    .rtc_base           = 0x120b0000,
+    .rtc_irq            = 5,
+
+    .sata_base          = 0x11010000,
+    .sata_irq           = 17,
+    .sata_num_ports     = 2,
+
+    .usb_ehci_base      = 0x10040000,
+    .usb_ehci_irq       = 19,
+    .usb_ohci_base      = 0x10030000,
+    .usb_ohci_irq       = 18,
+
+    .num_regbanks       = 6,
+    .regbanks           = {
+        { "hisi-dmac",       0x10060000, 0x1000  },
+        { "hisi-cipher",     0x10070000, 0x2000  },
+        { "hisi-vdec",       0x10080000, 0x4000  },
+        { "hisi-ir",         0x12140000, 0x10000 },
+        { "hisi-ddrc",       0x12110000, 0x10000 },
+        { "hisi-misc",       0x12120000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3520DV300 (DVR/NVR family): 2016, single Cortex-A7 @ 800 MHz, H.264.
+ * Per LKML hint, shares ARCH_HI3521A in the kernel — peripheral layout is
+ * the same as Hi3521A, just lower clock.  Treat as Hi3521A clone with
+ * different SoC ID and FE Ethernet (vs Hi3521A's GbE per Brief Data Sheet).
+ */
+static const HisiSoCConfig hi3520dv300_soc = {
+    .name               = "hi3520dv300",
+    .desc               = "HiSilicon Hi3520DV300 (Cortex-A7, single, H.264 DVR)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_3520DV300,
+    .default_sensor     = "nvp6124b",
+
+    .ram_size_default   = 512 * MiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 16 * KiB,         /* BDS says 16 KiB SRAM */
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12080000, 0x12090000, 0x120a0000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 1,
+    .spi_bases          = { 0x120d0000 },
+    .spi_irqs           = { 14 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .dma_base           = 0x10060000,
+    .dma_type           = "hisi-regbank",
+
+    .gmac_base          = 0x100a0000,
+    .gmac_irq           = 16,
+
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x120c0000 },
+    .i2c_type           = "hisi-i2c-dw",
+
+    .rtc_base           = 0x120b0000,
+    .rtc_irq            = 5,
+
+    .sata_base          = 0x11010000,
+    .sata_irq           = 17,
+    .sata_num_ports     = 2,
+
+    .usb_ehci_base      = 0x10040000,
+    .usb_ehci_irq       = 19,
+    .usb_ohci_base      = 0x10030000,
+    .usb_ohci_irq       = 18,
+
+    .num_regbanks       = 5,
+    .regbanks           = {
+        { "hisi-dmac",       0x10060000, 0x1000  },
+        { "hisi-cipher",     0x10070000, 0x2000  },
+        { "hisi-ir",         0x12140000, 0x10000 },
+        { "hisi-ddrc",       0x12110000, 0x10000 },
+        { "hisi-misc",       0x12120000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3520DV400 (DVR/NVR family): 2017+, single Cortex-A7 @ 1.3 GHz, H.265.
+ * Co-distributed in the same SDK as Hi3521D (Linux 3.18.20).  Mobile DVR
+ * and NDI live-encoder boards.  Same peripheral set as Hi3521D, single CPU.
+ */
+static const HisiSoCConfig hi3520dv400_soc = {
+    .name               = "hi3520dv400",
+    .desc               = "HiSilicon Hi3520DV400 (Cortex-A7, single, H.265 DVR/encoder)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_3520DV400,
+    .default_sensor     = NULL,
+
+    .ram_size_default   = 512 * MiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12080000, 0x12090000, 0x120a0000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 1,
+    .spi_bases          = { 0x120d0000 },
+    .spi_irqs           = { 14 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .dma_base           = 0x10060000,
+    .dma_type           = "hisi-regbank",
+
+    .gmac_base          = 0x100a0000,
+    .gmac_irq           = 16,
+
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x120c0000 },
+    .i2c_type           = "hisi-i2c-dw",
+
+    .rtc_base           = 0x120b0000,
+    .rtc_irq            = 5,
+
+    .sata_base          = 0x11010000,
+    .sata_irq           = 17,
+    .sata_num_ports     = 1,                /* Dv400 BDS lists 1× SATA only */
+
+    .usb_ehci_base      = 0x10040000,
+    .usb_ehci_irq       = 19,
+    .usb_ohci_base      = 0x10030000,
+    .usb_ohci_irq       = 18,
+
+    .num_regbanks       = 5,
+    .regbanks           = {
+        { "hisi-dmac",       0x10060000, 0x1000  },
+        { "hisi-cipher",     0x10070000, 0x2000  },
+        { "hisi-ir",         0x12140000, 0x10000 },
+        { "hisi-ddrc",       0x12110000, 0x10000 },
+        { "hisi-misc",       0x12120000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3531DV100 (DVR/NVR family): 2017, dual Cortex-A9 SMP @ 1.4 GHz, H.265.
+ * Direct H.265 follow-up to Hi3531A — vendor BDS says identical peripheral
+ * pin/layout.  Reuses Hi3531A's a9mpcore_priv path.
+ *
+ * Single-CPU boot for Phase 5 (same SMP caveat as Hi3531A).
+ */
+static const HisiSoCConfig hi3531dv100_soc = {
+    .name               = "hi3531dv100",
+    .desc               = "HiSilicon Hi3531DV100 (Cortex-A9, dual-core, H.265 DVR)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a9"),
+    .soc_id             = HISI_SOC_ID_3531DV100,
+    .max_cpus           = 1,
+    .default_sensor     = NULL,
+
+    .ram_size_default   = 1 * GiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x40000000,       /* same as Hi3531A */
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_mpcore_base    = 0x10300000,       /* a9mpcore_priv layout */
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    .num_uarts          = 4,
+    .uart_bases         = { 0x12080000, 0x12090000, 0x120a0000, 0x12130000 },
+    .uart_irqs          = { 6, 7, 8, 20 },
+
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 1,
+    .spi_bases          = { 0x120d0000 },
+    .spi_irqs           = { 14 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .dma_base           = 0x10060000,
+    .dma_type           = "hisi-regbank",
+
+    .gmac_base          = 0x100a0000,
+    .gmac_irq           = 16,
+
+    .num_i2c            = 2,
+    .i2c_bases          = { 0x120c0000, 0x122e0000 },
+    .i2c_type           = "hisi-i2c-dw",
+
+    .rtc_base           = 0x120b0000,
+    .rtc_irq            = 5,
+
+    .sata_base          = 0x11010000,
+    .sata_irq           = 17,
+    .sata_num_ports     = 4,
+
+    .usb_ehci_base      = 0x100c0000,
+    .usb_ehci_irq       = 19,
+    .usb_ohci_base      = 0x100b0000,
+    .usb_ohci_irq       = 18,
+
+    .xhci_base          = 0x11000000,
+    .xhci_irq           = 22,
+    .xhci_slots         = 4,
+    .xhci_intrs         = 1,
+
+    .num_regbanks       = 9,
+    .regbanks           = {
+        { "hisi-dmac",       0x10060000, 0x1000  },
+        { "hisi-cipher",     0x10070000, 0x2000  },
+        { "hisi-vdec",       0x10080000, 0x4000  },
+        { "hisi-nandc",      0x10010000, 0x10000 },
+        { "hisi-pcie0",      0x11020000, 0x10000 },
+        { "hisi-pcie1",      0x11030000, 0x10000 },
+        { "hisi-ir",         0x12140000, 0x10000 },
+        { "hisi-ddrc",       0x12110000, 0x10000 },
+        { "hisi-misc",       0x12120000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3535 (DVR/NVR family): 2013, dual Cortex-A9 SMP @ 1 GHz, H.264.
+ * Pure NVR (no analog VI), 2× GbE TOE, USB 3.0 + integrated audio codec,
+ * 1× PCIe 2.0/SATA 3.0 mux + 2× SATA 3.0.  Linux 3.4 vendor SDK (older
+ * than Hi3531A).  Same Hi3531A-class peripheral scheme.
+ *
+ * Phase 5 boot-to-shell likely needs Linux 3.4 → 3.18 backport effort
+ * similar to Hi3536 flagship; mark architecture-only for now.
+ */
+static const HisiSoCConfig hi3535_soc = {
+    .name               = "hi3535",
+    .desc               = "HiSilicon Hi3535 (Cortex-A9, dual-core, H.264 NVR)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a9"),
+    .soc_id             = HISI_SOC_ID_3535,
+    .max_cpus           = 1,
+    .default_sensor     = NULL,             /* NVR-only, no analog */
+    .board_id           = 0,                /* Linux 3.4 boot may need ATAGs id */
+
+    .ram_size_default   = 1 * GiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    /* DDR base 0x80000000 confirmed by uImage load addr — different from
+     * Hi3531A (0x40000000).  Hi3535 is the earlier-gen NVR-only variant. */
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 16 * KiB,         /* BDS says 10 KiB SRAM */
+
+    .use_gic            = true,
+    .gic_mpcore_base    = 0x10300000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12080000, 0x12090000, 0x120a0000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 1,
+    .spi_bases          = { 0x120d0000 },
+    .spi_irqs           = { 14 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .dma_base           = 0x10060000,
+    .dma_type           = "hisi-regbank",
+
+    /* 2× GbE — fork only models one GMAC; stub the second as regbank */
+    .gmac_base          = 0x100a0000,
+    .gmac_irq           = 16,
+
+    .num_i2c            = 2,
+    .i2c_bases          = { 0x120c0000, 0x122e0000 },
+    .i2c_type           = "hisi-i2c-dw",
+
+    .rtc_base           = 0x120b0000,
+    .rtc_irq            = 5,
+
+    .sata_base          = 0x11010000,
+    .sata_irq           = 17,
+    .sata_num_ports     = 2,
+
+    .usb_ehci_base      = 0x100c0000,
+    .usb_ehci_irq       = 19,
+    .usb_ohci_base      = 0x100b0000,
+    .usb_ohci_irq       = 18,
+
+    .xhci_base          = 0x11000000,
+    .xhci_irq           = 22,
+    .xhci_slots         = 4,
+    .xhci_intrs         = 1,
+
+    .num_regbanks       = 7,
+    .regbanks           = {
+        { "hisi-dmac",       0x10060000, 0x1000  },
+        { "hisi-cipher",     0x10070000, 0x2000  },
+        { "hisi-gmac1",      0x100b1000, 0x1000  },  /* 2nd GbE stub */
+        { "hisi-pcie0",      0x11020000, 0x10000 },
+        { "hisi-ir",         0x12140000, 0x10000 },
+        { "hisi-ddrc",       0x12110000, 0x10000 },
+        { "hisi-misc",       0x12120000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3536C / Hi3536CV100 (DVR/NVR family): 2017, dual Cortex-A7 @ 1.3 GHz,
+ * H.265.  Entry-level 4K NVR — the "Hi3536-lite".  Distinct die from the
+ * Hi3536 flagship (different CPU IP block — A7 dual vs A17 quad+A7) and
+ * from Hi3536DV100 (A7 single decode-only).  2× GbE, 2× SATA 3.0, no XHCI.
+ */
+static const HisiSoCConfig hi3536cv100_soc = {
+    .name               = "hi3536cv100",
+    .desc               = "HiSilicon Hi3536CV100 (Cortex-A7, dual-core, 4K NVR)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_3536CV100,
+    .max_cpus           = 1,
+    .default_sensor     = NULL,
+
+    .ram_size_default   = 512 * MiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x80000000,       /* same as Hi3536DV100 */
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12080000, 0x12090000, 0x120a0000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 1,
+    .spi_bases          = { 0x120d0000 },
+    .spi_irqs           = { 14 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .dma_base           = 0x11020000,
+    .dma_type           = "hisi-regbank",
+
+    .gmac_base          = 0x10010000,       /* same as Hi3536DV100 FE-MAC */
+    .gmac_irq           = 11,
+
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x120c0000 },
+    .i2c_type           = "hisi-i2c",
+
+    .rtc_base           = 0x120b0000,
+    .rtc_irq            = 5,
+
+    .sata_base          = 0x10030000,       /* same as Hi3536DV100 */
+    .sata_irq           = 17,
+    .sata_num_ports     = 2,                /* C-variant has 2 ports */
+
+    .usb_ehci_base      = 0x11010000,
+    .usb_ehci_irq       = 19,
+    .usb_ohci_base      = 0x11000000,
+    .usb_ohci_irq       = 18,
+
+    .num_regbanks       = 5,
+    .regbanks           = {
+        { "hisi-dmac",       0x11020000, 0x1000  },
+        { "hisi-cipher",     0x11030000, 0x10000 },
+        { "hisi-gmac1",      0x10020000, 0x1000  },  /* 2nd GbE stub */
+        { "hisi-ir",         0x12140000, 0x10000 },
+        { "hisi-misc",       0x12120000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3798CV200 (STB family — first 64-bit ARM SoC in this fork): 2015,
+ * Cortex-A53 quad @ ~1.5 GHz, ARMv8-a.  HiSTB platform — TV-box / DVB STB
+ * SoC, Linaro Poplar 96Boards reference, **mainline Linux DT supported**
+ * (`arch/arm64/boot/dts/hisilicon/hi3798cv200.dtsi`).  This SoC is a
+ * different product line from the IPC and DVR/NVR families — no analog
+ * VI, no surveillance ISP, no NVP6124B; it has TS demux, HDMI 2.0,
+ * Mali-T720 GPU, Dolby Vision support.
+ *
+ * Memory map from upstream Linux DT.  PSCI/SMC for SMP bringup (no
+ * pen-release pattern, no SCU writes — kernel uses `arm,psci-0.2`).
+ * Sysctl/CRG layout differs from V1–V5 hisi-sysctl model — leave
+ * sysctl_base = crg_base = 0 to skip those instances.
+ *
+ * Boot-to-shell scope: minimal — only the GICv2-400 (dist + cpu) and
+ * a single PL011 UART are wired.  Storage / USB / Mali / TS demux all
+ * deferred — guest kernel boots to a usable shell prompt over UART0.
+ */
+static const HisiSoCConfig hi3798cv200_soc = {
+    .name               = "hi3798cv200",
+    .desc               = "HiSilicon Hi3798CV200 (Cortex-A53 quad, HiSTB)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a53"),
+    .soc_id             = HISI_SOC_ID_3798CV200,
+    .max_cpus           = 4,
+    .default_sensor     = NULL,
+    .board_id           = 0,                /* DT-based boot, ATAGs unused */
+    /* QEMU_PSCI_CONDUIT_SMC = 1 in upstream "hw/arm/boot.h"; enables PSCI
+     * for SMP bringup so the upstream smpboot stub at 0x0 is suppressed. */
+    .psci_conduit       = 1,                /* QEMU_PSCI_CONDUIT_SMC */
+
+    /* DDR base 0x0 from poplar.dts memory@0; default 2 GiB matches Poplar. */
+    .ram_size_default   = 2 * GiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x0,
+    .sram_base          = 0,                /* skip SRAM region */
+    .sram_size          = 0,
+
+    .use_gic            = true,
+    /* GIC-400, GICv2 mode for now (skip GICH/GICV virt extensions).
+     * dist 0xf1001000/0x1000, cpu 0xf1002000/0x2000 — non-overlapping. */
+    .gic_dist_base      = 0xf1001000,
+    .gic_cpu_base       = 0xf1002000,
+    .gic_num_spi        = 224,              /* GIC-400 supports up to 224 SPIs */
+
+    .sysctl_base        = 0,                /* HiSTB sysctl uses different layout */
+    .crg_base           = 0,                /* HiSTB CRG uses different layout */
+
+    /* PL011 UART0 at 0xf8b00000 (soc base 0xf0000000 + 0x8b00000) IRQ 49 */
+    .num_uarts          = 1,
+    .uart_bases         = { 0xf8b00000 },
+    .uart_irqs          = { 49 },
+
+    /* ARM generic timer used for Cortex-A53; no SP804 in DT */
+    .num_timers         = 0,
+
+    .num_spis           = 0,
+    .fmc_ctrl_base      = 0,                /* skip HiFMC — not present on STB */
+    .num_i2c            = 0,
+    .num_himci          = 0,
+    .num_sdhci          = 0,
+};
+
+/*
+ * Hi3796M V100 (STB family): 2015, Cortex-A7 quad @ 1.5 GHz, ARMv7-a.
+ * DVB-S2/-C/-T2 STB, Mali-450, H.265 dec to 4Kp30.  Vendor SDK ships
+ * Linux 3.10 (HiSTBLinuxV100R003C00SPC062) — same boot-time hang as
+ * Hi3536 flagship and Hi3535.  Architecture-only registration; boot
+ * deferred to a future Linux 4.x backport.
+ *
+ * Hi3796M shares the HiSTB peripheral scheme with Hi3798CV200, but the
+ * exact peripheral addresses for the V100 die are not in upstream Linux
+ * (only the V200 64-bit variant has DT support).
+ */
+static const HisiSoCConfig hi3796mv100_soc = {
+    .name               = "hi3796mv100",
+    .desc               = "HiSilicon Hi3796M V100 (Cortex-A7 quad, HiSTB)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_3796MV100,
+    .max_cpus           = 1,                /* boot single-CPU; vendor 3.10 hangs anyway */
+    .default_sensor     = NULL,
+
+    .ram_size_default   = 1 * GiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x0,              /* HiSTB family puts DDR at 0 */
+    .sram_base          = 0,
+    .sram_size          = 0,
+
+    .use_gic            = true,
+    /* GIC at HiSTB peripheral block (placeholder; verify against Hi3796M
+     * vendor mach when boot-to-shell is pursued). */
+    .gic_dist_base      = 0xf1001000,
+    .gic_cpu_base       = 0xf1002000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0,
+    .crg_base           = 0,
+
+    .num_uarts          = 1,
+    .uart_bases         = { 0xf8b00000 },   /* HiSTB UART0 (placeholder) */
+    .uart_irqs          = { 49 },
+
+    .num_timers         = 0,
+
+    .num_spis           = 0,
+    .fmc_ctrl_base      = 0,
+    .num_i2c            = 0,
+};
+
+/*
+ * Hi3536 (DVR/NVR family flagship): 2014, **Cortex-A17 quad** @ 1.6 GHz
+ * + Cortex-A7 single @ 900 MHz video coprocessor (asymmetric, separate
+ * kernel).  H.265 dec / H.264 enc, 2× GbE TOE, 2× SATA 3.0 + 1× PCIe 2.0/
+ * SATA 3.0 mux, USB 3.0, 2× SDIO, dual HDMI/VGA, Mali-T720 GPU, IVE 2.0.
+ * Uses Linux 3.10 board-config style (no DTB).
+ *
+ * Memory map and IRQs from vendor kernel arch/arm/mach-hi3536/include/mach/
+ * (Hi3536 SDK V2.0.2.0, Linux 3.10.0_hi3536).  Phase-4 boot-to-shell scope:
+ * single-CPU on the A17 cluster (max_cpus=1 — quad A17 SMP via the pen-
+ * release pattern is a Phase-4.5 follow-up that needs a writable trampoline
+ * page at 0x0 in place of the fork's read-only NULL trap).  A7 video
+ * coprocessor is a separate machine class entirely — not modelled.
+ *
+ * QEMU has no cortex-a17 CPU type; cortex-a15 is the closest analogue
+ * (same armv7-a ISA, NEON+VFPv4, generic timer, big.LITTLE-class).
+ */
+static const HisiSoCConfig hi3536_soc = {
+    .name               = "hi3536",
+    .desc               = "HiSilicon Hi3536 flagship (Cortex-A17 quad, NVR)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a15"),
+    .soc_id             = HISI_SOC_ID_3536,
+    .max_cpus           = 1,                /* A17 SMP deferred */
+    .default_sensor     = NULL,
+    /* MACH_TYPE_HI3536 from arch/arm/tools/mach-types — required because
+     * Hi3536's vendor 3.10 kernel uses MACHINE_START (ATAGs board ID),
+     * not DT_MACHINE_START.  Without this, lookup_machine_type fails. */
+    .board_id           = 8000,
+
+    /* DDR3/DDR4 32-bit, max 3 GiB.  Vendor U-Boot defaults to mem=96M. */
+    .ram_size_default   = 1 * GiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x40000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    /* A17 mpcore peripheral block at 0x1fff0000 (size 0x10000):
+     *   +0x0000 SCU (we leave a regbank stub there)
+     *   +0x1000 GIC dist
+     *   +0x2000 GIC cpu interface
+     * Unlike the A9 layout, dist and cpu are separated by 0x1000 each so
+     * plain GIC mapping doesn't overlap.  No a9mpcore_priv path needed. */
+    .gic_dist_base      = 0x1fff1000,
+    .gic_cpu_base       = 0x1fff2000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12050000,
+    .crg_base           = 0x12040000,
+
+    /* Vendor mach-hi3536 only registers UART0 + UART1 as platform devices;
+     * UARTs 2/3 exist on silicon but aren't part of the boot path. */
+    .num_uarts          = 2,
+    .uart_bases         = { 0x12080000, 0x12090000 },
+    .uart_irqs          = { 6, 7 },
+
+    /* 4× SP804 dual-timer + 1× extra block at 0x12060000 (timer 8/9).
+     * INTNR_TIMER_0=1, _2=2, _4=3, _6=4 per irqs.h.  The 5th block
+     * (timer 8/9 @ 0x12060000) shares CRG slot but has its own irq pair
+     * (77/78) outside the standard sp804 driver scope. */
+    .num_timers         = 4,
+    .timer_bases        = { 0x12000000, 0x12010000, 0x12020000, 0x12030000 },
+    .timer_irqs         = { 1, 2, 3, 4 },
+    .timer_freq         = 12500000,         /* get_bus_clk()/2 ≈ 12.5 MHz */
+
+    .num_spis           = 0,                /* no PL022 in mach amba_devs */
+
+    /* No FMC in mach-hi3536 platform list — kernel doesn't probe SPI NOR
+     * during boot.  Set to 0 to skip instantiating hisi-fmc. */
+    .fmc_ctrl_base      = 0,
+
+    .num_i2c            = 0,                /* I2C loaded later as module */
+
+    /* Stub regbanks for blocks the kernel touches before module-load.
+     * The A17 MPCore SCU at 0x1fff0000 (size 0x1000) sits just below
+     * the GIC dist; a regbank lets vendor SMP power-up writes succeed. */
+    .num_regbanks       = 1,
+    .regbanks           = {
+        { "hisi-a17-scu",    0x1fff0000, 0x1000  },
+    },
+};
+
 /* ── Machine state with sensor property ────────────────────────────── */
 
 /* Extra state appended to MachineState for the sensor property */
@@ -2217,7 +3237,7 @@ static void hisilicon_common_init(MachineState *machine,
 {
     MemoryRegion *sysmem = get_system_memory();
     int smp_cpus = machine->smp.cpus;
-#define HISI_MAX_SMP 2
+#define HISI_MAX_SMP 4
     Object *cpuobj[HISI_MAX_SMP];
     ARMCPU *cpu[HISI_MAX_SMP];
     qemu_irq pic[256];
@@ -2225,8 +3245,8 @@ static void hisilicon_common_init(MachineState *machine,
     int n;
     bool flash_boot = false;  /* true when booting from SPI NOR flash dump */
 
-    /* SRAM */
-    {
+    /* SRAM (skipped on STB family which has no on-chip SRAM in DT) */
+    if (c->sram_size) {
         MemoryRegion *sram = g_new(MemoryRegion, 1);
         memory_region_init_ram(sram, NULL, "hisilicon.sram",
                                c->sram_size, &error_fatal);
@@ -2258,7 +3278,10 @@ static void hisilicon_common_init(MachineState *machine,
      */
     if (flash_boot) {
         hisilicon_write_bootrom(sysmem, c, machine);
-    } else {
+    } else if (c->ram_base != 0) {
+        /* NULL trap page: makes NULL function pointer calls return cleanly
+         * for V1–V5 IPC kernels.  Skip when RAM lives at 0 (e.g. STB family
+         * Hi3798CV200) — the trap would conflict with the system memory. */
         MemoryRegion *trap = g_new(MemoryRegion, 1);
         memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
                                0x1000, &error_fatal);
@@ -2286,46 +3309,74 @@ static void hisilicon_common_init(MachineState *machine,
     /* Interrupt controller */
     if (c->use_gic) {
         int num_irq = c->gic_num_spi + GIC_INTERNAL;
-        DeviceState *gicdev = qdev_new(gic_class_name());
-        qdev_prop_set_uint32(gicdev, "revision", 2);
-        qdev_prop_set_uint32(gicdev, "num-cpu", smp_cpus);
-        qdev_prop_set_uint32(gicdev, "num-irq", num_irq);
-        qdev_prop_set_bit(gicdev, "has-security-extensions", false);
-        SysBusDevice *gicbus = SYS_BUS_DEVICE(gicdev);
-        sysbus_realize_and_unref(gicbus, &error_fatal);
-        sysbus_mmio_map(gicbus, 0, c->gic_dist_base);
-        sysbus_mmio_map(gicbus, 1, c->gic_cpu_base);
+        DeviceState *gicdev;
+        SysBusDevice *gicbus;
 
-        /* GIC outputs → each CPU */
-        for (n = 0; n < smp_cpus; n++) {
-            int irq_ofs = n * 4; /* 4 outputs per CPU: IRQ, FIQ, VIRQ, VFIQ */
-            sysbus_connect_irq(gicbus, irq_ofs + 0,
-                               qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_IRQ));
-            sysbus_connect_irq(gicbus, irq_ofs + 1,
-                               qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_FIQ));
-            sysbus_connect_irq(gicbus, irq_ofs + 2,
-                               qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_VIRQ));
-            sysbus_connect_irq(gicbus, irq_ofs + 3,
-                               qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_VFIQ));
+        if (c->gic_mpcore_base) {
+            /* Cortex-A9 family — use combined a9mpcore_priv that exposes
+             * SCU + GIC cpu + gtimer + mptimer + wdt + GIC dist within
+             * one 0x2000 region.  Required because A9's GIC cpu interface
+             * sits at MPCORE+0x100 and overlaps the dist at MPCORE+0x1000
+             * if mapped as separate sysbus regions. */
+            gicdev = qdev_new("a9mpcore_priv");
+            qdev_prop_set_uint32(gicdev, "num-cpu", smp_cpus);
+            qdev_prop_set_uint32(gicdev, "num-irq", num_irq);
+            gicbus = SYS_BUS_DEVICE(gicdev);
+            sysbus_realize_and_unref(gicbus, &error_fatal);
+            sysbus_mmio_map(gicbus, 0, c->gic_mpcore_base);
+        } else {
+            gicdev = qdev_new(gic_class_name());
+            qdev_prop_set_uint32(gicdev, "revision", 2);
+            qdev_prop_set_uint32(gicdev, "num-cpu", smp_cpus);
+            qdev_prop_set_uint32(gicdev, "num-irq", num_irq);
+            qdev_prop_set_bit(gicdev, "has-security-extensions", false);
+            gicbus = SYS_BUS_DEVICE(gicdev);
+            sysbus_realize_and_unref(gicbus, &error_fatal);
+            sysbus_mmio_map(gicbus, 0, c->gic_dist_base);
+            sysbus_mmio_map(gicbus, 1, c->gic_cpu_base);
         }
 
-        /* CPU timer PPIs → GIC (boot CPU only) */
-        {
-            DeviceState *cpudev = DEVICE(cpu[0]);
-            int ppibase = c->gic_num_spi + GIC_NR_SGIS;
+        /* GIC outputs → each CPU.  Both plain GIC and a9mpcore_priv use the
+         * grouped pattern: outputs 0..N-1 = IRQ for CPU 0..N-1; N..2N-1 =
+         * FIQ; 2N..3N-1 = VIRQ; 3N..4N-1 = VFIQ.  (Per upstream
+         * arm_gic_common.c:148–159 and a9mpcore_priv pass-through.)
+         * The earlier interleaved pattern (irq_ofs = n * 4) happened to
+         * work for V1–V5 IPC because N = 1 makes both layouts equivalent —
+         * but breaks SMP when N > 1 (CPU0 takes wrong FIQs etc). */
+        for (n = 0; n < smp_cpus; n++) {
+            sysbus_connect_irq(gicbus, n + 0 * smp_cpus,
+                qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_IRQ));
+            sysbus_connect_irq(gicbus, n + 1 * smp_cpus,
+                qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_FIQ));
+            sysbus_connect_irq(gicbus, n + 2 * smp_cpus,
+                qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_VIRQ));
+            sysbus_connect_irq(gicbus, n + 3 * smp_cpus,
+                qdev_get_gpio_in(DEVICE(cpu[n]), ARM_CPU_VFIQ));
+        }
+
+        if (!c->gic_mpcore_base) {
+            /* CPU timer PPIs → GIC, per-CPU.  A9 doesn't have an ARM
+             * generic timer; a9mpcore_priv has its own gtimer that wires
+             * itself, so skip this for A9.  PPI input index for CPU C
+             * is: gic_num_spi + C*GIC_INTERNAL + GIC_NR_SGIS + ppi (per
+             * arm_gic_common.c gpio-in layout). */
             const int timer_ppi[] = {
                 [GTIMER_PHYS] = HISI_PPI_PHYSTIMER,
                 [GTIMER_VIRT] = HISI_PPI_VIRTTIMER,
                 [GTIMER_HYP]  = HISI_PPI_HYPTIMER,
                 [GTIMER_SEC]  = HISI_PPI_SECTIMER,
             };
-            for (int i = 0; i < ARRAY_SIZE(timer_ppi); i++) {
-                qdev_connect_gpio_out(cpudev, i,
-                    qdev_get_gpio_in(gicdev, ppibase + timer_ppi[i]));
+            for (n = 0; n < smp_cpus; n++) {
+                DeviceState *cpudev = DEVICE(cpu[n]);
+                int ppibase = c->gic_num_spi + n * GIC_INTERNAL + GIC_NR_SGIS;
+                for (int i = 0; i < ARRAY_SIZE(timer_ppi); i++) {
+                    qdev_connect_gpio_out(cpudev, i,
+                        qdev_get_gpio_in(gicdev, ppibase + timer_ppi[i]));
+                }
+                /* PMU */
+                qdev_connect_gpio_out_named(cpudev, "pmu-interrupt", 0,
+                    qdev_get_gpio_in(gicdev, ppibase + 7));
             }
-            /* PMU */
-            qdev_connect_gpio_out_named(cpudev, "pmu-interrupt", 0,
-                qdev_get_gpio_in(gicdev, ppibase + 7));
         }
 
         /* SPI IRQ array */
@@ -2345,8 +3396,10 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
-    /* SysCtrl */
-    {
+    /* SysCtrl — V1–V5 IPC and DVR/NVR scheme; STB family (HiSTB) uses
+     * a different sysctl register layout that the hisi-sysctl model
+     * doesn't implement, so leave sysctl_base = 0 to skip. */
+    if (c->sysctl_base) {
         DeviceState *sysctl = qdev_new("hisi-sysctl");
         qdev_prop_set_uint32(sysctl, "soc-id", c->soc_id);
         qdev_prop_set_bit(sysctl, "byte-layout-id", c->chipid_byte_layout);
@@ -2355,8 +3408,8 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_mmio_map(SYS_BUS_DEVICE(sysctl), 0, c->sysctl_base);
     }
 
-    /* CRG */
-    {
+    /* CRG — same caveat as sysctl: STB family uses a different layout. */
+    if (c->crg_base) {
         DeviceState *crg = qdev_new("hisi-crg");
         if (c->cpu_srst_offset) {
             qdev_prop_set_uint32(crg, "cpu-srst-offset", c->cpu_srst_offset);
@@ -2423,8 +3476,12 @@ static void hisilicon_common_init(MachineState *machine,
                            pic[c->spi_irqs[n]]);
     }
 
-    /* DMA (PL080) */
-    if (c->dma_base) {
+    /* DMA — PL080 by default, or "hisi-regbank" to stub the DVR/NVR
+     * HiSilicon DW DMAC (a PL080 at that address would respond with
+     * PL080 PrimeCell IDs that the vendor hisi-dmac driver rejects).
+     * Regbank-stubbed DMA is later populated via regbanks[] in the
+     * SoC config so the kernel sees a non-zero MMIO. */
+    if (c->dma_base && (!c->dma_type || !strcmp(c->dma_type, "pl080"))) {
         DeviceState *dma = qdev_new("pl080");
         object_property_set_link(OBJECT(dma), "downstream", OBJECT(sysmem),
                                  &error_fatal);
@@ -2602,6 +3659,53 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_mmio_map(busdev, 0, c->gzip_base);
     }
 
+    /* SATA AHCI controller (sysbus-AHCI) — DVR/NVR family.  Boot-to-shell
+     * stub: no devices attached.  Vendor SATA/AHCI driver probes CAP/PI
+     * and reports an empty bus, then returns cleanly. */
+    if (c->sata_base) {
+        DeviceState *sata = qdev_new("sysbus-ahci");
+        int ports = c->sata_num_ports ? c->sata_num_ports : 1;
+        qdev_prop_set_uint32(sata, "num-ports", ports);
+        SysBusDevice *busdev = SYS_BUS_DEVICE(sata);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->sata_base);
+        sysbus_connect_irq(busdev, 0, pic[c->sata_irq]);
+    }
+
+    /* USB host — sysbus EHCI 2.0 + sysbus OHCI 1.1.  Boot-to-shell stub:
+     * no devices attached, generic-ehci / generic-ohci kernel drivers
+     * probe and report an empty bus. */
+    if (c->usb_ehci_base) {
+        DeviceState *ehci = qdev_new("platform-ehci-usb");
+        SysBusDevice *busdev = SYS_BUS_DEVICE(ehci);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->usb_ehci_base);
+        sysbus_connect_irq(busdev, 0, pic[c->usb_ehci_irq]);
+    }
+    if (c->usb_ohci_base) {
+        DeviceState *ohci = qdev_new("sysbus-ohci");
+        SysBusDevice *busdev = SYS_BUS_DEVICE(ohci);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->usb_ohci_base);
+        sysbus_connect_irq(busdev, 0, pic[c->usb_ohci_irq]);
+    }
+
+    /* USB 3.0 XHCI (sysbus) — DVR/NVR family Hi3531A / Hi3535 /
+     * Hi3536-flagship.  Hi3536DV100 / Hi3521A leave xhci_base = 0. */
+    if (c->xhci_base) {
+        DeviceState *xhci = qdev_new("sysbus-xhci");
+        if (c->xhci_slots) {
+            qdev_prop_set_uint32(xhci, "slots", c->xhci_slots);
+        }
+        if (c->xhci_intrs) {
+            qdev_prop_set_uint32(xhci, "intrs", c->xhci_intrs);
+        }
+        SysBusDevice *busdev = SYS_BUS_DEVICE(xhci);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->xhci_base);
+        sysbus_connect_irq(busdev, 0, pic[c->xhci_irq]);
+    }
+
     /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */
     for (n = 0; n < c->num_regbanks; n++) {
         if (c->regbanks[n].base) {
@@ -2706,6 +3810,9 @@ static void hisilicon_common_init(MachineState *machine,
             } else if (!strcmp(sensor_name, "mis2006")) {
                 sensor = qdev_new("hisi-mis2006");
                 i2c_addr = 0x30;
+            } else if (!strcmp(sensor_name, "nvp6124b")) {
+                sensor = qdev_new("hisi-nvp6124b");
+                i2c_addr = 0x60;          /* 7-bit; vendor uses 0x60..0x66 */
             } else if (!strcmp(sensor_name, "sc2315e")) {
                 sensor = qdev_new("hisi-smartsens");
                 qdev_prop_set_uint8(sensor, "id_high", 0x22);
@@ -2746,9 +3853,10 @@ static void hisilicon_common_init(MachineState *machine,
             } else {
                 error_report("Unknown sensor '%s' (supported: imx291, "
                              "imx307, imx335, imx385, imx415, f37, "
-                             "gc2053, sp2305, mis2006, sc2235p, sc2235e, "
-                             "sc2315, sc2315e, sc2335, sc2239, sc307h, "
-                             "imx122, imx222; or 'none' to disable default)",
+                             "gc2053, sp2305, mis2006, nvp6124b, "
+                             "sc2235p, sc2235e, sc2315, sc2315e, sc2335, "
+                             "sc2239, sc307h, imx122, imx222; or 'none' "
+                             "to disable default)",
                              sensor_name);
                 exit(1);
             }
@@ -2826,6 +3934,12 @@ static void hisilicon_common_init(MachineState *machine,
             hisilicon_binfo.ram_size = (hwaddr)c->kernel_mem_mb * MiB;
         }
         hisilicon_binfo.loader_start = c->ram_base;
+        hisilicon_binfo.board_id = c->board_id; /* ATAGs machine_arch_type */
+        if (c->psci_conduit) {
+            /* ARMv8 STB family — PSCI/SMC for SMP, suppresses upstream
+             * "smpboot" stub at 0x0 that collides with the bootloader. */
+            hisilicon_binfo.psci_conduit = c->psci_conduit;
+        }
         arm_load_kernel(cpu[0], machine, &hisilicon_binfo);
     }
 }
@@ -2902,3 +4016,15 @@ DEFINE_HISI_MACHINE("gk7202v330", gk7202v330, gk7202v330_soc)
 DEFINE_HISI_MACHINE("hi3516cv608", hi3516cv608, hi3516cv608_soc)
 DEFINE_HISI_MACHINE("hi3516cv610", hi3516cv610, hi3516cv610_soc)
 DEFINE_HISI_MACHINE("hi3516cv613", hi3516cv613, hi3516cv613_soc)
+DEFINE_HISI_MACHINE("hi3536dv100", hi3536dv100, hi3536dv100_soc)
+DEFINE_HISI_MACHINE("hi3521a",     hi3521a,     hi3521a_soc)
+DEFINE_HISI_MACHINE("hi3531a",     hi3531a,     hi3531a_soc)
+DEFINE_HISI_MACHINE("hi3536",      hi3536,      hi3536_soc)
+DEFINE_HISI_MACHINE("hi3521dv100", hi3521dv100, hi3521dv100_soc)
+DEFINE_HISI_MACHINE("hi3520dv300", hi3520dv300, hi3520dv300_soc)
+DEFINE_HISI_MACHINE("hi3520dv400", hi3520dv400, hi3520dv400_soc)
+DEFINE_HISI_MACHINE("hi3531dv100", hi3531dv100, hi3531dv100_soc)
+DEFINE_HISI_MACHINE("hi3535",      hi3535,      hi3535_soc)
+DEFINE_HISI_MACHINE("hi3536cv100", hi3536cv100, hi3536cv100_soc)
+DEFINE_HISI_MACHINE("hi3798cv200", hi3798cv200, hi3798cv200_soc)
+DEFINE_HISI_MACHINE("hi3796mv100", hi3796mv100, hi3796mv100_soc)

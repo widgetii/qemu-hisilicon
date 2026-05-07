@@ -61,6 +61,7 @@ cp qemu/hw/i2c/hisi-f37.c          "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-gc2053.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-sp2305.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-mis2006.c      "$QEMU_DIR/hw/i2c/"
+cp qemu/hw/i2c/hisi-nvp6124b.c     "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-smartsens.c    "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-i2c-v1.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-i2c-dw.c       "$QEMU_DIR/hw/i2c/"
@@ -98,6 +99,10 @@ config HISILICON
     select I2C
     select HISI_I2C
     select CMSDK_APB_WATCHDOG
+    select AHCI_SYSBUS
+    select USB_EHCI_SYSBUS
+    select USB_OHCI_SYSBUS
+    select USB_XHCI_SYSBUS
 KCONFIG
     echo "  patched hw/arm/Kconfig"
 else
@@ -110,6 +115,16 @@ else
     else
         echo "  hw/arm/Kconfig already patched"
     fi
+    # DVR/NVR additions: HISI_GMAC + AHCI / USB EHCI/OHCI/XHCI sysbus.
+    for sym in HISI_GMAC AHCI_SYSBUS USB_EHCI_SYSBUS USB_OHCI_SYSBUS USB_XHCI_SYSBUS; do
+        if ! awk '/^config HISILICON$/,/^$/' "$QEMU_DIR/hw/arm/Kconfig" \
+                | grep -q "select $sym"; then
+            sed -i "/^config HISILICON$/,/^$/ {
+                /^    select CMSDK_APB_WATCHDOG$/ a\\    select $sym
+            }" "$QEMU_DIR/hw/arm/Kconfig"
+            echo "  hw/arm/Kconfig: added select $sym to HISILICON"
+        fi
+    done
 fi
 
 # hw/arm/meson.build
@@ -163,7 +178,16 @@ config HISI_GMAC
 KCONFIG
     echo "  patched hw/net/Kconfig"
 else
-    echo "  hw/net/Kconfig already patched"
+    if ! grep -q "config HISI_GMAC" "$QEMU_DIR/hw/net/Kconfig"; then
+        cat >> "$QEMU_DIR/hw/net/Kconfig" <<'KCONFIG'
+
+config HISI_GMAC
+    bool
+KCONFIG
+        echo "  hw/net/Kconfig: added HISI_GMAC"
+    else
+        echo "  hw/net/Kconfig already patched"
+    fi
 fi
 
 # hw/net/meson.build
@@ -197,7 +221,7 @@ fi
 
 # hw/i2c/meson.build
 if ! grep -q hisi-i2c "$QEMU_DIR/hw/i2c/meson.build"; then
-    echo "system_ss.add(when: 'CONFIG_HISI_I2C', if_true: files('hisi-i2c.c', 'hisi-i2c-v1.c', 'hisi-i2c-dw.c', 'hisi-imx335.c', 'hisi-imx307.c', 'hisi-imx291.c', 'hisi-imx385.c', 'hisi-imx415.c', 'hisi-f37.c', 'hisi-gc2053.c', 'hisi-sp2305.c', 'hisi-mis2006.c', 'hisi-smartsens.c'))" \
+    echo "system_ss.add(when: 'CONFIG_HISI_I2C', if_true: files('hisi-i2c.c', 'hisi-i2c-v1.c', 'hisi-i2c-dw.c', 'hisi-imx335.c', 'hisi-imx307.c', 'hisi-imx291.c', 'hisi-imx385.c', 'hisi-imx415.c', 'hisi-f37.c', 'hisi-gc2053.c', 'hisi-sp2305.c', 'hisi-mis2006.c', 'hisi-nvp6124b.c', 'hisi-smartsens.c'))" \
         >> "$QEMU_DIR/hw/i2c/meson.build"
     echo "  patched hw/i2c/meson.build"
 else
@@ -226,6 +250,11 @@ else
         sed -i "s/'hisi-imx385.c'/'hisi-imx385.c', 'hisi-imx415.c'/" \
             "$QEMU_DIR/hw/i2c/meson.build"
         echo "  hw/i2c/meson.build: added hisi-imx415.c"
+    fi
+    if ! grep -q hisi-nvp6124b "$QEMU_DIR/hw/i2c/meson.build"; then
+        sed -i "s/'hisi-mis2006.c'/'hisi-mis2006.c', 'hisi-nvp6124b.c'/" \
+            "$QEMU_DIR/hw/i2c/meson.build"
+        echo "  hw/i2c/meson.build: added hisi-nvp6124b.c"
     fi
 fi
 
@@ -266,12 +295,21 @@ else
 fi
 
 # ── 5. Build ────────────────────────────────────────────────────────────
-echo "Building QEMU (arm target)..."
+# arm-softmmu covers V1–V5 IPC and DVR/NVR (32-bit ARMv7-a / ARM926).
+# aarch64-softmmu adds Hi3798CV200 STB (Cortex-A53, ARMv8-a, 64-bit).
+echo "Building QEMU (arm + aarch64 targets)..."
 cd "$QEMU_DIR"
 mkdir -p build && cd build
-../configure --target-list=arm-softmmu --disable-docs
+# Reconfigure if the existing build was scoped to arm-softmmu only.
+if [ -f build.ninja ] && ! grep -q "aarch64-softmmu" config-host.mak 2>/dev/null; then
+    rm -f config-host.mak
+fi
+if [ ! -f config-host.mak ]; then
+    ../configure --target-list=arm-softmmu,aarch64-softmmu --disable-docs
+fi
 ninja -j$(nproc)
 
 echo ""
 echo "Done! Verify:"
-echo "  ./qemu-src/build/qemu-system-arm -machine help | grep hi3516"
+echo "  ./qemu-src/build/qemu-system-arm     -machine help | grep hi3516"
+echo "  ./qemu-src/build/qemu-system-aarch64 -machine help | grep hi3798"

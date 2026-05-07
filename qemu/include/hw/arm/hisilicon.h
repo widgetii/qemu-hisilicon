@@ -19,7 +19,7 @@
 
 /* Maximum peripheral counts */
 #define HISI_MAX_UARTS    5
-#define HISI_MAX_TIMERS   2
+#define HISI_MAX_TIMERS   4
 #define HISI_MAX_SPIS     4
 #define HISI_MAX_HIMCI    3
 #define HISI_MAX_SDHCI    2
@@ -80,6 +80,11 @@ typedef struct HisiSoCConfig {
     hwaddr          gic_dist_base;  /* GICv2, when use_gic */
     hwaddr          gic_cpu_base;
     int             gic_num_spi;
+    /* Cortex-A9 family: use combined a9mpcore_priv (SCU + GIC + gtimer +
+     * mptimer + wdt at MPCORE_PERIPHBASE+0x000/0x100/0x200/0x600/0x1000).
+     * When set, gic_dist_base / gic_cpu_base are ignored.  Plain GIC is
+     * used otherwise (A7-family pattern). */
+    hwaddr          gic_mpcore_base; /* 0 = plain GIC */
 
     /* System controller + CRG */
     hwaddr          sysctl_base;
@@ -139,9 +144,13 @@ typedef struct HisiSoCConfig {
      */
     struct { hwaddr base; int irq; } gpio_extras[HISI_MAX_GPIO_EXTRAS];
 
-    /* DMA (PL080) */
+    /* DMA (PL080 by default; "hisi-regbank" stubs the DVR/NVR HiSilicon DW
+     * DMAC instead, since a PL080 at the same address responds with PL080
+     * PrimeCell IDs that the vendor hisi-dmac driver rejects, then probes
+     * forever).  NULL = "pl080". */
     hwaddr          dma_base;       /* 0 = no DMA controller */
     int             dma_irq;
+    const char     *dma_type;       /* NULL = "pl080", or "hisi-regbank" */
 
     /* FEMAC (Fast Ethernet MAC) */
     hwaddr          femac_base;     /* 0 = no FEMAC */
@@ -188,6 +197,30 @@ typedef struct HisiSoCConfig {
     /* Hardware GZIP decompressor */
     hwaddr          gzip_base;      /* 0 = no GZIP engine */
 
+    /* SATA AHCI controller (sysbus-ahci) — DVR/NVR family.
+     * Vendor SATA module busy-loops if the controller is absent; even a
+     * stub regbank is insufficient because libahci probes CAP/PI/HBAR. */
+    hwaddr          sata_base;      /* 0 = no SATA */
+    int             sata_irq;
+    int             sata_num_ports; /* 0 = 1 port (default) */
+
+    /* USB host (sysbus-EHCI + sysbus-OHCI) — DVR/NVR family.
+     * Stub-OK: with no devices attached, the kernel cleanly probes and
+     * reports an empty bus.  Required because vendor usb_storage / mass-
+     * storage modules autoload and busy-loop on a missing controller. */
+    hwaddr          usb_ehci_base;  /* 0 = no EHCI */
+    int             usb_ehci_irq;
+    hwaddr          usb_ohci_base;  /* 0 = no OHCI */
+    int             usb_ohci_irq;
+
+    /* USB 3.0 XHCI (sysbus-XHCI) — declared but currently unused.  Will be
+     * populated in Phase 3 for Hi3531A / Hi3535 / Hi3536-flagship which
+     * expose XHCI. */
+    hwaddr          xhci_base;      /* 0 = no XHCI */
+    int             xhci_irq;
+    int             xhci_slots;     /* 0 = default 4 */
+    int             xhci_intrs;     /* 0 = default 1 */
+
     /* Hardware True Random Number Generator
      * (HISEC_TRNG_CTRL on V3+, RNG_GEN on V2) */
     hwaddr          hwrng_base;        /* 0 = no HWRNG on this SoC */
@@ -203,6 +236,18 @@ typedef struct HisiSoCConfig {
 
     /* CPU soft-reset register offset in CRG (for SMP bringup) */
     uint32_t        cpu_srst_offset; /* 0 = disabled, e.g. 0x78 for CV500 */
+
+    /* ATAGs board ID (machine_arch_type) for non-DT boots.  0 = unset; the
+     * kernel uses DT compatible string instead (preferred for V3+ SoCs).
+     * Required for older Linux 3.10 board-config kernels (e.g. Hi3536). */
+    uint32_t        board_id;
+
+    /* PSCI conduit: 0 = DISABLED (V1–V5 IPC + DVR/NVR), or set to a non-zero
+     * value to indicate ARMv8 STB family (Hi3798CV200) which uses PSCI/SMC
+     * for SMP bringup.  When set, the upstream "smpboot" stub at 0x0 is
+     * suppressed (it would collide with the bootloader stub) and secondary
+     * CPUs are released by PSCI calls into QEMU's SMC handler. */
+    int             psci_conduit;
 
     /* CRG register defaults (mimics U-Boot clock init before kernel boot) */
     int             num_crg_defaults;
@@ -243,6 +288,24 @@ typedef struct HisiSoCConfig {
 #define HISI_SOC_ID_19V101      0x35190101
 /* AV200 shares 19V101's family ID; sub-variant byte 5/6/0x15/0x16
  * in SCSYSID0 distinguishes 3516AV200 from 3519V101 (0/1/2/0x11/0x12). */
+
+/* DVR/NVR family — surveillance back-end SoCs (separate product line from IPC).
+ * Word-layout SCSYSID0, same encoding as V4 IPC.  Hi3536DV100 / Hi3536CV100 /
+ * Hi3521V100 confirmed against ipctool's hal_hisi.c chip-id table; Hi3531A
+ * value is a placeholder (vendor SDK does not read SCSYSID for boot). */
+#define HISI_SOC_ID_3536DV100   0x3536D100
+#define HISI_SOC_ID_3536CV100   0x3536C100
+#define HISI_SOC_ID_3520DV200   0x3520D100  /* yes, V200 reports 0x3520D100 */
+#define HISI_SOC_ID_3521V100    0x35210100
+#define HISI_SOC_ID_3531A       0x35310100  /* placeholder; verify on hardware */
+#define HISI_SOC_ID_3536        0x35360100  /* Hi3536 flagship; placeholder */
+#define HISI_SOC_ID_3521DV100   0x3521D100  /* placeholder; H.265 dual A7 sibling of Hi3521A */
+#define HISI_SOC_ID_3520DV300   0x3520D300  /* placeholder; A7 sibling of Hi3521A */
+#define HISI_SOC_ID_3520DV400   0x3520D400  /* placeholder; A7 1.3GHz H.265 single */
+#define HISI_SOC_ID_3531DV100   0x3531D100  /* placeholder; A9 H.265 sibling of Hi3531A */
+#define HISI_SOC_ID_3535        0x35350100  /* placeholder; A9 dual NVR-only */
+#define HISI_SOC_ID_3798CV200   0x3798C200  /* Hi3798CV200 STB; placeholder */
+#define HISI_SOC_ID_3796MV100   0x3796D100  /* Hi3796M V100 STB; placeholder */
 
 /*
  * V5 generation (Cortex-A7 MP2 + GIC, new 0x11xxxxxx address map, ~2023)
