@@ -2675,47 +2675,57 @@ static const HisiSoCConfig hi3798cv200_soc = {
 };
 
 /*
- * Hi3796M V100 (STB family): 2015, Cortex-A7 quad @ 1.5 GHz, ARMv7-a.
- * DVB-S2/-C/-T2 STB, Mali-450, H.265 dec to 4Kp30.  Vendor SDK ships
- * Linux 3.10 (HiSTBLinuxV100R003C00SPC062) — same boot-time hang as
- * Hi3536 flagship and Hi3535.  Architecture-only registration; boot
- * deferred to a future Linux 4.x backport.
+ * Hi3796M V100 (HiSTB family): 2015, Cortex-A7 quad @ 1.5 GHz, ARMv7-a.
+ * DVB-S2/-C/-T2 STB, Mali-450, H.265 dec to 4Kp30.  Phase 4.6 backport:
+ * minimal Linux 4.9 board port to RichStrong tree (mach-hi3796mv100,
+ * hi3796mv100.dtsi with fixed-rate clocks for UART/timer — no HiSTB
+ * clock controller driver yet).
  *
- * Hi3796M shares the HiSTB peripheral scheme with Hi3798CV200, but the
- * exact peripheral addresses for the V100 die are not in upstream Linux
- * (only the V200 64-bit variant has DT support).
+ * Memory map confirmed against vendor `arch/arm/mach-hifone/include/mach/
+ * platform.h` (Hi3796M shares the "hifone" mach with Hi3798M and other
+ * HiSTB SoCs).  Single-CPU boot; quad SMP requires HiSTB power-mgmt
+ * code (mach-hifone/hipm.c) which is not ported.
  */
 static const HisiSoCConfig hi3796mv100_soc = {
     .name               = "hi3796mv100",
     .desc               = "HiSilicon Hi3796M V100 (Cortex-A7 quad, HiSTB)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_3796MV100,
-    .max_cpus           = 1,                /* boot single-CPU; vendor 3.10 hangs anyway */
+    .max_cpus           = 1,
     .default_sensor     = NULL,
 
     .ram_size_default   = 1 * GiB,
     .kernel_mem_mb      = 0,
     .extra_cmdline      = NULL,
 
-    .ram_base           = 0x0,              /* HiSTB family puts DDR at 0 */
+    /* HiSTB family: DDR base 0x0; uImage load addr 0x00008000 */
+    .ram_base           = 0x0,
     .sram_base          = 0,
     .sram_size          = 0,
 
     .use_gic            = true,
-    /* GIC at HiSTB peripheral block (placeholder; verify against Hi3796M
-     * vendor mach when boot-to-shell is pursued). */
+    /* GIC-400 at 0xf1000000 per vendor REG_BASE_GIC_REG; dist @+0x1000,
+     * cpu @+0x2000 (8KB window).  Non-overlapping → plain GIC works. */
     .gic_dist_base      = 0xf1001000,
     .gic_cpu_base       = 0xf1002000,
     .gic_num_spi        = 128,
 
+    /* HiSTB sysctrl/CRG layout differs from V1–V5 model — leave 0 to skip */
     .sysctl_base        = 0,
     .crg_base           = 0,
 
+    /* PL011 UART0 at 0xf8b00000 (HiSTB AMBA cluster), GIC SPI 6 per DT */
     .num_uarts          = 1,
-    .uart_bases         = { 0xf8b00000 },   /* HiSTB UART0 (placeholder) */
-    .uart_irqs          = { 49 },
+    .uart_bases         = { 0xf8b00000 },
+    .uart_irqs          = { 6 },
 
-    .num_timers         = 0,
+    /* SP804 dual-timer at 0xf8002000 (HiSTB TIMER01), GIC SPI 1.
+     * Vendor REG_BASE_TIMER01 = 0xf8002000.  At 50 MHz fixed clock the
+     * kernel calibrates BogoMIPS in seconds. */
+    .num_timers         = 1,
+    .timer_bases        = { 0xf8002000 },
+    .timer_irqs         = { 1 },
+    .timer_freq         = 50000000,
 
     .num_spis           = 0,
     .fmc_ctrl_base      = 0,
