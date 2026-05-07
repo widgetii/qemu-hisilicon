@@ -202,6 +202,12 @@ jobs:
             machine: hi3516av100
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
+            uboot_bin: u-boot-hi3516av100-universal.bin
+            # AV100 (V2A) shares CV100's HISFC350 flash controller — must
+            # set the flash-file global on hisi-sfc350, NOT hisi-fmc.
+            # See openhisilicon#59 (the issue's repro used the wrong
+            # device prefix and got 0x20-padding output).
+            flash_type: hisi-sfc350
 
           - name: hi3516cv300
             soc: hi3516cv300
