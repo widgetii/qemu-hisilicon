@@ -234,6 +234,25 @@ jobs:
 
           # hi3516cv610 (V5) excluded: no OpenIPC firmware release yet
 
+          # NVR/DVR family — OpenIPC ships nor-lite firmware for 3 SoCs:
+          #   hi3520dv200, hi3536cv100, hi3536dv100.
+          # The latter two boot cleanly with the same -kernel/-initrd path
+          # used for IPC.  hi3520dv200 ships a Linux 3.0.8 build that
+          # exhibits the PL011-disabled-UART silent-hang same as Hi3536
+          # flagship / Hi3535 vendor 3.x kernels — excluded from CI until
+          # OpenIPC's linux fork moves to a newer kernel for that SoC
+          # (locally unblocked via the Linux 4.9 backport in
+          # reference_phase4_7_hi3520dv200.md).
+          - name: hi3536cv100
+            soc: hi3536cv100
+            machine: hi3536cv100
+            append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs"
+
+          - name: hi3536dv100
+            soc: hi3536dv100
+            machine: hi3536dv100
+            append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs"
+
     continue-on-error: ${{ matrix.allow_failure == true }}
 
     steps:
