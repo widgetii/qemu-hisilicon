@@ -221,6 +221,22 @@ typedef struct HisiSoCConfig {
     int             xhci_slots;     /* 0 = default 4 */
     int             xhci_intrs;     /* 0 = default 1 */
 
+    /* HiSilicon HIL2V200 L2 cache controller — used by Hi3520D family
+     * (CONFIG_CACHE_HIL2V200).  Vendor 3.0.x driver hangs in early init
+     * polling REG_L2_RINT.AUTO_END after writing maintenance ops.  The
+     * `hisi-l2cache` model latches AUTO_END on every maintenance write
+     * so the spin-wait completes immediately. */
+    hwaddr          l2cache_base;   /* 0 = no L2 cache controller */
+
+    /* PL011 UARTEN pre-enable — set true when the SoC ships vendor Linux
+     * 3.0/3.4/3.10 kernels that rely on U-Boot to set UARTCR before
+     * jumping to the kernel.  Real boards' U-Boot writes UARTCR=0x301
+     * (UARTEN | TXE | RXE).  Without this, those kernels write to UART
+     * with UARTEN clear and we see "PL011 data written to disabled UART"
+     * with no console output.  Linux 3.18+ and 4.9 don't need this — the
+     * PL011 driver's startup path sets UARTCR itself. */
+    bool            uart_pre_enable;
+
     /* Hardware True Random Number Generator
      * (HISEC_TRNG_CTRL on V3+, RNG_GEN on V2) */
     hwaddr          hwrng_base;        /* 0 = no HWRNG on this SoC */

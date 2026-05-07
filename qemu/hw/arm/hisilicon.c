@@ -2267,6 +2267,14 @@ static const HisiSoCConfig hi3520dv200_soc = {
     .rtc_base           = 0x20060000,
     .rtc_irq            = 0,
 
+    /* HiSilicon HIL2V200 L2 cache controller — vendor 3.0.x kernel hangs
+     * in l2cache_driver_init without this (openhisilicon#66). */
+    .l2cache_base       = 0x20700000,
+
+    /* PL011 UARTEN pre-enable — vendor 3.0.8 kernel writes to UARTDR
+     * before initialising UARTCR (relies on U-Boot to set CR=0x301). */
+    .uart_pre_enable    = true,
+
     /* CRG default register state — vendor get_bus_clk() reads CRG0 + CRG1
      * + A9_AXI_SCALE_REG to compute busclk = (24 MHz / refdiv * fbdiv) / 2.
      * With our regbank reads returning 0 the kernel divides by zero and
@@ -3326,6 +3334,38 @@ static void hisilicon_create_pl061(MemoryRegion *sysmem, hwaddr base,
     }
 }
 
+/* PL011 UARTCR = UARTEN | TXE | RXE: stamps every PL011 in the SoC config
+ * after device-level reset, which would otherwise zero UARTEN.  Lets vendor
+ * Linux 3.0/3.4/3.10 kernels print to console without a U-Boot stage that
+ * normally programs UARTCR before kernel handoff. */
+typedef struct {
+    Notifier notifier;
+    const HisiSoCConfig *c;
+} HisiUartPreEnableNotifier;
+
+static void hisi_uart_pre_enable_done(Notifier *n, void *opaque)
+{
+    HisiUartPreEnableNotifier *nf = container_of(n, HisiUartPreEnableNotifier,
+                                                 notifier);
+    const HisiSoCConfig *c = nf->c;
+    int i;
+
+    for (i = 0; i < c->num_uarts; i++) {
+        address_space_stl(&address_space_memory,
+                          c->uart_bases[i] + 0x30,
+                          0x301,    /* UARTCR = UARTEN | TXE | RXE */
+                          MEMTXATTRS_UNSPECIFIED, NULL);
+    }
+}
+
+static void hisi_register_uart_pre_enable_reset(const HisiSoCConfig *c)
+{
+    HisiUartPreEnableNotifier *nf = g_new0(HisiUartPreEnableNotifier, 1);
+    nf->notifier.notify = hisi_uart_pre_enable_done;
+    nf->c = c;
+    qemu_add_machine_init_done_notifier(&nf->notifier);
+}
+
 static void hisilicon_common_init(MachineState *machine,
                                   const HisiSoCConfig *c)
 {
@@ -3543,6 +3583,16 @@ static void hisilicon_common_init(MachineState *machine,
             continue;   /* UART0 PL011 created later by fastboot device */
         }
         pl011_create(c->uart_bases[n], pic[c->uart_irqs[n]], serial_hd(n));
+    }
+    /* Post-reset PL011 enable: writes UARTCR = UARTEN|TXE|RXE on the same
+     * path U-Boot would on real silicon.  Required by SoCs whose vendor
+     * Linux 3.0/3.4/3.10 PL011 driver writes to UARTDR before
+     * initialising UARTCR (Hi3520DV200, Hi3535, Hi3536 flagship);
+     * harmless elsewhere because newer drivers re-write CR during their
+     * startup path.  Registered as a qemu reset handler so the write
+     * lands AFTER PL011's own reset (which zeros UARTEN). */
+    if (c->uart_pre_enable) {
+        hisi_register_uart_pre_enable_reset(c);
     }
 
     /* Timers (SP804) */
@@ -3798,6 +3848,18 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, c->xhci_base);
         sysbus_connect_irq(busdev, 0, pic[c->xhci_irq]);
+    }
+
+    /* HiSilicon HIL2V200 L2 cache controller — Hi3520D family.
+     * Required by vendor 3.0.x kernel's drivers/arm/mm/cache-hil2v200.c
+     * which polls REG_L2_RINT.AUTO_END after every maintenance op; a
+     * regbank stub returns 0 forever and the kernel hangs in
+     * l2cache_driver_init.  See openhisilicon#66. */
+    if (c->l2cache_base) {
+        DeviceState *l2 = qdev_new("hisi-l2cache");
+        SysBusDevice *busdev = SYS_BUS_DEVICE(l2);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->l2cache_base);
     }
 
     /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */
