@@ -2200,6 +2200,88 @@ static const HisiSoCConfig hi3521dv100_soc = {
 };
 
 /*
+ * Hi3520DV200 (DVR/NVR family, legacy): 2013, single Cortex-A9 @ ~660 MHz,
+ * H.264 only.  V1-era 0x20xxxxxx peripheral address scheme.  Vendor SDK
+ * ships Linux 3.0.8.  OpenIPC firmware
+ * (https://github.com/OpenIPC/firmware) ships a Linux 3.0.8-built uImage
+ * for this SoC — we boot that directly via `-M hi3520dv200`.
+ *
+ * Memory map confirmed against OpenIPC linux fork
+ * (`hisilicon-hi3520dv200` branch, `arch/arm/mach-hi3520d/include/mach/
+ * platform.h`).  A9 mpcore at ARM_INTNL_BASE = 0x20300000 (SCU @+0x000,
+ * GIC cpu @+0x100, GIC dist @+0x1000) — same overlap pattern as Hi3531A,
+ * a9mpcore_priv handles it.
+ */
+static const HisiSoCConfig hi3520dv200_soc = {
+    .name               = "hi3520dv200",
+    .desc               = "HiSilicon Hi3520DV200 (Cortex-A9, single, H.264 DVR)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a9"),
+    .soc_id             = HISI_SOC_ID_3520DV200,
+    .max_cpus           = 1,
+    .default_sensor     = NULL,
+    /* MACH_TYPE_HI3520D = 8000 — vendor 3.0.8 + OpenIPC kernel use ATAGs
+     * MACHINE_START "hi3520d" without DT, so the ATAGs board ID matters. */
+    .board_id           = 8000,
+
+    .ram_size_default   = 256 * MiB,
+    .kernel_mem_mb      = 0,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 16 * KiB,
+
+    .use_gic            = true,
+    /* A9 mpcore peripheral block at 0x20300000 (size 0x2000) covers SCU
+     * (+0x000), GIC cpu (+0x100), GIC dist (+0x1000).  Use a9mpcore_priv
+     * to keep these in one container (they overlap as separate sysbus
+     * regions). */
+    .gic_mpcore_base    = 0x20300000,
+    .gic_num_spi        = 96,               /* HI3520D_IRQ_START + 96 = NR_IRQS */
+
+    .sysctl_base        = 0x20050000,
+    .crg_base           = 0x20030000,
+
+    /* PL011 UART0 at 0x20080000 GIC SPI 8.  Vendor mach registers UART0
+     * + UART1; OpenIPC inittab uses /dev/console which Linux maps to the
+     * cmdline-specified console=ttyAMA0. */
+    .num_uarts          = 2,
+    .uart_bases         = { 0x20080000, 0x20090000 },
+    .uart_irqs          = { 8, 9 },
+
+    /* SP804 dual-timer at 0x20000000 / 0x20010000 IRQs 3/4 (TIMER01/23
+     * per vendor irqs.h).  Vendor formula: timer_clk_hz = busclk / 4 with
+     * busclk = 396 MHz from CRG defaults below → 99 MHz timer rate. */
+    .num_timers         = 2,
+    .timer_bases        = { 0x20000000, 0x20010000 },
+    .timer_irqs         = { 3, 4 },
+    .timer_freq         = 99000000,
+
+    .num_spis           = 0,
+    .fmc_ctrl_base      = 0,
+
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x200d0000 },
+    .i2c_type           = "hisi-i2c",       /* CV100-class HiBVT */
+
+    .rtc_base           = 0x20060000,
+    .rtc_irq            = 0,
+
+    /* CRG default register state — vendor get_bus_clk() reads CRG0 + CRG1
+     * + A9_AXI_SCALE_REG to compute busclk = (24 MHz / refdiv * fbdiv) / 2.
+     * With our regbank reads returning 0 the kernel divides by zero and
+     * sets timer_clk_hz to garbage → "Timer with delta zero, disabling".
+     * Seed: refdiv=1, fbdiv=33, pstdiv1=1, pstdiv2=1, A9 scale bits=0xc
+     * → foutvco = 24*33 = 792 MHz; busclk = 396 MHz. */
+    .num_crg_defaults   = 3,
+    .crg_defaults       = {
+        { 0x00, 0x09000000 },               /* CRG0: pstdiv1=1 / pstdiv2=1 */
+        { 0x04, 0x00001021 },               /* CRG1: refdiv=1 / fbdiv=33 */
+        { 0x28, 0x0000000c },               /* A9_AXI_SCALE_REG */
+    },
+};
+
+/*
  * Hi3520DV300 (DVR/NVR family): 2016, single Cortex-A7 @ 800 MHz, H.264.
  * Per LKML hint, shares ARCH_HI3521A in the kernel — peripheral layout is
  * the same as Hi3521A, just lower clock.  Treat as Hi3521A clone with
@@ -4033,6 +4115,7 @@ DEFINE_HISI_MACHINE("hi3521a",     hi3521a,     hi3521a_soc)
 DEFINE_HISI_MACHINE("hi3531a",     hi3531a,     hi3531a_soc)
 DEFINE_HISI_MACHINE("hi3536",      hi3536,      hi3536_soc)
 DEFINE_HISI_MACHINE("hi3521dv100", hi3521dv100, hi3521dv100_soc)
+DEFINE_HISI_MACHINE("hi3520dv200", hi3520dv200, hi3520dv200_soc)
 DEFINE_HISI_MACHINE("hi3520dv300", hi3520dv300, hi3520dv300_soc)
 DEFINE_HISI_MACHINE("hi3520dv400", hi3520dv400, hi3520dv400_soc)
 DEFINE_HISI_MACHINE("hi3531dv100", hi3531dv100, hi3531dv100_soc)
