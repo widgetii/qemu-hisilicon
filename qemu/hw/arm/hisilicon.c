@@ -2275,6 +2275,11 @@ static const HisiSoCConfig hi3520dv200_soc = {
      * before initialising UARTCR (relies on U-Boot to set CR=0x301). */
     .uart_pre_enable    = true,
 
+    /* HiSilicon SF Ethernet (drivers/net/hieth-sf/) — vendor 3.0.x
+     * kernel hangs in hieth_init (sys-hi3520d.c set_phy_valtage busy
+     * waits on MDIO_RWCTRL bit 15) without this (openhisilicon#68). */
+    .hieth_sf_base      = 0x10090000,
+
     /* CRG default register state — vendor get_bus_clk() reads CRG0 + CRG1
      * + A9_AXI_SCALE_REG to compute busclk = (24 MHz / refdiv * fbdiv) / 2.
      * With our regbank reads returning 0 the kernel divides by zero and
@@ -3860,6 +3865,19 @@ static void hisilicon_common_init(MachineState *machine,
         SysBusDevice *busdev = SYS_BUS_DEVICE(l2);
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, c->l2cache_base);
+    }
+
+    /* HiSilicon SF (single-FIFO) Ethernet controller — Hi3520D family.
+     * Vendor 3.0.x drivers/net/hieth-sf/sys-hi3520d.c set_phy_valtage()
+     * busy-loops with no timeout on MDIO_RWCTRL bit 15.  This stub
+     * latches that bit on writes and returns 0xFFFF on PHY-data reads
+     * so autoscan finds nothing and the probe exits with -ENODEV.  See
+     * openhisilicon#68. */
+    if (c->hieth_sf_base) {
+        DeviceState *eth = qdev_new("hisi-hieth-sf");
+        SysBusDevice *busdev = SYS_BUS_DEVICE(eth);
+        sysbus_realize_and_unref(busdev, &error_fatal);
+        sysbus_mmio_map(busdev, 0, c->hieth_sf_base);
     }
 
     /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */

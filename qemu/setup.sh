@@ -52,6 +52,7 @@ cp qemu/hw/misc/hisi-gzip.c        "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-l2cache.c     "$QEMU_DIR/hw/misc/"
 cp qemu/hw/net/hisi-femac.c         "$QEMU_DIR/hw/net/"
 cp qemu/hw/net/hisi-gmac.c          "$QEMU_DIR/hw/net/"
+cp qemu/hw/net/hisi-hieth-sf.c      "$QEMU_DIR/hw/net/"
 cp qemu/hw/i2c/hisi-i2c.c          "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-imx335.c       "$QEMU_DIR/hw/i2c/"
 cp qemu/hw/i2c/hisi-imx307.c       "$QEMU_DIR/hw/i2c/"
@@ -97,6 +98,7 @@ config HISILICON
     select HISI_MISC
     select HISI_FEMAC
     select HISI_GMAC
+    select HISI_HIETH_SF
     select I2C
     select HISI_I2C
     select CMSDK_APB_WATCHDOG
@@ -116,8 +118,8 @@ else
     else
         echo "  hw/arm/Kconfig already patched"
     fi
-    # DVR/NVR additions: HISI_GMAC + AHCI / USB EHCI/OHCI/XHCI sysbus.
-    for sym in HISI_GMAC AHCI_SYSBUS USB_EHCI_SYSBUS USB_OHCI_SYSBUS USB_XHCI_SYSBUS; do
+    # DVR/NVR additions: HISI_GMAC + HISI_HIETH_SF + AHCI / USB sysbus.
+    for sym in HISI_GMAC HISI_HIETH_SF AHCI_SYSBUS USB_EHCI_SYSBUS USB_OHCI_SYSBUS USB_XHCI_SYSBUS; do
         if ! awk '/^config HISILICON$/,/^$/' "$QEMU_DIR/hw/arm/Kconfig" \
                 | grep -q "select $sym"; then
             sed -i "/^config HISILICON$/,/^$/ {
@@ -181,6 +183,9 @@ config HISI_FEMAC
 
 config HISI_GMAC
     bool
+
+config HISI_HIETH_SF
+    bool
 KCONFIG
     echo "  patched hw/net/Kconfig"
 else
@@ -191,8 +196,14 @@ config HISI_GMAC
     bool
 KCONFIG
         echo "  hw/net/Kconfig: added HISI_GMAC"
-    else
-        echo "  hw/net/Kconfig already patched"
+    fi
+    if ! grep -q "config HISI_HIETH_SF" "$QEMU_DIR/hw/net/Kconfig"; then
+        cat >> "$QEMU_DIR/hw/net/Kconfig" <<'KCONFIG'
+
+config HISI_HIETH_SF
+    bool
+KCONFIG
+        echo "  hw/net/Kconfig: added HISI_HIETH_SF"
     fi
 fi
 
@@ -210,6 +221,13 @@ if ! grep -q hisi-gmac "$QEMU_DIR/hw/net/meson.build"; then
     echo "  patched hw/net/meson.build (gmac)"
 else
     echo "  hw/net/meson.build already has gmac"
+fi
+if ! grep -q hisi-hieth-sf "$QEMU_DIR/hw/net/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_HISI_HIETH_SF', if_true: files('hisi-hieth-sf.c'))" \
+        >> "$QEMU_DIR/hw/net/meson.build"
+    echo "  patched hw/net/meson.build (hieth-sf)"
+else
+    echo "  hw/net/meson.build already has hieth-sf"
 fi
 
 # hw/i2c/Kconfig

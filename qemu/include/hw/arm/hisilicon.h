@@ -237,6 +237,16 @@ typedef struct HisiSoCConfig {
      * PL011 driver's startup path sets UARTCR itself. */
     bool            uart_pre_enable;
 
+    /* HiSilicon SF (single-FIFO) Ethernet controller — used by Hi3520D
+     * family and other vendor 3.0/3.4 kernels via drivers/net/hieth-sf/.
+     * The vendor sys-hi3520d.c set_phy_valtage() / revise_led_shine()
+     * busy-wait on MDIO_RWCTRL bit 15 with no timeout; a regbank stub
+     * spins forever.  The `hisi-hieth-sf` model latches that bit on
+     * MDIO_RWCTRL writes so the polling loop exits, and returns 0xFFFF
+     * for MDIO_RO_DATA so PHY autoscan finds nothing and the probe
+     * fails gracefully (no DMA-ring init).  No NIC packet path. */
+    hwaddr          hieth_sf_base; /* 0 = no HiSilicon SF Ethernet */
+
     /* Hardware True Random Number Generator
      * (HISEC_TRNG_CTRL on V3+, RNG_GEN on V2) */
     hwaddr          hwrng_base;        /* 0 = no HWRNG on this SoC */
