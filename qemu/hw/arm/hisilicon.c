@@ -2461,9 +2461,11 @@ static const HisiSoCConfig hi3535_soc = {
     .kernel_mem_mb      = 0,
     .extra_cmdline      = NULL,
 
-    /* DDR base 0x80000000 confirmed by uImage load addr — different from
-     * Hi3531A (0x40000000).  Hi3535 is the earlier-gen NVR-only variant. */
-    .ram_base           = 0x80000000,
+    /* Vendor 3.4 uImage loads at 0x80008000 (DDR base 0x80000000), but
+     * that kernel hangs in QEMU.  Phase 4.5 uses a Hi3531A-built Linux
+     * 4.9 kernel (same A9 + a9mpcore_priv + identical peripherals) which
+     * was compiled with PHYS_OFFSET = 0x40000000.  Match the kernel. */
+    .ram_base           = 0x40000000,
     .sram_base          = 0x04010000,
     .sram_size          = 16 * KiB,         /* BDS says 10 KiB SRAM */
 
