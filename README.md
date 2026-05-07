@@ -1,10 +1,16 @@
-# QEMU HiSilicon IP Camera SoC Emulator
+# QEMU HiSilicon SoC Emulator (IPC + DVR/NVR + STB)
 
-QEMU machine definitions for HiSilicon IP camera SoCs (V1 through V5 generations),
+QEMU machine definitions for the HiSilicon surveillance and STB SoC lineup,
 targeting QEMU v10.2.0. Boots unmodified [OpenIPC](https://openipc.org/) firmware
-to a full Linux userspace on all supported platforms.
+and vendor SDK kernels to a full Linux userspace on all supported platforms.
 
-## Supported Machines (17 total)
+Builds two QEMU targets:
+- `qemu-system-arm` — 23 IPC + 12 DVR/NVR + 1 STB (ARMv7-A)
+- `qemu-system-aarch64` — 1 STB (ARMv8-A, Hi3798CV200 Cortex-A53)
+
+## Supported Machines (35 total)
+
+### IPC family — V1 through V5 (`qemu-system-arm`)
 
 | Machine | Generation | CPU | IRQ | Kernel | Boot tested |
 |---------|-----------|-----|-----|--------|-------------|
@@ -25,6 +31,32 @@ to a full Linux userspace on all supported platforms.
 | `hi3516cv608` | V5 | Cortex-A7 MP2 | GIC | 5.10 | — |
 | `hi3516cv610` | **V5** | Cortex-A7 MP2 | GIC | **5.10** | yes |
 | `hi3516cv613` | V5 | Cortex-A7 MP2 | GIC | 5.10 | — |
+
+### DVR/NVR family — surveillance back-end SoCs (`qemu-system-arm`)
+
+| Machine | CPU | Kernel | Boot tested | Notes |
+|---------|-----|--------|-------------|-------|
+| `hi3520dv200` | Cortex-A9 | 4.9.37 backported from vendor 3.0 | yes | V1-era 0x20xxxxxx layout, 2013 legacy DVR |
+| `hi3520dv300` | Cortex-A7 | 4.9.37 (Hi3521A artifact reuse) | yes | shares Hi3521A SDK base per LKML |
+| `hi3520dv400` | Cortex-A7 | 3.18.20 vendor | yes | H.265 single, mobile DVR |
+| `hi3521a` | Cortex-A7 | 4.9.37 from RichStrong | yes | hybrid DVR/NVR + NVP6124B I2C-stub |
+| `hi3521dv100` | Cortex-A7 | 3.18.20 vendor | yes | H.265 dual-A7 sibling of Hi3521A |
+| `hi3531a` | Cortex-A9 | 4.9.37 from RichStrong | yes | first A9 SMP-class (a9mpcore_priv) + XHCI |
+| `hi3531dv100` | Cortex-A9 | 3.18.20 vendor | yes | H.265 sibling of Hi3531A |
+| `hi3535` | Cortex-A9 | 4.9.37 (Hi3531A artifact reuse) | yes | A9 dual NVR-only, 2× GbE stub |
+| `hi3536` | Cortex-A17 (a15) | 4.9.37 backported from vendor 3.10 | yes | flagship — quad A17 + A7 video coproc |
+| `hi3536cv100` | Cortex-A7 | 3.18.20 vendor | yes | A7 dual entry-4K NVR |
+| `hi3536dv100` | Cortex-A7 | 4.9.37 from RichStrong | yes | first DVR/NVR-class machine added |
+
+### STB family
+
+| Machine | Target | CPU | Kernel | Boot tested |
+|---------|--------|-----|--------|-------------|
+| `hi3796mv100` | `qemu-system-arm` | Cortex-A7 quad | 4.9.37 backported from vendor 3.10 (HiSTB) | yes |
+| `hi3798cv200` | `qemu-system-aarch64` | **Cortex-A53 quad** (ARMv8) | mainline Linux 7.1 + Poplar DT | yes |
+
+All 35 machines build; **35/35 boot to a shell prompt** with kernels
+and rootfs artifacts staged in `qemu-boot/run-<machine>.sh`.
 
 ### V5 Model Suffix → Chip ID Mapping
 
@@ -70,7 +102,7 @@ IVE = Intelligent Video Engine with 18 operations validated against real IVE sil
 
 ```
 qemu/
-├── hw/arm/hisilicon.c           # Machine definitions (all 17 SoCs)
+├── hw/arm/hisilicon.c           # Machine definitions (all 35 SoCs)
 ├── hw/misc/hisi-sysctl.c        # SysCtrl (SoC ID, reset, general registers)
 ├── hw/misc/hisi-crg.c           # CRG clock/reset stub
 ├── hw/misc/hisi-fmc.c           # HiFMC V100 flash controller (CV200+, flash-file for dumps)
