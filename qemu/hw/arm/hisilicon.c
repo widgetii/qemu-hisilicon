@@ -1146,6 +1146,13 @@ static const HisiSoCConfig hi3516ev200_soc = {
     .wdt_base           = 0x12030000,
     .wdt_irq            = 2,
     .wdt_freq           = 3000000,
+
+    /* HiSilicon HW gzip decompressor — same V4 IP / address as ev300.
+     * U-Boot's u-boot-z.bin uses it during early boot; without it the
+     * vendor lib/hw_dec/hw_decompress_hi3516ev200.c times out with
+     * "Uncompress hardware decompress overtime!" before reaching the
+     * U-Boot banner.  See openhisilicon#60. */
+    .gzip_base          = 0x11310000,
 };
 
 /*
@@ -1227,6 +1234,13 @@ static const HisiSoCConfig hi3518ev300_soc = {
     .wdt_base           = 0x12030000,
     .wdt_irq            = 2,
     .wdt_freq           = 3000000,
+
+    /* HiSilicon HW gzip decompressor — same V4 IP / address as ev300.
+     * U-Boot's u-boot-z.bin uses it during early boot; without it the
+     * vendor lib/hw_dec/hw_decompress_hi3518ev300.c times out with
+     * "Uncompress hardware decompress overtime!" before reaching the
+     * U-Boot banner.  See openhisilicon#60. */
+    .gzip_base          = 0x11310000,
 };
 
 /*
@@ -1305,6 +1319,13 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .wdt_base           = 0x12030000,
     .wdt_irq            = 2,
     .wdt_freq           = 3000000,
+
+    /* HiSilicon HW gzip decompressor — same V4 IP / address as ev300.
+     * U-Boot's u-boot-z.bin uses it during early boot; without it the
+     * vendor lib/hw_dec/hw_decompress_hi3516dv200.c times out with
+     * "Uncompress hardware decompress overtime!" before reaching the
+     * U-Boot banner.  See openhisilicon#60. */
+    .gzip_base          = 0x11310000,
 };
 
 /*
@@ -1383,6 +1404,13 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .wdt_base           = 0x12030000,                       \
     .wdt_irq            = 2,                                \
     .wdt_freq           = 3000000,                          \
+    /* Same V4 HW gzip decompressor as Hi3516EV200/EV300/  \
+     * 18EV300/DV200 — needed by u-boot-z.bin's            \
+     * hw_decompress_*.c during early boot.  Same IP &     \
+     * register block on Goke rebrands (verified against   \
+     * GKIPC SDK gk7205v[23]00/hw_decompress.c).  See      \
+     * openhisilicon#60. */                                 \
+    .gzip_base          = 0x11310000,                       \
     .hwrng_base         = 0x10080000,                       \
     .hwrng_data_offset  = 0x204,                            \
     .num_regbanks       = 15,                               \
