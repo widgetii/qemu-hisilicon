@@ -237,6 +237,18 @@ typedef struct HisiSoCConfig {
      * PL011 driver's startup path sets UARTCR itself. */
     bool            uart_pre_enable;
 
+    /* PL011 MMIO window size — set when the vendor's mach amba_device
+     * resource is sized larger than the PL011's actual 0x1000 register
+     * block (Hi3520Dv200's HIL_AMBA_DEVICE macro hardcodes 0x10000).
+     * The AMBA bus probe reads PrimeCell ID at `tmp + size - 0x20` and
+     * `tmp + size - 0x10`, i.e. at the END of the resource — outside
+     * the PL011's modeled 0x1000 region for these SoCs, so periphid
+     * reads back as 0 and the AMBA driver fails to bind.  Real silicon
+     * mirrors PL011 across the larger window; we model that with an
+     * alias subregion at (base + window_size - 0x1000).
+     * 0 = use PL011's native 0x1000 (default). */
+    uint32_t        uart_window_size;
+
     /* HiSilicon SF (single-FIFO) Ethernet controller — used by Hi3520D
      * family and other vendor 3.0/3.4 kernels via drivers/net/hieth-sf/.
      * The vendor sys-hi3520d.c set_phy_valtage() / revise_led_shine()

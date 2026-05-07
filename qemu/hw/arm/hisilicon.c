@@ -2276,6 +2276,14 @@ static const HisiSoCConfig hi3520dv200_soc = {
      * before initialising UARTCR (relies on U-Boot to set CR=0x301). */
     .uart_pre_enable    = true,
 
+    /* HIL_AMBA_DEVICE() in vendor mach-hi3520d/core.c hardcodes a
+     * 0x10000 resource size for uart:0/uart:1, so the AMBA bus probes
+     * PrimeCell ID at the END of that window (offset 0xffe0/0xfff0).
+     * Mirror PL011 at base + 0xf000 so the IDs read back correctly and
+     * the AMBA driver binds — otherwise /dev/ttyAMA0 never appears and
+     * userspace can't open /dev/console (openhisilicon#70). */
+    .uart_window_size   = 0x10000,
+
     /* HiSilicon SF Ethernet (drivers/net/hieth-sf/) — vendor 3.0.x
      * kernel hangs in hieth_init (sys-hi3520d.c set_phy_valtage busy
      * waits on MDIO_RWCTRL bit 15) without this (openhisilicon#68). */
@@ -3584,11 +3592,35 @@ static void hisilicon_common_init(MachineState *machine,
 
     /* UARTs */
     for (n = 0; n < c->num_uarts; n++) {
+        DeviceState *uart;
         if (n == 0 && fastboot_mode) {
             uart0_irq = pic[c->uart_irqs[0]];
             continue;   /* UART0 PL011 created later by fastboot device */
         }
-        pl011_create(c->uart_bases[n], pic[c->uart_irqs[n]], serial_hd(n));
+        uart = pl011_create(c->uart_bases[n], pic[c->uart_irqs[n]],
+                            serial_hd(n));
+
+        /* If the SoC's vendor mach hardcodes a larger PL011 resource
+         * size, the AMBA bus probe reads PrimeCell ID at the END of
+         * that window — outside our 0x1000 PL011.  Alias only those
+         * 0x20 bytes (PERIPHID0..3 + PCELLID0..3, offsets 0xfe0..0xfff)
+         * to `base + window_size - 0x20`, so the AMBA driver sees the
+         * right IDs and binds, without leaking the full PL011 register
+         * block into the upper part of the window (which would let
+         * stray accesses there read RX bytes from UARTDR).  See
+         * openhisilicon#70. */
+        if (c->uart_window_size > 0x1000) {
+            MemoryRegion *pl011_mr =
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0);
+            MemoryRegion *alias = g_new0(MemoryRegion, 1);
+            char *name = g_strdup_printf("pl011-id-mirror-%d", n);
+            memory_region_init_alias(alias, OBJECT(uart), name,
+                                     pl011_mr, 0xfe0, 0x20);
+            memory_region_add_subregion(sysmem,
+                c->uart_bases[n] + c->uart_window_size - 0x20,
+                alias);
+            g_free(name);
+        }
     }
     /* Post-reset PL011 enable: writes UARTCR = UARTEN|TXE|RXE on the same
      * path U-Boot would on real silicon.  Required by SoCs whose vendor
