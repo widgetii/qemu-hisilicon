@@ -3426,12 +3426,13 @@ static const HisiSoCConfig hi3536_soc = {
     },
 };
 
-/* ── Machine state with sensor property ────────────────────────────── */
+/* ── Machine state with sensor + flash-file properties ─────────────── */
 
-/* Extra state appended to MachineState for the sensor property */
+/* Extra state appended to MachineState for machine-level properties */
 typedef struct {
     MachineState parent_obj;
     char *sensor;
+    char *flash_file;
 } HisiMachineState;
 
 /* ── Appended DTB fixup ────────────────────────────────────────────── */
@@ -3923,11 +3924,31 @@ static void hisilicon_common_init(MachineState *machine,
         const char *fmc_type = c->fmc_type ? c->fmc_type : "hisi-fmc";
         DeviceState *fmc = qdev_new(fmc_type);
         SysBusDevice *fmcbus = SYS_BUS_DEVICE(fmc);
+
+        /*
+         * Forward the machine-level "flash-file" property to whichever
+         * flash controller the SoC instantiates (hisi-fmc or hisi-sfc350).
+         * Lets consumers say `-machine $M,flash-file=...` (or `-global
+         * hisi-arm.flash-file=...`) without knowing which controller the
+         * machine uses.  See openhisilicon#80.
+         *
+         * The device-level globals `-global hisi-fmc.flash-file=...` and
+         * `-global hisi-sfc350.flash-file=...` still work too — they're
+         * applied by the qdev realize machinery and only match when the
+         * SoC actually instantiates the named device, so they don't
+         * conflict with this forwarding.
+         */
+        HisiMachineState *hms = (HisiMachineState *)machine;
+        if (hms->flash_file && hms->flash_file[0]) {
+            qdev_prop_set_string(fmc, "flash-file", hms->flash_file);
+        }
+
         sysbus_realize_and_unref(fmcbus, &error_fatal);
         sysbus_mmio_map(fmcbus, 0, c->fmc_ctrl_base);
         sysbus_mmio_map(fmcbus, 1, c->fmc_mem_base);
 
-        /* Check if flash-file was set (via -global hisi-fmc.flash-file=...) */
+        /* Check if flash-file was set (via either the machine-level
+         * property or a device-level -global). */
         if (!machine->kernel_filename) {
             char *ff = object_property_get_str(OBJECT(fmc), "flash-file", NULL);
             if (ff && ff[0]) {
@@ -4678,7 +4699,7 @@ static void hisilicon_common_init(MachineState *machine,
     }
 }
 
-/* ── Sensor property accessors ─────────────────────────────────────── */
+/* ── Machine-level property accessors ──────────────────────────────── */
 
 static char *hisi_machine_get_sensor(Object *obj, Error **errp)
 {
@@ -4692,6 +4713,20 @@ static void hisi_machine_set_sensor(Object *obj, const char *value,
     HisiMachineState *s = (HisiMachineState *)obj;
     g_free(s->sensor);
     s->sensor = g_strdup(value);
+}
+
+static char *hisi_machine_get_flash_file(Object *obj, Error **errp)
+{
+    HisiMachineState *s = (HisiMachineState *)obj;
+    return g_strdup(s->flash_file);
+}
+
+static void hisi_machine_set_flash_file(Object *obj, const char *value,
+                                        Error **errp)
+{
+    HisiMachineState *s = (HisiMachineState *)obj;
+    g_free(s->flash_file);
+    s->flash_file = g_strdup(value);
 }
 
 /* ── Per-machine wrappers ──────────────────────────────────────────── */
@@ -4719,6 +4754,13 @@ static void hisi_machine_set_sensor(Object *obj, const char *value,
             hisi_machine_get_sensor, hisi_machine_set_sensor);       \
         object_class_property_set_description(oc, "sensor",          \
             "Image sensor to attach (e.g. imx335)");                 \
+        object_class_property_add_str(oc, "flash-file",              \
+            hisi_machine_get_flash_file,                             \
+            hisi_machine_set_flash_file);                            \
+        object_class_property_set_description(oc, "flash-file",      \
+            "SPI NOR flash image to attach to the SoC's flash "      \
+            "controller (forwards to whichever device the machine "  \
+            "instantiates: hisi-fmc or hisi-sfc350).");              \
         if (config.max_cpus > 0) {                                   \
             mc->max_cpus = config.max_cpus;                          \
         }                                                            \

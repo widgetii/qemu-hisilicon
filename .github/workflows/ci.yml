@@ -187,7 +187,6 @@ jobs:
             append: "console=ttyAMA0,115200 root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),2048k(kernel),5120k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516cv100-universal.bin
-            flash_type: hisi-sfc350
 
           - name: hi3516cv200
             soc: hi3516cv200
@@ -203,10 +202,6 @@ jobs:
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
             uboot_bin: u-boot-hi3516av100-universal.bin
-            # AV100 (V2A) shares CV100's HISFC350 flash controller — must
-            # set the flash-file global on hisi-sfc350, NOT hisi-fmc.
-            # See openhisilicon#59.
-            flash_type: hisi-sfc350
 
           - name: hi3516cv300
             soc: hi3516cv300
@@ -387,7 +382,6 @@ jobs:
           dd if=qemu-boot/rootfs.squashfs.${{ matrix.soc }} of=$FLASH bs=1 seek=$((0x350000)) conv=notrunc 2>/dev/null
 
           mkfifo /tmp/ub.in /tmp/ub.out
-          FLASH_TYPE="${{ matrix.flash_type || 'hisi-fmc' }}"
           # flash_mem overrides the machine-default ram size for
           # U-Boot flash-boot (some SoCs need more RAM than the
           # kernel-default to fit U-Boot + decompressed kernel).
@@ -395,9 +389,11 @@ jobs:
           if [ -n "${{ matrix.flash_mem }}" ]; then
             MEM_ARG="-m ${{ matrix.flash_mem }}"
           fi
+          # `-M $machine,flash-file=$f` works regardless of which
+          # underlying flash controller (hisi-fmc / hisi-sfc350) the
+          # machine instantiates.  See openhisilicon#80.
           $QEMU \
-            -M ${{ matrix.machine }} $MEM_ARG \
-            -global ${FLASH_TYPE}.flash-file=$FLASH \
+            -M ${{ matrix.machine }},flash-file=$FLASH $MEM_ARG \
             -nographic -serial pipe:/tmp/ub -nic tap,ifname=tap0,script=no,downscript=no \
             -monitor none &
           QEMU_PID=$!
