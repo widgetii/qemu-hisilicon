@@ -195,6 +195,15 @@ struct HisiFmcState {
     uint8_t *block_ever_unlocked;
     uint32_t num_blocks;
 
+    /* When true, the chip starts in the as-shipped factory-locked state:
+     * SR3.WPS = 1, every block locked, none ever-unlocked.  Mirrors what
+     * Xiongmai-flashed Winbond W25Q128s come out of the factory with —
+     * lets CI exercise the kernel/U-Boot/agent recovery-unlock path
+     * (Winbond Global Block Unlock 0x98 + clear SR3.WPS) instead of the
+     * default already-unlocked-by-runtime-firmware behaviour.  See
+     * openhisilicon#83. */
+    bool     nor_wps_locked;
+
     /* Register-mode I/O buffer (shared via memory window) */
     bool     iobuf_valid;         /* true after reg-mode op, cleared on next read */
     uint8_t  iobuf[IOBUF_SIZE];
@@ -1021,6 +1030,31 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
             }
         }
     }
+
+    /* Factory-locked NOR override (openhisilicon#83).
+     *
+     * Applied AFTER the SquashFS scan so it overrides whatever the scan
+     * computed.  Real Xiongmai-flashed Winbond W25Q128s come out of the
+     * factory with SR3.WPS = 1 and every block individually locked; the
+     * runtime kernel/U-Boot/agent has to issue Global Block Unlock
+     * (0x98) + clear SR3.WPS to make the chip writable.  Without this
+     * knob, qemu-side flash starts already-unlocked because vendor
+     * firmware (when actually run) would have done that work — but a
+     * recovery boot ROM / fresh-U-Boot / bare-metal agent doesn't see
+     * the locked state at all, so its global-unlock code path goes
+     * untested.
+     *
+     * Default off preserves current behaviour. */
+    if (s->nor_wps_locked && s->flash_type == FLASH_TYPE_SPI_NOR &&
+        s->block_locked && s->block_ever_unlocked) {
+        s->sr3 |= 0x04;                         /* WPS = 1 */
+        memset(s->block_locked, 1, s->num_blocks);
+        memset(s->block_ever_unlocked, 0, s->num_blocks);
+        qemu_log("hisi-fmc: factory-locked NOR (SR3.WPS=1, all "
+                 "%u blocks locked); firmware must Global-Unlock 0x98 "
+                 "+ clear SR3.WPS before erase/program will succeed\n",
+                 s->num_blocks);
+    }
 }
 
 static void hisi_fmc_init(Object *obj)
@@ -1051,6 +1085,14 @@ static const Property hisi_fmc_properties[] = {
                        FLASH_TYPE_SPI_NOR),
     DEFINE_PROP_STRING("flash-file", HisiFmcState, flash_file),
     DEFINE_PROP_UINT32("flash-jedec", HisiFmcState, flash_jedec, 0),
+    /* Start the chip in the as-shipped factory-locked state for SPI NOR.
+     * When on: SR3.WPS = 1, every block individually locked, no block
+     * ever-unlocked.  Lets CI exercise the recovery-unlock path
+     * (Winbond Global Block Unlock 0x98 + clear SR3.WPS) that runtime
+     * vendor firmware would have already executed.  Default off
+     * preserves the existing already-unlocked behaviour.  See
+     * openhisilicon#83. */
+    DEFINE_PROP_BOOL("nor-wps-locked", HisiFmcState, nor_wps_locked, false),
 };
 
 static void hisi_fmc_class_init(ObjectClass *klass, const void *data)

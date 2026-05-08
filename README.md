@@ -204,6 +204,39 @@ device-level globals (`-global hisi-fmc.flash-file=…` /
 
 Default login: `root` / `12345`
 
+#### Factory-locked NOR (recovery testing)
+
+XM-flashed Winbond W25Q128s ship from the factory with `SR3.WPS = 1`
+and every individual block-lock bit set. WPS is non-volatile, so it
+survives power-cycle and even a fresh-U-Boot via the boot ROM —
+every `sf erase` / `sf write` from a recovery agent silently no-ops
+until firmware issues Winbond Global Block Unlock (`0x98`) and
+clears `SR3.WPS`. The runtime kernel/U-Boot/agent has to do this
+unlock dance to make the chip writable
+([OpenIPC kernel workaround](https://github.com/OpenIPC/linux/commit/3961fada5)).
+
+To exercise that recovery-unlock path under QEMU, use
+`hisi-fmc.nor-wps-locked=on` (default `off`):
+
+```bash
+qemu-system-arm -M hi3516ev200 -kernel u-boot.bin \
+    -global hisi-fmc.nor-wps-locked=on \
+    -global hisi-fmc.flash-file=blank-flash.img
+```
+
+When on, the emulator starts the chip in the as-shipped state
+(SR3.WPS=1, all blocks locked, none ever-unlocked) and logs:
+
+```
+hisi-fmc: factory-locked NOR (SR3.WPS=1, all 128 blocks locked);
+firmware must Global-Unlock 0x98 + clear SR3.WPS before erase/program
+will succeed
+```
+
+A test passes only if the firmware actually issues the unlock
+sequence — without the knob, the same firmware silently "works"
+against an emulator that never had the lock to begin with.
+
 ### Method 2: Boot with separate kernel and rootfs
 
 Useful for development when you build kernel and rootfs independently and
