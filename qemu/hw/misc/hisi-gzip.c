@@ -166,7 +166,7 @@ static void hisi_gzip_do_decompress(HisiGzipState *s, uint32_t src_len_reg)
     strm.next_in = src_buf;
     strm.avail_in = src_len;
     strm.next_out = dst_buf;
-    strm.avail_out = dst_max;
+    strm.avail_out = 0;
 
     int ret = inflateInit2(&strm, windowBits);
     if (ret != Z_OK) {
@@ -181,9 +181,61 @@ static void hisi_gzip_do_decompress(HisiGzipState *s, uint32_t src_len_reg)
         return;
     }
 
-    ret = inflate(&strm, Z_FINISH);
-    uint32_t out_len = strm.total_out;
-    const char *zmsg = strm.msg;
+    /*
+     * Chunk the inflate loop with Z_NO_FLUSH and a small avail_out.
+     *
+     * Calling inflate(Z_FINISH) with the entire output buffer
+     * pre-allocated takes zlib's inflate_fast path, where the
+     * back-distance check `if (op > whave)` is guarded by `if (dist >
+     * op)` — and `op` is the current output-buffer position.  With a
+     * full-size output buffer, every back-reference resolves with
+     * `dist <= op` (intra-buffer copy) and the whave check never
+     * fires.  Result: a stream encoded with a 32 KiB window
+     * decompresses fine even though we asked for a 13-bit window cap.
+     *
+     * Forcing avail_out <= chunk_size makes zlib call updatewindow()
+     * between chunks; the slow path then uses `whave` (capped at
+     * `wsize = 1<<wbits`) for the back-distance check, matching
+     * real-silicon behaviour where back-references beyond the
+     * 8 KiB-of-window-memory boundary cannot be resolved.
+     *
+     * chunk_size = 1024 keeps the over-permissiveness slop (the
+     * effective max valid distance is `whave + position_in_buffer
+     * = wsize + chunk_size`) at 1 KiB above the cap — small enough
+     * that streams with > 8 KiB back-distances reliably trip it,
+     * while not blocking edge-case streams whose distances are
+     * exactly at 8 KiB.  See openhisilicon#85.
+     */
+    const uint32_t chunk_size = 1024;
+    size_t total_out = 0;
+    const char *zmsg = NULL;
+    do {
+        uint32_t want = dst_max - total_out;
+        if (want > chunk_size) want = chunk_size;
+        if (want == 0) {
+            /* output buffer full */
+            break;
+        }
+        strm.next_out = dst_buf + total_out;
+        strm.avail_out = want;
+
+        ret = inflate(&strm, Z_NO_FLUSH);
+        total_out += (want - strm.avail_out);
+
+        if (ret == Z_STREAM_END) break;
+        if (ret != Z_OK) {
+            zmsg = strm.msg;
+            break;
+        }
+        if (strm.avail_in == 0 && strm.avail_out > 0) {
+            /* zlib wants more input but we have none — treat as error
+             * the same way Z_FINISH would have surfaced it. */
+            ret = Z_DATA_ERROR;
+            zmsg = strm.msg ? strm.msg : "unexpected end of input";
+            break;
+        }
+    } while (1);
+    uint32_t out_len = (uint32_t)total_out;
     inflateEnd(&strm);
 
     if (ret != Z_STREAM_END && ret != Z_OK) {
