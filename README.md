@@ -107,7 +107,7 @@ IVE = Intelligent Video Engine with 18 operations validated against real IVE sil
 
 ```
 qemu/
-├── hw/arm/hisilicon.c           # Machine definitions (all 35 SoCs)
+├── hw/arm/hisilicon.c           # Machine definitions (all 40 SoCs)
 ├── hw/misc/hisi-sysctl.c        # SysCtrl (SoC ID, reset, general registers)
 ├── hw/misc/hisi-crg.c           # CRG clock/reset stub
 ├── hw/misc/hisi-fmc.c           # HiFMC V100 flash controller (CV200+, flash-file for dumps)
@@ -183,12 +183,24 @@ bash qemu-boot/run-ev300-flash.sh openipc-hi3516ev300-lite-8mb.bin
 
 # Or with a camera flash dump
 bash qemu-boot/run-ev300-flash.sh /tmp/flash_dump_ev300.bin
+
+# Or pass the flash image directly via the machine property — works
+# for any SoC, regardless of which flash controller it instantiates:
+qemu-system-arm -M hi3516ev300,flash-file=$flash -nographic
+qemu-system-arm -M hi3516av100,flash-file=$flash -nographic   # also works
+qemu-system-arm -M gk7205v200,flash-file=$flash  -nographic   # also works
 ```
 
 The emulator includes a boot ROM that copies U-Boot from the flash memory
 window to DDR and jumps to it — the same boot sequence as real silicon.
 A hardware GZIP decompressor (`hisi-gzip`) handles U-Boot's compressed
 first-stage loader. No separate kernel or rootfs files needed.
+
+The machine-level `flash-file` property forwards to whichever flash
+controller (`hisi-fmc` on V3+/Goke, `hisi-sfc350` on V1/V2A) the SoC
+instantiates, so consumers don't need to know that detail. The legacy
+device-level globals (`-global hisi-fmc.flash-file=…` /
+`-global hisi-sfc350.flash-file=…`) still work for backward compat.
 
 Default login: `root` / `12345`
 
