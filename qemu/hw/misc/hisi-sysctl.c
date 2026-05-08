@@ -37,6 +37,21 @@ struct HisiSysctlState {
     uint32_t soc_id;
     bool byte_layout;
     uint8_t chip_variant;
+    /*
+     * V1-family chip identification registers.  ipctool's get_chip_V1()
+     * reads SCSYSID0 (giving family ID 0x35180100) and then disambiguates
+     * the four V1 variants via two non-standard registers:
+     *   0x88 — read-only chip ID byte (1 = 3516CV100, 2 = 3518EV100,
+     *          3 = 3518AV100); driver writes 3 first then reads back,
+     *          but real silicon ignores the write.
+     *   0x8C — read-only field with bits[14:8] holding a chip-specific
+     *          tag (0x10 = 3518CV100, 0x57 = 3518EV100); takes priority
+     *          over 0x88 when matched.
+     * Both default to 0 (= "match nothing"); per-SoC machine init sets
+     * the value that lets ipctool identify the chip.
+     */
+    uint32_t v1_chip_id_88;
+    uint32_t v1_chip_id_8c;
     uint32_t regs[HISI_SYSCTL_NREGS];
 };
 
@@ -49,8 +64,12 @@ static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
         return s->regs[0];
     case 0x04: /* SC_SYSRES — system reset (write-only, read returns 0) */
         return 0;
-    case 0x8C: /* REG_SYSSTAT — boot mode (0 = SPI NOR boot) */
-        return s->regs[0x8C / 4];
+    case 0x88: /* V1 chip ID register (read-only, write-ignored) */
+        return s->v1_chip_id_88;
+    case 0x8C: /* V1 chip ID + REG_SYSSTAT (boot mode) — bits[14:8] hold
+                * the chip tag (0x10 / 0x57); other bits unused (= 0 =
+                * SPI NOR boot mode). */
+        return s->v1_chip_id_8c | s->regs[0x8C / 4];
     /*
      * SCSYSID0..3 chip identification block. Two layouts coexist:
      *
@@ -99,6 +118,8 @@ static void hisi_sysctl_write(void *opaque, hwaddr offset,
                       (uint32_t)val);
         qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         break;
+    case 0x88: /* V1 chip ID register — read-only, drop writes */
+        break;
     default:
         if (offset < HISI_SYSCTL_MMIO_SIZE) {
             s->regs[offset / 4] = (uint32_t)val;
@@ -128,6 +149,8 @@ static const Property hisi_sysctl_properties[] = {
     DEFINE_PROP_UINT32("soc-id", HisiSysctlState, soc_id, 0),
     DEFINE_PROP_BOOL("byte-layout-id", HisiSysctlState, byte_layout, false),
     DEFINE_PROP_UINT8("chip-variant", HisiSysctlState, chip_variant, 0),
+    DEFINE_PROP_UINT32("v1-chip-id-88", HisiSysctlState, v1_chip_id_88, 0),
+    DEFINE_PROP_UINT32("v1-chip-id-8c", HisiSysctlState, v1_chip_id_8c, 0),
 };
 
 static void hisi_sysctl_class_init(ObjectClass *klass, const void *data)

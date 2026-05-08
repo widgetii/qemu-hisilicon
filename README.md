@@ -5,16 +5,19 @@ targeting QEMU v10.2.0. Boots unmodified [OpenIPC](https://openipc.org/) firmwar
 and vendor SDK kernels to a full Linux userspace on all supported platforms.
 
 Builds two QEMU targets:
-- `qemu-system-arm` — 25 IPC + 12 DVR/NVR + 1 STB (ARMv7-A)
+- `qemu-system-arm` — 28 IPC + 12 DVR/NVR + 1 STB (ARMv7-A)
 - `qemu-system-aarch64` — 1 STB (ARMv8-A, Hi3798CV200 Cortex-A53)
 
-## Supported Machines (37 total)
+## Supported Machines (40 total)
 
 ### IPC family — V1 through V5 (`qemu-system-arm`)
 
 | Machine | Generation | CPU | IRQ | Kernel | Boot tested |
 |---------|-----------|-----|-----|--------|-------------|
 | `hi3516cv100` | V1 | ARM926EJ-S | VIC | 3.0.8 | yes |
+| `hi3518av100` | V1 | ARM926EJ-S | VIC | 3.0.8 | yes |
+| `hi3518cv100` | V1 | ARM926EJ-S | VIC | 3.0.8 | yes |
+| `hi3518ev100` | V1 | ARM926EJ-S | VIC | 3.0.8 | yes |
 | `hi3516cv200` | V2 | ARM926EJ-S | VIC | 4.9.37 | yes |
 | `hi3516av100` | V2A | Cortex-A7 | GIC | 4.9.37 | yes |
 | `hi3516dv100` | V2A | Cortex-A7 | GIC | 4.9.37 | yes |
@@ -57,7 +60,7 @@ Builds two QEMU targets:
 | `hi3796mv100` | `qemu-system-arm` | Cortex-A7 quad | 4.9.37 backported from vendor 3.10 (HiSTB) | yes |
 | `hi3798cv200` | `qemu-system-aarch64` | **Cortex-A53 quad** (ARMv8) | mainline Linux 7.1 + Poplar DT | yes |
 
-All 37 machines build; **37/37 boot to a shell prompt** with kernels
+All 40 machines build; **40/40 boot to a shell prompt** with kernels
 and rootfs artifacts staged in `qemu-boot/run-<machine>.sh`.
 
 ### V5 Model Suffix → Chip ID Mapping

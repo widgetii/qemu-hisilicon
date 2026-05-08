@@ -109,6 +109,17 @@ typedef struct HisiSoCConfig {
      */
     uint8_t         chip_variant;
 
+    /*
+     * V1-family chip identification at non-standard sysctl offsets.
+     * ipctool's get_chip_V1() reads SCSYSID0 (giving the family ID
+     * 0x35180100) and then disambiguates the four V1 variants via
+     * sysctl_base + 0x88 and sysctl_base + 0x8C — see hisi-sysctl.c
+     * and ipctool's hal_hisi.c get_chip_V1().  Both default to 0
+     * (= unmatched) for non-V1 SoCs.
+     */
+    uint32_t        v1_chip_id_88; /* 1=CV100, 2=18EV100, 3=18AV100 */
+    uint32_t        v1_chip_id_8c; /* bits[14:8]: 0x10=18CV100, 0x57=18EV100 */
+
     /* UARTs (PL011) */
     int             num_uarts;
     hwaddr          uart_bases[HISI_MAX_UARTS];

@@ -117,6 +117,8 @@ static const HisiSoCConfig hi3516cv100_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
     .soc_id             = HISI_SOC_ID_CV100,
     .chipid_byte_layout = true,            /* V1: byte-wise SCSYSID0..3 */
+    /* ipctool get_chip_V1(): writes 3 to 0x88, expects 1 read back. */
+    .v1_chip_id_88      = 1,
     .default_sensor     = "imx122",        /* Sony 3-wire SPI on V1 ref boards */
     /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims the upper 32 MiB at 0x82000000 — matches OpenIPC V1
@@ -200,6 +202,275 @@ static const HisiSoCConfig hi3516cv100_soc = {
      * hardware during init.  Without mapped regions, reads return 0
      * from QEMU's "unimplemented" handler, causing poll loops to hang.
      */
+    .num_regbanks       = 8,
+    .regbanks           = {
+        { "hisi-misc",   0x20120000, 0x10000 },
+        { "hisi-ddr",    0x20110000, 0x10000 },
+        { "hisi-pwm",    0x20130000, 0x10000 },
+        { "hisi-nandc",  0x10000000, 0x10000 },
+        { "hisi-viu",    0x20580000, 0x40000 },
+        { "hisi-vpss",   0x20600000, 0x10000 },
+        { "hisi-vedu",   0x20620000, 0x10000 },
+        { "hisi-aiao",   0x20650000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3518AV100 (V1): die-identical to Hi3516CV100 — same ARM926EJ-S,
+ * same V1-era 0x20xxxxxx address map, same HISFC350 flash, same
+ * peripheral layout.  Per ipctool's hal_hisi.c get_chip_V1():
+ * write 3 to sysctl_base + 0x88 and read back: 3 → "3518AV100".
+ * Shipped under the same OpenIPC u-boot-hi3516cv100 tree.
+ */
+static const HisiSoCConfig hi3518av100_soc = {
+    .name               = "hi3518av100",
+    .desc               = "HiSilicon Hi3518AV100 (ARM926EJ-S, CV100 sibling)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
+    .soc_id             = HISI_SOC_ID_CV100,
+    .chipid_byte_layout = true,
+    .v1_chip_id_88      = 3,                /* 18AV100 marker */
+    .default_sensor     = "imx122",
+    .ram_size_default   = 64 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,32M",
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = false,
+    .vic_base           = 0x10140000,
+
+    .sysctl_base        = 0x20050000,
+    .crg_base           = 0x20030000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000 },
+    .uart_irqs          = { 5, 5, 25 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x20000000, 0x20010000 },
+    .timer_irqs         = { 3, 4 },
+    .timer_freq         = 50000000,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x200C0000, 0x200E0000 },
+    .spi_irqs           = { 6, 7 },
+
+    .fmc_ctrl_base      = 0x10010000,
+    .fmc_mem_base       = 0x58000000,
+    .fmc_type           = "hisi-sfc350",
+
+    .gpio_base          = 0x20140000,
+    .gpio_count         = 12,
+    .gpio_stride        = 0x10000,
+    .gpio_irq           = 31,
+
+    .dma_base           = 0x100D0000,
+    .dma_irq            = 14,
+
+    .femac_base         = 0x10090000,
+    .femac_irq          = 12,
+
+    .num_himci          = 1,
+    .himci_bases        = { 0x10020000 },
+    .himci_irqs         = { 18 },
+
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x200D0000 },
+    .i2c_type           = "hisi-i2c-v1",
+
+    .wdt_base           = 0x20040000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_crg_defaults   = 4,
+    .crg_defaults       = {
+        { 0x00, (1 << 24) | (1 << 27) },
+        { 0x04, (1 << 12) | 46 },
+        { 0x10, (1 << 24) | (1 << 27) },
+        { 0x14, (3 << 12) | 25 },
+    },
+
+    .num_regbanks       = 8,
+    .regbanks           = {
+        { "hisi-misc",   0x20120000, 0x10000 },
+        { "hisi-ddr",    0x20110000, 0x10000 },
+        { "hisi-pwm",    0x20130000, 0x10000 },
+        { "hisi-nandc",  0x10000000, 0x10000 },
+        { "hisi-viu",    0x20580000, 0x40000 },
+        { "hisi-vpss",   0x20600000, 0x10000 },
+        { "hisi-vedu",   0x20620000, 0x10000 },
+        { "hisi-aiao",   0x20650000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3518CV100 (V1): die-identical to Hi3516CV100; ipctool identifies
+ * it via sysctl_base + 0x8C bits[14:8] == 0x10.
+ */
+static const HisiSoCConfig hi3518cv100_soc = {
+    .name               = "hi3518cv100",
+    .desc               = "HiSilicon Hi3518CV100 (ARM926EJ-S, CV100 sibling)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
+    .soc_id             = HISI_SOC_ID_CV100,
+    .chipid_byte_layout = true,
+    .v1_chip_id_8c      = 0x10 << 8,        /* bits[14:8] = 0x10 → 3518CV100 */
+    .default_sensor     = "imx122",
+    .ram_size_default   = 64 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,32M",
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = false,
+    .vic_base           = 0x10140000,
+
+    .sysctl_base        = 0x20050000,
+    .crg_base           = 0x20030000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000 },
+    .uart_irqs          = { 5, 5, 25 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x20000000, 0x20010000 },
+    .timer_irqs         = { 3, 4 },
+    .timer_freq         = 50000000,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x200C0000, 0x200E0000 },
+    .spi_irqs           = { 6, 7 },
+
+    .fmc_ctrl_base      = 0x10010000,
+    .fmc_mem_base       = 0x58000000,
+    .fmc_type           = "hisi-sfc350",
+
+    .gpio_base          = 0x20140000,
+    .gpio_count         = 12,
+    .gpio_stride        = 0x10000,
+    .gpio_irq           = 31,
+
+    .dma_base           = 0x100D0000,
+    .dma_irq            = 14,
+
+    .femac_base         = 0x10090000,
+    .femac_irq          = 12,
+
+    .num_himci          = 1,
+    .himci_bases        = { 0x10020000 },
+    .himci_irqs         = { 18 },
+
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x200D0000 },
+    .i2c_type           = "hisi-i2c-v1",
+
+    .wdt_base           = 0x20040000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_crg_defaults   = 4,
+    .crg_defaults       = {
+        { 0x00, (1 << 24) | (1 << 27) },
+        { 0x04, (1 << 12) | 46 },
+        { 0x10, (1 << 24) | (1 << 27) },
+        { 0x14, (3 << 12) | 25 },
+    },
+
+    .num_regbanks       = 8,
+    .regbanks           = {
+        { "hisi-misc",   0x20120000, 0x10000 },
+        { "hisi-ddr",    0x20110000, 0x10000 },
+        { "hisi-pwm",    0x20130000, 0x10000 },
+        { "hisi-nandc",  0x10000000, 0x10000 },
+        { "hisi-viu",    0x20580000, 0x40000 },
+        { "hisi-vpss",   0x20600000, 0x10000 },
+        { "hisi-vedu",   0x20620000, 0x10000 },
+        { "hisi-aiao",   0x20650000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3518EV100 (V1): die-identical to Hi3516CV100; ipctool identifies
+ * it via either sysctl_base + 0x8C bits[14:8] == 0x57 OR
+ * sysctl_base + 0x88 == 2.  We populate both for robustness.
+ */
+static const HisiSoCConfig hi3518ev100_soc = {
+    .name               = "hi3518ev100",
+    .desc               = "HiSilicon Hi3518EV100 (ARM926EJ-S, CV100 sibling)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
+    .soc_id             = HISI_SOC_ID_CV100,
+    .chipid_byte_layout = true,
+    .v1_chip_id_88      = 2,                /* 18EV100 marker */
+    .v1_chip_id_8c      = 0x57 << 8,        /* bits[14:8] = 0x57 → 3518EV100 */
+    .default_sensor     = "imx122",
+    .ram_size_default   = 64 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,32M",
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = false,
+    .vic_base           = 0x10140000,
+
+    .sysctl_base        = 0x20050000,
+    .crg_base           = 0x20030000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000 },
+    .uart_irqs          = { 5, 5, 25 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x20000000, 0x20010000 },
+    .timer_irqs         = { 3, 4 },
+    .timer_freq         = 50000000,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x200C0000, 0x200E0000 },
+    .spi_irqs           = { 6, 7 },
+
+    .fmc_ctrl_base      = 0x10010000,
+    .fmc_mem_base       = 0x58000000,
+    .fmc_type           = "hisi-sfc350",
+
+    .gpio_base          = 0x20140000,
+    .gpio_count         = 12,
+    .gpio_stride        = 0x10000,
+    .gpio_irq           = 31,
+
+    .dma_base           = 0x100D0000,
+    .dma_irq            = 14,
+
+    .femac_base         = 0x10090000,
+    .femac_irq          = 12,
+
+    .num_himci          = 1,
+    .himci_bases        = { 0x10020000 },
+    .himci_irqs         = { 18 },
+
+    .num_i2c            = 1,
+    .i2c_bases          = { 0x200D0000 },
+    .i2c_type           = "hisi-i2c-v1",
+
+    .wdt_base           = 0x20040000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_crg_defaults   = 4,
+    .crg_defaults       = {
+        { 0x00, (1 << 24) | (1 << 27) },
+        { 0x04, (1 << 12) | 46 },
+        { 0x10, (1 << 24) | (1 << 27) },
+        { 0x14, (3 << 12) | 25 },
+    },
+
     .num_regbanks       = 8,
     .regbanks           = {
         { "hisi-misc",   0x20120000, 0x10000 },
@@ -3787,6 +4058,8 @@ static void hisilicon_common_init(MachineState *machine,
         qdev_prop_set_uint32(sysctl, "soc-id", c->soc_id);
         qdev_prop_set_bit(sysctl, "byte-layout-id", c->chipid_byte_layout);
         qdev_prop_set_uint8(sysctl, "chip-variant", c->chip_variant);
+        qdev_prop_set_uint32(sysctl, "v1-chip-id-88", c->v1_chip_id_88);
+        qdev_prop_set_uint32(sysctl, "v1-chip-id-8c", c->v1_chip_id_8c);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(sysctl), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(sysctl), 0, c->sysctl_base);
     }
@@ -4444,6 +4717,9 @@ static void hisi_machine_set_sensor(Object *obj, const char *value,
                             arm_machine_interfaces)
 
 DEFINE_HISI_MACHINE("hi3516cv100", hi3516cv100, hi3516cv100_soc)
+DEFINE_HISI_MACHINE("hi3518av100", hi3518av100, hi3518av100_soc)
+DEFINE_HISI_MACHINE("hi3518cv100", hi3518cv100, hi3518cv100_soc)
+DEFINE_HISI_MACHINE("hi3518ev100", hi3518ev100, hi3518ev100_soc)
 DEFINE_HISI_MACHINE("hi3516cv200", hi3516cv200, hi3516cv200_soc)
 DEFINE_HISI_MACHINE("hi3516av100", hi3516av100, hi3516av100_soc)
 DEFINE_HISI_MACHINE("hi3516dv100", hi3516dv100, hi3516dv100_soc)
