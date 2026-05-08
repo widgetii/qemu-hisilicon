@@ -205,14 +205,8 @@ jobs:
             uboot_bin: u-boot-hi3516av100-universal.bin
             # AV100 (V2A) shares CV100's HISFC350 flash controller — must
             # set the flash-file global on hisi-sfc350, NOT hisi-fmc.
-            # See openhisilicon#59 (the issue's repro used the wrong
-            # device prefix and got 0x20-padding output).
+            # See openhisilicon#59.
             flash_type: hisi-sfc350
-            # AV100 uses GMAC (vs CV100/CV200/CV300's FEMAC); hisi-gmac's
-            # U-Boot probe links the PHY but ARP/ICMP doesn't complete.
-            # Settle for the smoke gate the issue's downstream sister
-            # repos already use ("gets past System startup").
-            uboot_smoke_only: true
 
           - name: hi3516cv300
             soc: hi3516cv300
@@ -420,29 +414,6 @@ jobs:
             fi
             sleep 0.5
           done
-
-          # Smoke-only mode: skip the network half of the test.  Used for
-          # SoCs where U-Boot itself runs but its U-Boot-side networking
-          # path doesn't complete in QEMU (e.g. AV100's hisi-gmac probe
-          # links the PHY but ARP/ICMP doesn't go through).  Matches the
-          # downstream gate shape ("gets past System startup") that
-          # OpenIPC/u-boot-{cv200,cv300} already use.
-          SMOKE_ONLY="${{ matrix.uboot_smoke_only || 'false' }}"
-          if [ "$SMOKE_ONLY" = "true" ]; then
-            exec 3>&-
-            kill $QEMU_PID 2>/dev/null || true
-            wait 2>/dev/null || true
-            rm -f /tmp/ub.in /tmp/ub.out
-
-            echo ""
-            if grep -q "autoboot" /tmp/uboot-ping.txt; then
-              echo "=== PASS: U-Boot smoke (reached autoboot) ==="
-            else
-              echo "=== FAIL: U-Boot smoke (no autoboot prompt) ==="
-              exit 1
-            fi
-            exit 0
-          fi
 
           # Interrupt autoboot (spam Ctrl-C until we see the prompt)
           for i in $(seq 1 20); do
