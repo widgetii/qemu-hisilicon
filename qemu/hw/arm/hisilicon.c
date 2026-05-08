@@ -3676,7 +3676,18 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
 {
     hwaddr flash_src = c->fmc_mem_base;         /* e.g. 0x14000000 */
     hwaddr ram_dst   = c->ram_base;             /* e.g. 0x40000000 */
-    uint32_t copy_sz = 0x40000;                 /* 256 KB boot partition */
+    /*
+     * Boot partition copy size.  Vendor U-Boot binaries vary widely:
+     * Hi3516CV100 ≈ 130 KB, Hi3516EV200 ≈ 230 KB, Goke V4 ≈ 515 KB.
+     * Real silicon's boot ROM parses a header to learn the exact size;
+     * we don't model that — copy 1 MiB which is enough to cover every
+     * vendor image we've seen, padded with whatever the surrounding
+     * flash holds.  Goke V4 silently failed when this was 256 KiB:
+     * relocation tables sit past 256 KiB in the 515 KiB binary, so
+     * post-relocation U-Boot jumped into garbage and produced no
+     * UART output.
+     */
+    uint32_t copy_sz = 0x100000;                /* 1 MiB boot partition */
     bool armv7 = c->use_gic;  /* ARM926 SoCs use VIC, Cortex-A7+ use GIC */
 
     /*
