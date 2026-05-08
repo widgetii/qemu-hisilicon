@@ -428,6 +428,100 @@ static const HisiSoCConfig hi3516av100_soc = {
 };
 
 /*
+ * Hi3516DV100 (V2A): die-identical to Hi3516AV100 — same Cortex-A7,
+ * same V1-era 0x20xxxxxx address map, same HISFC350 flash, same
+ * peripheral layout.  ipctool's hal_hisi.c distinguishes them only by
+ * the chip-variant byte in SCSYSID0 (AV100 = 0/1, DV100 = 2).
+ */
+static const HisiSoCConfig hi3516dv100_soc = {
+    .name               = "hi3516dv100",
+    .desc               = "HiSilicon Hi3516DV100 (Cortex-A7, AV100 sibling)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_AV100,    /* shares AV100 family ID */
+    .chipid_byte_layout = true,                 /* V2A: byte-wise SCSYSID0..3 */
+    .chip_variant       = 2,                    /* SCSYSID0[31:24] = 2 → "3516DV100" */
+    .ram_size_default   = 128 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,96M",
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x20301000,
+    .gic_cpu_base       = 0x20302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x20050000,
+    .crg_base           = 0x20030000,
+
+    .num_uarts          = 4,
+    .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000, 0x20230000 },
+    .uart_irqs          = { 8, 9, 10, 11 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x20000000, 0x20010000 },
+    .timer_irqs         = { 3, 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x200C0000, 0x200E0000 },
+    .spi_irqs           = { 12, 13 },
+
+    .fmc_ctrl_base      = 0x10010000,
+    .fmc_mem_base       = 0x58000000,
+    .fmc_type           = "hisi-sfc350",
+
+    .gpio_base          = 0x20140000,
+    .gpio_count         = 15,
+    .gpio_stride        = 0x10000,
+    .gpio_irq           = 47,
+    .gpio_extras        = {
+        { 0x20260000, 49 },
+    },
+
+    .gmac_base          = 0x10090000,
+    .gmac_irq           = 25,
+
+    .num_himci          = 2,
+    .himci_bases        = { 0x206E0000, 0x206F0000 },
+    .himci_irqs         = { 19, 20 },
+
+    .num_i2c            = 3,
+    .i2c_bases          = { 0x200D0000, 0x20240000, 0x20250000 },
+    .i2c_type           = "hisi-i2c-dw",
+
+    .mipi_rx_base       = 0x20680000,
+    .mipi_rx_irq        = 34,
+
+    .rtc_base           = 0x20060000,
+    .rtc_irq            = 7,
+
+    .vedu_base          = 0x20640000,
+    .jpge_base          = 0x20660000,
+    .vedu_irq           = 43,
+    .jpge_irq           = 41,
+
+    .wdt_base           = 0x20040000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_regbanks       = 8,
+    .regbanks           = {
+        { "hisi-misc",       0x20120000, 0x10000 },
+        { "hisi-ddr",        0x20110000, 0x10000 },
+        { "hisi-pwm",        0x20130000, 0x10000 },
+        { "hisi-nandc",      0x10000000, 0x1000  },
+        { "hisi-regulator",  0x20270000, 0x1000  },
+        { "hisi-viu",        0x20580000, 0x40000 },
+        { "hisi-vpss",       0x20600000, 0x10000 },
+        { "hisi-aiao",       0x20650000, 0x10000 },
+    },
+};
+
+/*
  * Hi3516CV300 (V3): ~2017, 2M mainstream.  ARM926EJ-S @800MHz.
  * Video: H.265, WDR, 1080P@30fps, 2K fisheye VI.  First ARM9 with H.265.
  * Platform family: hi3516ev100 (1M, H.265 1080P@20fps, 64MB DRAM, LiteOS).
@@ -734,6 +828,119 @@ static const HisiSoCConfig hi3516av300_soc = {
         { "hisi-vpss",       0x11040000, 0x10000 },
         { "hisi-aiao",       0x113B0000, 0x20000 },
         { "hisi-npu",        0x11700000, 0x100000 },  /* 1.0 TOPS NPU */
+    },
+};
+
+/*
+ * Hi3516DV300 (V4A): die-identical to Hi3516AV300 / Hi3516CV500 — same
+ * dual Cortex-A7 @900MHz, same 0x12xxxxxx peripheral map, same MMC,
+ * same SRAM, same DDR layout.  Per ipctool's hal_hisi.c the chip is
+ * distinguished only by the SCSYSID0 family ID 0x3516D300 (vs CV500's
+ * 0x3516C500 and AV300's 0x3516A300); shipped in the Hi3516CV500 SDK
+ * as a sibling target (`hi3516dv300_spi_smp_image_glibc`).
+ */
+static const HisiSoCConfig hi3516dv300_soc = {
+    .name               = "hi3516dv300",
+    .desc               = "HiSilicon Hi3516DV300 (Cortex-A7, dual-core, CV500 sibling)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_DV300,
+    .hwrng_base         = 0x10090000,
+    .hwrng_data_offset  = 0x204,
+    .ram_size_default   = 128 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,96M",
+    .max_cpus           = 2,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 40 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12020000,
+    .crg_base           = 0x12010000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x120A0000, 0x120A1000, 0x120A2000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x12000000, 0x12001000 },
+    .timer_irqs         = { 1, 2 },
+
+    .num_spis           = 3,
+    .spi_bases          = { 0x120C0000, 0x120C1000, 0x120C2000 },
+    .spi_irqs           = { 68, 69, 70 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .gpio_base          = 0x120D0000,
+    .gpio_count         = 11,
+    .gpio_stride        = 0x1000,
+    .gpio_irq_start     = 16,
+    .gpio_extras        = {
+        { 0x120DB000, 80 },
+    },
+
+    .femac_base         = 0x10010000,
+    .femac_irq          = 32,
+
+    .num_himci          = 3,
+    .himci_bases        = { 0x10100000, 0x100F0000, 0x10020000 },
+    .himci_irqs         = { 64, 30, 31 },
+
+    .num_i2c            = 7,
+    .i2c_bases          = { 0x120B0000, 0x120B1000, 0x120B2000, 0x120B3000,
+                            0x120B5000, 0x120B6000, 0x120B7000 },
+
+    .mipi_rx_base       = 0x113A0000,
+    .mipi_rx_irq        = 57,
+
+    .rtc_base           = 0x12080000,
+    .rtc_irq            = 5,
+
+    .vedu_base          = 0x11500000,
+    .jpge_base          = 0x11220000,
+    .vedu_irq           = 40,
+    .jpge_irq           = 36,
+
+    .wdt_base           = 0x12051000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_crg_defaults   = 4,
+    .crg_defaults       = {
+        { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
+               | (1 << 11) | (1 << 12) | (1 << 13)
+               | (1 << 14) | (1 << 15) | (1 << 16)
+               | (1 << 17) | (1 << 18) },
+        { 0x144, 0x02 },
+        { 0x16C, 0x02 },
+        { 0x78,  (1 << 2) | (1 << 4) },
+    },
+
+    .gzip_base          = 0x11200000,
+
+    .cpu_srst_offset    = 0x78,
+
+    .num_regbanks       = 11,
+    .regbanks           = {
+        { "hisi-misc",       0x12030000, 0x8000  },
+        { "hisi-ddr",        0x12060000, 0x10000 },
+        { "hisi-iocfg",      0x12040000, 0x10000 },
+        { "hisi-iocfg2",     0x10FF0000, 0x10000 },
+        { "hisi-pwm",        0x12070000, 0x10000 },
+        { "hisi-usb3",       0x100E0000, 0x10000 },
+        { "hisi-vi-cap",     0x11300000, 0x100000 },
+        { "hisi-vi-proc",    0x11000000, 0x40000 },
+        { "hisi-vpss",       0x11040000, 0x10000 },
+        { "hisi-aiao",       0x113B0000, 0x20000 },
+        { "hisi-npu",        0x11700000, 0x100000 },
     },
 };
 
@@ -4239,9 +4446,11 @@ static void hisi_machine_set_sensor(Object *obj, const char *value,
 DEFINE_HISI_MACHINE("hi3516cv100", hi3516cv100, hi3516cv100_soc)
 DEFINE_HISI_MACHINE("hi3516cv200", hi3516cv200, hi3516cv200_soc)
 DEFINE_HISI_MACHINE("hi3516av100", hi3516av100, hi3516av100_soc)
+DEFINE_HISI_MACHINE("hi3516dv100", hi3516dv100, hi3516dv100_soc)
 DEFINE_HISI_MACHINE("hi3516cv300", hi3516cv300, hi3516cv300_soc)
 DEFINE_HISI_MACHINE("hi3516cv500", hi3516cv500, hi3516cv500_soc)
 DEFINE_HISI_MACHINE("hi3516av300", hi3516av300, hi3516av300_soc)
+DEFINE_HISI_MACHINE("hi3516dv300", hi3516dv300, hi3516dv300_soc)
 DEFINE_HISI_MACHINE("hi3519v101", hi3519v101, hi3519v101_soc)
 DEFINE_HISI_MACHINE("hi3516av200", hi3516av200, hi3516av200_soc)
 DEFINE_HISI_MACHINE("hi3516ev300", hi3516ev300, hi3516ev300_soc)
