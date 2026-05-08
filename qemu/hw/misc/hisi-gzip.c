@@ -97,6 +97,24 @@ struct HisiGzipState {
     uint32_t buf_info;
     uint32_t rtn_info;        /* bit 31 = avail, bits [7:0] = err */
     uint32_t rtn_len;         /* decompressed length */
+
+    /*
+     * Maximum sliding-window size the hardware decoder can use, in
+     * bytes.  Real V4 / Goke V4 silicon has only 8 KiB of window
+     * memory; deflate streams compressed with a larger WSIZE will
+     * contain back-references > 8192 that cannot be reconstructed
+     * and the chip aborts decompression.  The OpenIPC u-boot tree
+     * ships a patched gzip-1.8 (WSIZE = 0x2000) for that reason.
+     *
+     * We feed this to zlib's inflateInit2() as windowBits — any
+     * back-reference beyond 2^windowBits then makes inflate()
+     * return Z_DATA_ERROR, matching real-silicon behaviour.
+     *
+     * Property "max-window-bytes" overrides at -global time.  Must
+     * be a power of two in [256, 32768].  Defaults to 8192 since
+     * every SoC currently using this device has the 8 KiB hardware.
+     */
+    uint32_t max_window_bytes;
 };
 
 /* ── Decompress engine ─────────────────────────────────────────────── */
@@ -130,18 +148,31 @@ static void hisi_gzip_do_decompress(HisiGzipState *s, uint32_t src_len_reg)
     /* Allocate output buffer */
     uint8_t *dst_buf = g_malloc(dst_max);
 
-    /* Decompress using zlib (gzip format) */
+    /* Decompress using zlib (gzip format).
+     *
+     * windowBits = log2(max_window_bytes) | 32 → gzip+zlib auto-detect
+     * with the hardware-imposed window cap.  zlib returns Z_DATA_ERROR
+     * if the stream contains a back-reference beyond the cap (matches
+     * real silicon's "Uncompress Fail!" path).  See openhisilicon#85.
+     */
+    uint32_t wb_bytes = s->max_window_bytes ? s->max_window_bytes : 8192;
+    int wb_log2 = 0;
+    while ((1u << wb_log2) < wb_bytes) wb_log2++;
+    if (wb_log2 < 8) wb_log2 = 8;
+    if (wb_log2 > 15) wb_log2 = 15;
+    int windowBits = wb_log2 | 32;
+
     z_stream strm = {0};
     strm.next_in = src_buf;
     strm.avail_in = src_len;
     strm.next_out = dst_buf;
     strm.avail_out = dst_max;
 
-    /* windowBits=31 means gzip auto-detect (16 + MAX_WBITS) */
-    int ret = inflateInit2(&strm, 31);
+    int ret = inflateInit2(&strm, windowBits);
     if (ret != Z_OK) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "hisi-gzip: inflateInit2 failed: %d\n", ret);
+                      "hisi-gzip: inflateInit2(%d) failed: %d\n",
+                      windowBits, ret);
         s->rtn_info = (1u << 31) | 1;
         s->rtn_len = 0;
         s->int_status |= 1;
@@ -152,22 +183,36 @@ static void hisi_gzip_do_decompress(HisiGzipState *s, uint32_t src_len_reg)
 
     ret = inflate(&strm, Z_FINISH);
     uint32_t out_len = strm.total_out;
+    const char *zmsg = strm.msg;
     inflateEnd(&strm);
 
     if (ret != Z_STREAM_END && ret != Z_OK) {
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "hisi-gzip: inflate failed: %d (produced %u bytes)\n",
-                      ret, out_len);
-        /* Still write whatever was produced — some firmwares tolerate
-         * partial decompression */
-        if (out_len == 0) {
-            s->rtn_info = (1u << 31) | 1;
-            s->rtn_len = 0;
-            s->int_status |= 1;
-            g_free(src_buf);
-            g_free(dst_buf);
-            return;
+        if (ret == Z_DATA_ERROR && zmsg &&
+            strstr(zmsg, "distance too far back")) {
+            /* Stream uses a back-reference beyond our window cap —
+             * this is exactly the case the WSIZE=0x2000 patched gzip
+             * was meant to avoid.  Surface it loudly so test authors
+             * don't repeat the archaeology in #85. */
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "hisi-gzip: deflate back-distance exceeds %u-byte "
+                          "window (zlib: %s) — stream needs WSIZE<=%u "
+                          "(rebuild u-boot-z.bin with patched gzip; see "
+                          "openhisilicon#85)\n",
+                          1u << wb_log2, zmsg, 1u << wb_log2);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "hisi-gzip: inflate failed: %d (%s) "
+                          "(produced %u bytes)\n",
+                          ret, zmsg ? zmsg : "no msg", out_len);
         }
+        /* Mark failure unconditionally for these errors — real silicon
+         * raises Uncompress Fail!, no partial-output tolerance. */
+        s->rtn_info = (1u << 31) | 1;
+        s->rtn_len = 0;
+        s->int_status |= 1;
+        g_free(src_buf);
+        g_free(dst_buf);
+        return;
     }
 
     /* Write decompressed data to guest memory */
@@ -296,11 +341,27 @@ static void hisi_gzip_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
+static const Property hisi_gzip_properties[] = {
+    /* HW sliding-window cap.  Real V4 / Goke V4 silicon has 8 KiB;
+     * future SoCs with bigger HW windows can override at -global time
+     * to anything in [256, 32768] (clamped to power-of-two log2 in the
+     * decompress path).  See openhisilicon#85. */
+    DEFINE_PROP_UINT32("max-window-bytes", HisiGzipState,
+                       max_window_bytes, 8192),
+};
+
+static void hisi_gzip_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    device_class_set_props(dc, hisi_gzip_properties);
+}
+
 static const TypeInfo hisi_gzip_info = {
     .name          = TYPE_HISI_GZIP,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(HisiGzipState),
     .instance_init = hisi_gzip_init,
+    .class_init    = hisi_gzip_class_init,
 };
 
 static void hisi_gzip_register(void)
