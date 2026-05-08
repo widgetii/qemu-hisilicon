@@ -270,66 +270,63 @@ static void hisi_gmac_update_irq(HisiGmacState *s)
 /* ── Descriptor ring helpers ────────────────────────────────────────── */
 
 /*
- * Descriptor ring helpers.
+ * Descriptor ring layout.
  *
- * The kernel driver writes depth = DESC_NUM << DESC_WORD_SHIFT where
- * DESC_WORD_SHIFT is 2 (16-byte descriptors) or 3 (32-byte descriptors).
- * WR/RD pointers use byte offsets = index << DESC_BYTE_SHIFT where
- * DESC_BYTE_SHIFT = DESC_WORD_SHIFT + 2.
+ * The driver writes depth_reg = num_descriptors * (desc_size_bytes / 4)
+ * — i.e. queue extent measured in 32-bit words.  The WR/RD pointers
+ * are BYTE offsets into the queue and advance by DESC_SIZE per
+ * descriptor, wrapping at queue_size_bytes.
  *
- * DESC_NUM is always 1024, so: DESC_SIZE = depth_reg * 4 / 1024.
+ * Both U-Boot (HIGMAC_HWQ_TX_BQ_DEPTH=2) and the vendor kernel
+ * (HIGMAC_HWQ_TX_BQ_DEPTH=1024) use 32-byte descriptors on AV100 and
+ * 3519V101's higmac IP — DESC_SIZE is hardcoded 32 in the kernel's
+ * higmac.h.  We hardcode 32 here too.  (4-word/16-byte descriptors are
+ * a CONFIG_HIGMAC_DESC_4_WORD opt-in not used by default.)
  */
-#define HW_DESC_NUM     1024
+#define DESC_SIZE_BYTES         32
 
-/* Get descriptor size in bytes from the depth register value */
-static inline uint32_t hw_desc_size(uint32_t depth_reg)
+/* Queue size in bytes from the depth register value (queue size in
+ * words, so * 4).  0 if the driver hasn't programmed depth yet. */
+static inline uint32_t queue_size_bytes(uint32_t depth_reg)
 {
-    /* depth = 1024 * (desc_size / 4), so desc_size = depth * 4 / 1024 */
-    uint32_t ds = (depth_reg >> 8);  /* depth * 4 / 1024 = depth >> 8 */
-    return ds ? ds : 16;
+    return depth_reg * 4;
 }
 
-/* Convert WR/RD register (byte offset) to descriptor index */
-static inline uint32_t ptr_to_idx(uint32_t ptr, uint32_t depth_reg)
+/* Advance a byte-offset ring pointer by one descriptor, wrapping at
+ * queue_size_bytes.  Returns 0 if the queue is unsized. */
+static inline uint32_t ring_next_ptr(uint32_t ptr, uint32_t depth_reg)
 {
-    uint32_t ds = hw_desc_size(depth_reg);
-    return ptr / ds;
-}
-
-/* Convert descriptor index to WR/RD register value (byte offset) */
-static inline uint32_t idx_to_ptr(uint32_t idx, uint32_t depth_reg)
-{
-    return idx * hw_desc_size(depth_reg);
-}
-
-/* Advance a descriptor index by one, wrapping at HW_DESC_NUM */
-static inline uint32_t ring_next_idx(uint32_t idx)
-{
-    return (idx + 1) & (HW_DESC_NUM - 1);
+    uint32_t qsz = queue_size_bytes(depth_reg);
+    if (!qsz) {
+        return 0;
+    }
+    ptr += DESC_SIZE_BYTES;
+    if (ptr >= qsz) {
+        ptr = 0;
+    }
+    return ptr;
 }
 
 /* ── TX path: process packets from TX_BQ ring ───────────────────────── */
 
 static void hisi_gmac_tx(HisiGmacState *s)
 {
-    uint32_t ds;
-    uint32_t rd_idx, wr_idx;
+    uint32_t rd_ptr, wr_ptr;
     uint8_t buf[2048];
 
     if (!s->tx_bq_depth || !(s->port_en & BITS_TX_EN) || !s->desc_wr_rd_ena) {
         return;
     }
 
-    ds = hw_desc_size(s->tx_bq_depth);
-    rd_idx = ptr_to_idx(s->tx_bq_rd, s->tx_bq_depth);
-    wr_idx = ptr_to_idx(s->tx_bq_wr, s->tx_bq_depth);
+    rd_ptr = s->tx_bq_rd;
+    wr_ptr = s->tx_bq_wr;
 
-    while (rd_idx != wr_idx) {
-        uint32_t desc_addr = s->tx_bq_start + rd_idx * ds;
-        uint32_t desc[8]; /* up to 32 bytes */
+    while (rd_ptr != wr_ptr) {
+        uint32_t desc_addr = s->tx_bq_start + rd_ptr;
+        uint32_t desc[DESC_SIZE_BYTES / 4];
 
         dma_memory_read(&address_space_memory, desc_addr,
-                        desc, ds, MEMTXATTRS_UNSPECIFIED);
+                        desc, DESC_SIZE_BYTES, MEMTXATTRS_UNSPECIFIED);
 
         uint32_t data_addr = desc[0];
         uint32_t w1 = desc[1];
@@ -349,22 +346,19 @@ static void hisi_gmac_tx(HisiGmacState *s)
 
         /* Write completion descriptor to TX_RQ ring */
         if (s->tx_rq_depth) {
-            uint32_t rq_ds = hw_desc_size(s->tx_rq_depth);
-            uint32_t rq_idx = ptr_to_idx(s->tx_rq_wr, s->tx_rq_depth);
-            uint32_t rq_addr = s->tx_rq_start + rq_idx * rq_ds;
+            uint32_t rq_addr = s->tx_rq_start + s->tx_rq_wr;
 
             desc[1] = (w1 & ~(1u << 31));
             dma_memory_write(&address_space_memory, rq_addr,
-                             desc, rq_ds, MEMTXATTRS_UNSPECIFIED);
+                             desc, DESC_SIZE_BYTES, MEMTXATTRS_UNSPECIFIED);
 
-            rq_idx = ring_next_idx(rq_idx);
-            s->tx_rq_wr = idx_to_ptr(rq_idx, s->tx_rq_depth);
+            s->tx_rq_wr = ring_next_ptr(s->tx_rq_wr, s->tx_rq_depth);
         }
 
-        rd_idx = ring_next_idx(rd_idx);
+        rd_ptr = ring_next_ptr(rd_ptr, s->tx_bq_depth);
     }
 
-    s->tx_bq_rd = idx_to_ptr(rd_idx, s->tx_bq_depth);
+    s->tx_bq_rd = rd_ptr;
 
     /* Raise TX completion interrupt */
     if (s->tx_rq_wr != s->tx_rq_rd) {
@@ -401,14 +395,11 @@ static ssize_t hisi_gmac_receive(NetClientState *nc, const uint8_t *buf,
         return -1;
     }
 
-    uint32_t fq_ds = hw_desc_size(s->rx_fq_depth);
-    uint32_t fq_idx = ptr_to_idx(s->rx_fq_rd, s->rx_fq_depth);
-
     /* Pop a descriptor from RX_FQ */
-    uint32_t fq_addr = s->rx_fq_start + fq_idx * fq_ds;
-    uint32_t desc[8];
+    uint32_t fq_addr = s->rx_fq_start + s->rx_fq_rd;
+    uint32_t desc[DESC_SIZE_BYTES / 4];
     dma_memory_read(&address_space_memory, fq_addr,
-                    desc, fq_ds, MEMTXATTRS_UNSPECIFIED);
+                    desc, DESC_SIZE_BYTES, MEMTXATTRS_UNSPECIFIED);
 
     uint32_t data_addr = desc[0];
     uint32_t w1 = desc[1];
@@ -423,13 +414,10 @@ static ssize_t hisi_gmac_receive(NetClientState *nc, const uint8_t *buf,
                      buf, size, MEMTXATTRS_UNSPECIFIED);
 
     /* Advance RX_FQ read pointer */
-    fq_idx = ring_next_idx(fq_idx);
-    s->rx_fq_rd = idx_to_ptr(fq_idx, s->rx_fq_depth);
+    s->rx_fq_rd = ring_next_ptr(s->rx_fq_rd, s->rx_fq_depth);
 
     /* Push descriptor to RX_BQ with received length */
-    uint32_t bq_ds = hw_desc_size(s->rx_bq_depth);
-    uint32_t bq_idx = ptr_to_idx(s->rx_bq_wr, s->rx_bq_depth);
-    uint32_t bq_addr = s->rx_bq_start + bq_idx * bq_ds;
+    uint32_t bq_addr = s->rx_bq_start + s->rx_bq_wr;
 
     w1 = (w1 & 0x7FF) |
          ((uint32_t)size << 16) |
@@ -438,10 +426,9 @@ static ssize_t hisi_gmac_receive(NetClientState *nc, const uint8_t *buf,
     desc[1] = w1;
 
     dma_memory_write(&address_space_memory, bq_addr,
-                     desc, bq_ds, MEMTXATTRS_UNSPECIFIED);
+                     desc, DESC_SIZE_BYTES, MEMTXATTRS_UNSPECIFIED);
 
-    bq_idx = ring_next_idx(bq_idx);
-    s->rx_bq_wr = idx_to_ptr(bq_idx, s->rx_bq_depth);
+    s->rx_bq_wr = ring_next_ptr(s->rx_bq_wr, s->rx_bq_depth);
 
     /* Raise RX interrupt */
     s->raw_pmu_int |= RX_BQ_IN_INT;
