@@ -2765,7 +2765,15 @@ static const HisiSoCConfig hi3520dv200_soc = {
     .timer_freq         = 99000000,
 
     .num_spis           = 0,
-    .fmc_ctrl_base      = 0,
+
+    /* HISFC350 SPI flash controller — vendor U-Boot platform.h hardcodes
+     * SFC_REG_BASE = 0x10010000 and SFC_MEM_BASE = 0x58000000 (same V1-era
+     * layout as Hi3516CV100 / Hi3518EV100).  Lets `-machine hi3520dv200,
+     * flash-file=...` boot vendor / OpenIPC U-Boot directly from the
+     * NOR image (openhisilicon#89). */
+    .fmc_ctrl_base      = 0x10010000,
+    .fmc_mem_base       = 0x58000000,
+    .fmc_type           = "hisi-sfc350",
 
     .num_i2c            = 1,
     .i2c_bases          = { 0x200d0000 },
