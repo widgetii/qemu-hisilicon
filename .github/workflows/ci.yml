@@ -234,29 +234,34 @@ jobs:
 
           # hi3516cv610 (V5) excluded: no OpenIPC firmware release yet
 
-          # NVR/DVR family — OpenIPC ships nor-lite firmware for 3 SoCs:
-          # hi3520dv200, hi3536cv100, hi3536dv100.  All three boot cleanly
-          # with the same -kernel/-initrd path used for IPC.  The earlier
-          # PL011-disabled-UART silent-hang on the Linux 3.0.8 build for
-          # hi3520dv200 is now handled by uart_pre_enable + the HIL2V200
-          # L2-cache and hieth-sf stubs (openhisilicon#66/#68/#70).  The
-          # U-Boot smoke gate parallel to hi3516av100 will follow once
-          # OpenIPC firmware/latest publishes u-boot-hi3520dv200-universal
-          # .bin (openhisilicon#89).
+          # NVR/DVR family — OpenIPC ships nor-lite firmware (kernel +
+          # rootfs) and u-boot-${soc}-universal.bin for 3 SoCs:
+          # hi3520dv200, hi3536cv100, hi3536dv100.  Linux boot test runs
+          # for all three.  U-Boot smoke gate is wired up parallel to
+          # hi3516av100 (openhisilicon#59 / #74).  hi3536dv100 (femac)
+          # runs the full ping path; the other two fall back to smoke
+          # (autoboot reached) — hi3520dv200's hieth-sf is a regbank stub
+          # without a real PHY model, and hi3536cv100's vendor U-Boot
+          # probes a 2-PHY GMAC config that can't link in our model.
           - name: hi3520dv200
             soc: hi3520dv200
             machine: hi3520dv200
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs"
+            uboot_bin: u-boot-hi3520dv200-universal.bin
+            uboot_smoke_only: true
 
           - name: hi3536cv100
             soc: hi3536cv100
             machine: hi3536cv100
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs"
+            uboot_bin: u-boot-hi3536cv100-universal.bin
+            uboot_smoke_only: true
 
           - name: hi3536dv100
             soc: hi3536dv100
             machine: hi3536dv100
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs"
+            uboot_bin: u-boot-hi3536dv100-universal.bin
 
     continue-on-error: ${{ matrix.allow_failure == true }}
 
@@ -415,6 +420,30 @@ jobs:
             fi
             sleep 0.5
           done
+
+          # Smoke-only mode: stop after the autoboot prompt, skip the network
+          # half.  Used for SoCs whose U-Boot networking path doesn't complete
+          # in QEMU even though U-Boot itself runs — e.g. hi3520dv200's
+          # hieth-sf is a regbank stub (no real PHY model), and hi3536cv100's
+          # vendor U-Boot probes a 2-PHY GMAC config that can't link in our
+          # single-PHY model.  Same gate shape OpenIPC/u-boot-{cv200,cv300}
+          # use downstream ("gets past System startup").
+          SMOKE_ONLY="${{ matrix.uboot_smoke_only || 'false' }}"
+          if [ "$SMOKE_ONLY" = "true" ]; then
+            exec 3>&-
+            kill $QEMU_PID 2>/dev/null || true
+            wait 2>/dev/null || true
+            rm -f /tmp/ub.in /tmp/ub.out
+
+            echo ""
+            if grep -q "autoboot" /tmp/uboot-ping.txt; then
+              echo "=== PASS: U-Boot smoke (reached autoboot) ==="
+            else
+              echo "=== FAIL: U-Boot smoke (no autoboot prompt) ==="
+              exit 1
+            fi
+            exit 0
+          fi
 
           # Interrupt autoboot (spam Ctrl-C until we see the prompt)
           for i in $(seq 1 20); do
