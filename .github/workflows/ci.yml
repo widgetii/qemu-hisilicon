@@ -238,17 +238,16 @@ jobs:
           # rootfs) and u-boot-${soc}-universal.bin for 3 SoCs:
           # hi3520dv200, hi3536cv100, hi3536dv100.  Linux boot test runs
           # for all three.  U-Boot smoke gate is wired up parallel to
-          # hi3516av100 (openhisilicon#59 / #74).  hi3536dv100 (femac)
-          # runs the full ping path; the other two fall back to smoke
-          # (autoboot reached) — hi3520dv200's hieth-sf is a regbank stub
-          # without a real PHY model, and hi3536cv100's vendor U-Boot
-          # probes a 2-PHY GMAC config that can't link in our model.
+          # hi3516av100 (openhisilicon#59 / #74).  hi3520dv200 and
+          # hi3536dv100 (both femac/hieth-sf) run the full ping path;
+          # hi3536cv100 stays smoke-only — its vendor U-Boot probes a
+          # 2-PHY GMAC config that can't link in our single-PHY model.
           - name: hi3520dv200
             soc: hi3520dv200
             machine: hi3520dv200
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs"
+            ping_linux: true
             uboot_bin: u-boot-hi3520dv200-universal.bin
-            uboot_smoke_only: true
 
           - name: hi3536cv100
             soc: hi3536cv100
@@ -423,11 +422,10 @@ jobs:
 
           # Smoke-only mode: stop after the autoboot prompt, skip the network
           # half.  Used for SoCs whose U-Boot networking path doesn't complete
-          # in QEMU even though U-Boot itself runs — e.g. hi3520dv200's
-          # hieth-sf is a regbank stub (no real PHY model), and hi3536cv100's
-          # vendor U-Boot probes a 2-PHY GMAC config that can't link in our
-          # single-PHY model.  Same gate shape OpenIPC/u-boot-{cv200,cv300}
-          # use downstream ("gets past System startup").
+          # in QEMU even though U-Boot itself runs — currently only
+          # hi3536cv100, whose vendor U-Boot probes a 2-PHY GMAC config that
+          # can't link in our single-PHY model.  Same gate shape OpenIPC/
+          # u-boot-{cv200,cv300} use downstream ("gets past System startup").
           SMOKE_ONLY="${{ matrix.uboot_smoke_only || 'false' }}"
           if [ "$SMOKE_ONLY" = "true" ]; then
             exec 3>&-
