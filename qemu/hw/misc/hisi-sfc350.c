@@ -98,7 +98,10 @@
 #define SFC350_VERSION_ID       0x350
 
 #define CTRL_REG_SIZE           0x500
-#define MEM_WINDOW_SIZE         (16 * 1024 * 1024)
+/* Window sized for the largest SPI NOR we boot in QEMU (MX25L25635E = 32 MiB
+ * on hi3520dv200, openipc/firmware#2089).  mem_read returns 0xFF for offsets
+ * past s->flash_size so smaller flash images stay correct. */
+#define MEM_WINDOW_SIZE         (32 * 1024 * 1024)
 #define DATABUF_REGS            16
 #define DATABUF_BYTES           (DATABUF_REGS * 4)
 
