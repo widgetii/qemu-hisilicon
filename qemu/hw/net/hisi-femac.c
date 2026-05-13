@@ -175,6 +175,7 @@ struct HisiFemacState {
     uint16_t phy_bmsr;
     uint16_t phy_anar;
     uint16_t phy_anlpar;
+    uint8_t  phy_addr;  /* MDIO address the integrated PHY responds at */
 
     /* GLB */
     uint32_t hostmac_l32;
@@ -277,11 +278,12 @@ static void hisi_femac_mdio_access(HisiFemacState *s, uint32_t val)
     s->mdio_rwctrl = val | MDIO_RW_FINISH;
 
     /*
-     * Respond to PHY address 0 (U-Boot default) and 1 (Linux DTB default).
+     * Respond to PHY address 0 (U-Boot default) and the configured PHY
+     * address (Linux DTB / driver default — 1 for femac, 3 for hieth-sf).
      * Real hardware has one internal PHY; the address depends on the
      * driver configuration.
      */
-    if (phy_addr != FEMAC_PHY_ADDR && phy_addr != 0) {
+    if (phy_addr != s->phy_addr && phy_addr != 0) {
         s->mdio_ro_data = 0xffff;
         return;
     }
@@ -757,6 +759,7 @@ static void hisi_femac_reset(DeviceState *dev)
 
 static const Property hisi_femac_properties[] = {
     DEFINE_NIC_PROPERTIES(HisiFemacState, conf),
+    DEFINE_PROP_UINT8("phy-addr", HisiFemacState, phy_addr, FEMAC_PHY_ADDR),
 };
 
 static void hisi_femac_class_init(ObjectClass *klass, const void *data)

@@ -2800,8 +2800,11 @@ static const HisiSoCConfig hi3520dv200_soc = {
 
     /* HiSilicon SF Ethernet (drivers/net/hieth-sf/) — vendor 3.0.x
      * kernel hangs in hieth_init (sys-hi3520d.c set_phy_valtage busy
-     * waits on MDIO_RWCTRL bit 15) without this (openhisilicon#68). */
+     * waits on MDIO_RWCTRL bit 15) without this (openhisilicon#68).
+     * Vendor `drivers/net/hieth-sf/Kconfig` sets HIETH_IRQNUM = 56 for
+     * ARCH_HI3520D (Linux IRQ); GIC SPI = 56 - HI3520D_IRQ_START(32). */
     .hieth_sf_base      = 0x10090000,
+    .hieth_sf_irq       = 24,
 
     /* CRG default register state — vendor get_bus_clk() reads CRG0 + CRG1
      * + A9_AXI_SCALE_REG to compute busclk = (24 MHz / refdiv * fbdiv) / 2.
@@ -4457,16 +4460,17 @@ static void hisilicon_common_init(MachineState *machine,
     }
 
     /* HiSilicon SF (single-FIFO) Ethernet controller — Hi3520D family.
-     * Vendor 3.0.x drivers/net/hieth-sf/sys-hi3520d.c set_phy_valtage()
-     * busy-loops with no timeout on MDIO_RWCTRL bit 15.  This stub
-     * latches that bit on writes and returns 0xFFFF on PHY-data reads
-     * so autoscan finds nothing and the probe exits with -ENODEV.  See
-     * openhisilicon#68. */
+     * Subclass of `hisi-femac` (same register layout) with the integrated
+     * PHY responding at MDIO address 3 instead of 1 (vendor drivers/net/
+     * hieth-sf/mdio.c scans the himii bus and binds at himii:03).  Full
+     * TX/RX/IRQ inherited from FEMAC. */
     if (c->hieth_sf_base) {
         DeviceState *eth = qdev_new("hisi-hieth-sf");
+        qemu_configure_nic_device(eth, true, NULL);
         SysBusDevice *busdev = SYS_BUS_DEVICE(eth);
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, c->hieth_sf_base);
+        sysbus_connect_irq(busdev, 0, pic[c->hieth_sf_irq]);
     }
 
     /* Generic register banks (pin mux, DDR PHY, PWM, etc.) */

@@ -262,13 +262,13 @@ typedef struct HisiSoCConfig {
 
     /* HiSilicon SF (single-FIFO) Ethernet controller — used by Hi3520D
      * family and other vendor 3.0/3.4 kernels via drivers/net/hieth-sf/.
-     * The vendor sys-hi3520d.c set_phy_valtage() / revise_led_shine()
-     * busy-wait on MDIO_RWCTRL bit 15 with no timeout; a regbank stub
-     * spins forever.  The `hisi-hieth-sf` model latches that bit on
-     * MDIO_RWCTRL writes so the polling loop exits, and returns 0xFFFF
-     * for MDIO_RO_DATA so PHY autoscan finds nothing and the probe
-     * fails gracefully (no DMA-ring init).  No NIC packet path. */
+     * Register layout matches FEMAC byte-for-byte; the `hisi-hieth-sf`
+     * model subclasses `hisi-femac` and only overrides the PHY MDIO
+     * address (3 instead of 1, where vendor `drivers/net/hieth-sf/
+     * mdio.c` scans the himii bus).  Full TX/RX rings and IRQ path
+     * are inherited from the FEMAC model. */
     hwaddr          hieth_sf_base; /* 0 = no HiSilicon SF Ethernet */
+    int             hieth_sf_irq;  /* GIC SPI for the hieth-sf controller */
 
     /* Hardware True Random Number Generator
      * (HISEC_TRNG_CTRL on V3+, RNG_GEN on V2) */
