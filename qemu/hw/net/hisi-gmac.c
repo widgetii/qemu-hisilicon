@@ -198,6 +198,9 @@ struct HisiGmacState {
     /* PHY registers */
     uint16_t phy_regs[32];
 
+    /* Descriptor size in bytes (16 or 32; CONFIG_HIGMAC_DESC_4_WORD). */
+    uint32_t desc_size_bytes;
+
     /* Backing register array for misc registers */
     uint32_t regs[MMIO_SIZE / 4];
 };
@@ -277,13 +280,17 @@ static void hisi_gmac_update_irq(HisiGmacState *s)
  * are BYTE offsets into the queue and advance by DESC_SIZE per
  * descriptor, wrapping at queue_size_bytes.
  *
- * Both U-Boot (HIGMAC_HWQ_TX_BQ_DEPTH=2) and the vendor kernel
- * (HIGMAC_HWQ_TX_BQ_DEPTH=1024) use 32-byte descriptors on AV100 and
- * 3519V101's higmac IP — DESC_SIZE is hardcoded 32 in the kernel's
- * higmac.h.  We hardcode 32 here too.  (4-word/16-byte descriptors are
- * a CONFIG_HIGMAC_DESC_4_WORD opt-in not used by default.)
+ * Descriptor size is 8 words (32 bytes) on AV100 / 3519V101 / hi3536dv100
+ * (vendor `drivers/net/.../higmac.h` `DESC_WORD_SHIFT=3`).  It's 4 words
+ * (16 bytes) when `CONFIG_HIGMAC_DESC_4_WORD` is set — e.g. hi3536cv100
+ * (`drivers/net/higmacv300/higmac.h` with `DESC_WORD_SHIFT=2`).  Word 0
+ * is the buffer DMA address and word 1 is the length/flags bitfield;
+ * later words are reserved padding, so the read/write path doesn't
+ * change — only the stride between descriptors does.  Exposed as the
+ * `desc-size` property (default 32, set to 16 for hi3536cv100).
  */
-#define DESC_SIZE_BYTES         32
+#define DESC_SIZE_BYTES_MAX     32
+#define DESC_SIZE_BYTES_DEFAULT 32
 
 /* Queue size in bytes from the depth register value (queue size in
  * words, so * 4).  0 if the driver hasn't programmed depth yet. */
@@ -294,13 +301,14 @@ static inline uint32_t queue_size_bytes(uint32_t depth_reg)
 
 /* Advance a byte-offset ring pointer by one descriptor, wrapping at
  * queue_size_bytes.  Returns 0 if the queue is unsized. */
-static inline uint32_t ring_next_ptr(uint32_t ptr, uint32_t depth_reg)
+static inline uint32_t ring_next_ptr(HisiGmacState *s, uint32_t ptr,
+                                     uint32_t depth_reg)
 {
     uint32_t qsz = queue_size_bytes(depth_reg);
     if (!qsz) {
         return 0;
     }
-    ptr += DESC_SIZE_BYTES;
+    ptr += s->desc_size_bytes;
     if (ptr >= qsz) {
         ptr = 0;
     }
@@ -323,10 +331,10 @@ static void hisi_gmac_tx(HisiGmacState *s)
 
     while (rd_ptr != wr_ptr) {
         uint32_t desc_addr = s->tx_bq_start + rd_ptr;
-        uint32_t desc[DESC_SIZE_BYTES / 4];
+        uint32_t desc[DESC_SIZE_BYTES_MAX / 4];
 
         dma_memory_read(&address_space_memory, desc_addr,
-                        desc, DESC_SIZE_BYTES, MEMTXATTRS_UNSPECIFIED);
+                        desc, s->desc_size_bytes, MEMTXATTRS_UNSPECIFIED);
 
         uint32_t data_addr = desc[0];
         uint32_t w1 = desc[1];
@@ -350,12 +358,12 @@ static void hisi_gmac_tx(HisiGmacState *s)
 
             desc[1] = (w1 & ~(1u << 31));
             dma_memory_write(&address_space_memory, rq_addr,
-                             desc, DESC_SIZE_BYTES, MEMTXATTRS_UNSPECIFIED);
+                             desc, s->desc_size_bytes, MEMTXATTRS_UNSPECIFIED);
 
-            s->tx_rq_wr = ring_next_ptr(s->tx_rq_wr, s->tx_rq_depth);
+            s->tx_rq_wr = ring_next_ptr(s, s->tx_rq_wr, s->tx_rq_depth);
         }
 
-        rd_ptr = ring_next_ptr(rd_ptr, s->tx_bq_depth);
+        rd_ptr = ring_next_ptr(s, rd_ptr, s->tx_bq_depth);
     }
 
     s->tx_bq_rd = rd_ptr;
@@ -397,9 +405,9 @@ static ssize_t hisi_gmac_receive(NetClientState *nc, const uint8_t *buf,
 
     /* Pop a descriptor from RX_FQ */
     uint32_t fq_addr = s->rx_fq_start + s->rx_fq_rd;
-    uint32_t desc[DESC_SIZE_BYTES / 4];
+    uint32_t desc[DESC_SIZE_BYTES_MAX / 4];
     dma_memory_read(&address_space_memory, fq_addr,
-                    desc, DESC_SIZE_BYTES, MEMTXATTRS_UNSPECIFIED);
+                    desc, s->desc_size_bytes, MEMTXATTRS_UNSPECIFIED);
 
     uint32_t data_addr = desc[0];
     uint32_t w1 = desc[1];
@@ -414,7 +422,7 @@ static ssize_t hisi_gmac_receive(NetClientState *nc, const uint8_t *buf,
                      buf, size, MEMTXATTRS_UNSPECIFIED);
 
     /* Advance RX_FQ read pointer */
-    s->rx_fq_rd = ring_next_ptr(s->rx_fq_rd, s->rx_fq_depth);
+    s->rx_fq_rd = ring_next_ptr(s, s->rx_fq_rd, s->rx_fq_depth);
 
     /* Push descriptor to RX_BQ with received length */
     uint32_t bq_addr = s->rx_bq_start + s->rx_bq_wr;
@@ -426,9 +434,9 @@ static ssize_t hisi_gmac_receive(NetClientState *nc, const uint8_t *buf,
     desc[1] = w1;
 
     dma_memory_write(&address_space_memory, bq_addr,
-                     desc, DESC_SIZE_BYTES, MEMTXATTRS_UNSPECIFIED);
+                     desc, s->desc_size_bytes, MEMTXATTRS_UNSPECIFIED);
 
-    s->rx_bq_wr = ring_next_ptr(s->rx_bq_wr, s->rx_bq_depth);
+    s->rx_bq_wr = ring_next_ptr(s, s->rx_bq_wr, s->rx_bq_depth);
 
     /* Raise RX interrupt */
     s->raw_pmu_int |= RX_BQ_IN_INT;
@@ -668,6 +676,13 @@ static void hisi_gmac_realize(DeviceState *dev, Error **errp)
 
 static const Property hisi_gmac_properties[] = {
     DEFINE_NIC_PROPERTIES(HisiGmacState, conf),
+    /* Descriptor stride: 32 bytes by default (8-word descriptor), 16 for
+     * SoCs whose vendor higmacv300 sets CONFIG_HIGMAC_DESC_4_WORD — e.g.
+     * hi3536cv100.  Word 0 (buffer DMA addr) and word 1 (length/flags)
+     * sit at the same offsets in both layouts, only the per-descriptor
+     * stride differs. */
+    DEFINE_PROP_UINT32("desc-size", HisiGmacState, desc_size_bytes,
+                       DESC_SIZE_BYTES_DEFAULT),
 };
 
 static void hisi_gmac_class_init(ObjectClass *klass, const void *data)

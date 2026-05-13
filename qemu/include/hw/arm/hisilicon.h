@@ -170,6 +170,10 @@ typedef struct HisiSoCConfig {
     /* GMAC (Gigabit Ethernet MAC) — for AV100, 3519V101 */
     hwaddr          gmac_base;      /* 0 = no GMAC */
     int             gmac_irq;
+    /* Descriptor stride in bytes (0 = device default of 32).  Set to 16
+     * for SoCs whose vendor higmacv300 driver defines
+     * CONFIG_HIGMAC_DESC_4_WORD — currently hi3536cv100. */
+    uint32_t        gmac_desc_size;
 
     /* SD/MMC — himciv200 (older SoCs) */
     int             num_himci;

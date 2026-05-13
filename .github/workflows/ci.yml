@@ -237,11 +237,10 @@ jobs:
           # NVR/DVR family — OpenIPC ships nor-lite firmware (kernel +
           # rootfs) and u-boot-${soc}-universal.bin for 3 SoCs:
           # hi3520dv200, hi3536cv100, hi3536dv100.  Linux boot test runs
-          # for all three.  U-Boot smoke gate is wired up parallel to
-          # hi3516av100 (openhisilicon#59 / #74).  hi3520dv200 and
-          # hi3536dv100 (both femac/hieth-sf) run the full ping path;
-          # hi3536cv100 stays smoke-only — its vendor U-Boot probes a
-          # 2-PHY GMAC config that can't link in our single-PHY model.
+          # for all three; all three also run the full U-Boot ping path
+          # (parallel to hi3516av100, openhisilicon#59 / #74).  See the
+          # per-SoC notes in qemu/hw/arm/hisilicon.c for which Ethernet
+          # controller each instantiates (hieth-sf, femac, gmac).
           - name: hi3520dv200
             soc: hi3520dv200
             machine: hi3520dv200
@@ -254,7 +253,6 @@ jobs:
             machine: hi3536cv100
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs"
             uboot_bin: u-boot-hi3536cv100-universal.bin
-            uboot_smoke_only: true
 
           - name: hi3536dv100
             soc: hi3536dv100
@@ -421,11 +419,10 @@ jobs:
           done
 
           # Smoke-only mode: stop after the autoboot prompt, skip the network
-          # half.  Used for SoCs whose U-Boot networking path doesn't complete
-          # in QEMU even though U-Boot itself runs — currently only
-          # hi3536cv100, whose vendor U-Boot probes a 2-PHY GMAC config that
-          # can't link in our single-PHY model.  Same gate shape OpenIPC/
-          # u-boot-{cv200,cv300} use downstream ("gets past System startup").
+          # half.  Reserved for SoCs whose U-Boot networking path doesn't
+          # complete in QEMU even though U-Boot itself runs.  No DVR/NVR SoC
+          # uses this currently; it's kept available for new bring-ups that
+          # need to land the Linux gate before the network model is finished.
           SMOKE_ONLY="${{ matrix.uboot_smoke_only || 'false' }}"
           if [ "$SMOKE_ONLY" = "true" ]; then
             exec 3>&-

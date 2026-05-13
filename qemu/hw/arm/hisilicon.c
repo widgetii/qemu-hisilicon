@@ -3202,8 +3202,18 @@ static const HisiSoCConfig hi3536cv100_soc = {
     .dma_base           = 0x11020000,
     .dma_type           = "hisi-regbank",
 
-    .gmac_base          = 0x10010000,       /* same as Hi3536DV100 FE-MAC */
-    .gmac_irq           = 11,
+    /* Vendor higmacv300 — DT `ethernet@100a0000` in OpenIPC kernel
+     * arch/arm/boot/dts/hi3536c.dtsi, second port `ethernet@100a1000`.
+     * U-Boot `arch/arm/include/asm/arch-hi3536c/platform.h` defines
+     * GSF_REG_BASE = 0x100a0000, HIGMAC1_IOBASE = +0x1000.  Shared GIC
+     * SPI 16 between both ports.  Earlier 0x10010000/IRQ 11 was a stale
+     * copy from hi3536dv100's femac slot (different controller).
+     *
+     * Vendor `drivers/net/higmacv300/higmac.h` sets
+     * CONFIG_HIGMAC_DESC_4_WORD on hi3536cv100 — 16-byte descriptors. */
+    .gmac_base          = 0x100a0000,
+    .gmac_irq           = 16,
+    .gmac_desc_size     = 16,
 
     .num_i2c            = 1,
     .i2c_bases          = { 0x120c0000 },
@@ -3225,7 +3235,14 @@ static const HisiSoCConfig hi3536cv100_soc = {
     .regbanks           = {
         { "hisi-dmac",       0x11020000, 0x1000  },
         { "hisi-cipher",     0x11030000, 0x10000 },
-        { "hisi-gmac1",      0x10020000, 0x1000  },  /* 2nd GbE stub */
+        { "hisi-gmac1",      0x100a1000, 0x1000  },  /* HIGMAC1 stub
+                                                       — DT ethernet@100a1000,
+                                                       responds 0 so the
+                                                       vendor U-Boot probe
+                                                       loop falls through
+                                                       to HIGMAC0 (where our
+                                                       PHY at addr 1 links
+                                                       UP). */
         { "hisi-ir",         0x12140000, 0x10000 },
         { "hisi-misc",       0x12120000, 0x10000 },
     },
@@ -4257,10 +4274,13 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_connect_irq(busdev, 0, pic[c->femac_irq]);
     }
 
-    /* GMAC (Gigabit Ethernet MAC) — for AV100, 3519V101 */
+    /* GMAC (Gigabit Ethernet MAC) — for AV100, 3519V101, hi3536cv100… */
     if (c->gmac_base) {
         DeviceState *gmac = qdev_new("hisi-gmac");
         qemu_configure_nic_device(gmac, true, NULL);
+        if (c->gmac_desc_size) {
+            qdev_prop_set_uint32(gmac, "desc-size", c->gmac_desc_size);
+        }
         SysBusDevice *busdev = SYS_BUS_DEVICE(gmac);
         sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, c->gmac_base);
