@@ -170,6 +170,120 @@ jobs:
             /tmp/sofia-ci-*/http.log
           retention-days: 7
 
+  maskrom-av300:
+    name: AV300 mask-ROM end-to-end (-bios re.elf)
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 \
+            gcc-arm-none-eabi make
+
+      - name: Download QEMU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/
+
+      - name: Make QEMU executable
+        run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Checkout openhisilicon (bootrom RE source)
+        uses: actions/checkout@v4
+        with:
+          repository: openipc/openhisilicon
+          path: openhisilicon
+
+      - name: Build hi3516av300 mask-ROM re.elf
+        run: |
+          make -C openhisilicon/bootrom/hi3516av300 build
+          test -f openhisilicon/bootrom/hi3516av300/re.elf
+          ls -la openhisilicon/bootrom/hi3516av300/re.elf
+
+      - name: Verify mask-ROM handshake emission (no host reply)
+        timeout-minutes: 1
+        # Without a 0xAA reply, the bootrom resets in a loop. Each
+        # uart0_wait_start_frame call emits 25× 0x20 then 0x0a (one full
+        # handshake cycle = 26 bytes). 3 s captures many cycles. The
+        # first 26 bytes must match the exact handshake pattern — that
+        # asserts the full chain _entry → main → fastboot_update →
+        # burn_bootloader → uart0_wait_start_frame → uart0_write(0x20)
+        # ran verbatim from our reverse-engineered source.
+        run: |
+          timeout 3 ./qemu-src/build/qemu-system-arm \
+              -M hi3516av300 \
+              -bios openhisilicon/bootrom/hi3516av300/re.elf \
+              -display none -monitor none -serial stdio \
+              </dev/null >/tmp/uart-handshake.bin 2>/tmp/qemu-handshake.log || true
+
+          bytes=$(stat -c%s /tmp/uart-handshake.bin)
+          echo "captured: $bytes bytes in 3 s"
+          if [ "$bytes" -lt 26 ]; then
+            echo "FAIL: too few UART bytes — bootrom did not reach uart0_write"
+            echo "--- qemu stderr ---"
+            tail -20 /tmp/qemu-handshake.log
+            exit 1
+          fi
+          head=$(head -c 26 /tmp/uart-handshake.bin | xxd -p | tr -d '\n')
+          # One handshake cycle = 5 outer × 5 inner = 25× uart0_write(0x20)
+          # followed by uart0_write('\n').  26 bytes total = 52 hex chars.
+          expected="202020202020202020202020202020202020202020202020200a"
+          if [ "${head}" != "${expected}" ]; then
+            echo "FAIL: first 26 bytes don't match handshake pattern"
+            echo "got:      ${head}"
+            echo "expected: ${expected}"
+            xxd /tmp/uart-handshake.bin | head -5
+            exit 1
+          fi
+          echo "PASS: bootrom emitted 25× 0x20 + 0x0a handshake pattern"
+
+      - name: Verify mask-ROM advances past handshake on 0xAA reply
+        timeout-minutes: 1
+        # Reply 0xAA mid-second-handshake. uart0_wait_start_frame
+        # returns 1, burn_bootloader writes SC_RECOVERY=1 and enters
+        # uart0_recv_payload — which sits silently waiting for frames.
+        # With ACK at t=0.5 s, total emitted bytes stays ≪ 100. Without
+        # ACK the reset loop emits 200+ bytes in the same 4 s window.
+        run: |
+          ( sleep 0.5; printf '\xaa'; sleep 3 ) | \
+            timeout 4 ./qemu-src/build/qemu-system-arm \
+              -M hi3516av300 \
+              -bios openhisilicon/bootrom/hi3516av300/re.elf \
+              -display none -monitor none -serial stdio \
+              >/tmp/uart-recv.bin 2>/tmp/qemu-recv.log || true
+
+          bytes=$(stat -c%s /tmp/uart-recv.bin)
+          echo "captured with 0xAA reply: $bytes bytes in 4 s"
+          if [ "$bytes" -gt 150 ]; then
+            echo "FAIL: bootrom kept emitting — did not consume 0xAA reply"
+            xxd /tmp/uart-recv.bin | head -10
+            exit 1
+          fi
+          if [ "$bytes" -lt 20 ]; then
+            echo "FAIL: bootrom never reached uart0_wait_start_frame"
+            tail -20 /tmp/qemu-recv.log
+            exit 1
+          fi
+          echo "PASS: bootrom consumed 0xAA, advanced into uart0_recv_payload"
+
+      - name: Upload mask-ROM test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maskrom-av300-log
+          path: |
+            /tmp/uart-handshake.bin
+            /tmp/uart-recv.bin
+            /tmp/qemu-handshake.log
+            /tmp/qemu-recv.log
+            openhisilicon/bootrom/hi3516av300/re.elf
+          retention-days: 7
+
   boot:
     name: Boot ${{ matrix.name }}
     needs: build

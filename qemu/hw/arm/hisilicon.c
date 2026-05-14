@@ -32,7 +32,9 @@
 #include "hw/misc/hisi-fastboot.h"
 #include "hw/arm/machines-qom.h"
 #include "system/address-spaces.h"
+#include "system/reset.h"
 #include "system/system.h"
+#include "elf.h"
 #include "hw/sd/sdhci.h"
 #include "hw/sd/sd.h"
 #include "system/blockdev.h"
@@ -1087,7 +1089,7 @@ static const HisiSoCConfig hi3516av300_soc = {
 
     .cpu_srst_offset    = 0x78,
 
-    .num_regbanks       = 12,
+    .num_regbanks       = 17,
     .regbanks           = {
         { "hisi-misc",       0x12030000, 0x8000  },
         { "hisi-ddr",        0x12060000, 0x10000 },
@@ -1101,6 +1103,16 @@ static const HisiSoCConfig hi3516av300_soc = {
         { "hisi-aiao",       0x113B0000, 0x20000 },
         { "hisi-npu",        0x11700000, 0x100000 },  /* 1.0 TOPS NPU */
         { "hisi-ive",        0x11230000, 0x10000 },   /* AV300 IVE: DT @0x11230000, SPI 37 */
+        /* Mask-ROM security peripherals — reads return 0, writes are
+         * dropped.  Sufficient to keep the bootrom from faulting when
+         * it touches RSA0/SPACC/KLAD/OTP during signature verification;
+         * functional verification of the crypto path requires real
+         * device models, not stubs. */
+        { "hisi-klad",       0x10070000, 0x10000 },  /* key ladder */
+        { "hisi-rsa0",       0x10080000, 0x10000 },  /* RSA0 engine */
+        { "hisi-otp-mirror", 0x100A0000, 0x10000 },  /* OTP slot mirror */
+        { "hisi-otpuser",    0x100B0000, 0x10000 },  /* OTP user controller */
+        { "hisi-spacc",      0x100C0000, 0x10000 },  /* Synopsys SHA/AES */
     },
 };
 
@@ -3870,6 +3882,89 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
 }
 
 /*
+ * Mask-ROM emulation path.  `-bios <file.elf>` loads a reverse-engineered
+ * (or otherwise reconstructed) bootrom image at the SoC's mask-ROM base
+ * and starts the CPU there — replacing both the synthetic flash→DDR
+ * stub built by hisilicon_write_bootrom() and the hisi-fastboot
+ * substitute that bypasses the bootrom on -kernel-less runs.
+ *
+ * The window is fixed at 0x04000000 / 64 KiB to match every V4-family
+ * mask-ROM dumped to date (av300, cv500, ev200, ev300, …).  Earlier
+ * generations (V1–V3) use different mask-ROM bases and aren't covered
+ * here; the function gates on c->sram_base == 0x04010000 so it's a
+ * no-op for those.
+ *
+ * An external host (defib, or a python test harness) drives UART0
+ * directly to feed the bootrom's CRC-framed download protocol — the
+ * bootrom does its own framing, so no UART-side glue is needed in
+ * QEMU.
+ */
+#define HISI_MASKROM_BASE  0x04000000
+#define HISI_MASKROM_SIZE  (64 * KiB)
+
+typedef struct {
+    ARMCPU  *cpu;
+    uint64_t entry;
+} HisiMaskromReset;
+
+static void hisilicon_maskrom_cpu_reset(void *opaque)
+{
+    HisiMaskromReset *info = opaque;
+    CPUState *cs = CPU(info->cpu);
+
+    cpu_reset(cs);
+    cpu_set_pc(cs, info->entry);
+}
+
+static void hisilicon_load_maskrom(MemoryRegion *sysmem,
+                                    const HisiSoCConfig *c,
+                                    MachineState *machine,
+                                    ARMCPU *cpu0)
+{
+    MemoryRegion *rom;
+    uint64_t entry, low, high;
+    ssize_t loaded;
+    HisiMaskromReset *info;
+
+    if (c->sram_base != 0x04010000) {
+        error_report("hisilicon: -bios mask-ROM path is only wired up for "
+                     "V4-family SoCs (sram_base=0x04010000); this machine "
+                     "uses sram_base=0x%" HWADDR_PRIx, c->sram_base);
+        exit(1);
+    }
+
+    rom = g_new(MemoryRegion, 1);
+    memory_region_init_rom(rom, NULL, "hisilicon.maskrom",
+                           HISI_MASKROM_SIZE, &error_fatal);
+    memory_region_add_subregion(sysmem, HISI_MASKROM_BASE, rom);
+
+    loaded = load_elf(machine->firmware, NULL, NULL, NULL,
+                      &entry, &low, &high, NULL,
+                      0 /* little-endian */, EM_ARM,
+                      1 /* clear_lsb */, 0 /* data_swab */);
+    if (loaded < 0) {
+        error_report("hisilicon: failed to load -bios '%s': %s",
+                     machine->firmware, load_elf_strerror(loaded));
+        exit(1);
+    }
+    if (low < HISI_MASKROM_BASE ||
+        high > HISI_MASKROM_BASE + HISI_MASKROM_SIZE) {
+        error_report("hisilicon: -bios '%s' load range "
+                     "[0x%" PRIx64 "..0x%" PRIx64 "] outside mask-ROM "
+                     "window [0x%08x..0x%08x]",
+                     machine->firmware, low, high,
+                     (unsigned)HISI_MASKROM_BASE,
+                     (unsigned)(HISI_MASKROM_BASE + HISI_MASKROM_SIZE));
+        exit(1);
+    }
+
+    info = g_new0(HisiMaskromReset, 1);
+    info->cpu = cpu0;
+    info->entry = entry;
+    qemu_register_reset(hisilicon_maskrom_cpu_reset, info);
+}
+
+/*
  * Instantiate a PL061 GPIO bank at @base.  When stride >= 0x10000 the DTB
  * declares a 64 KiB reg window and Linux's AMBA bus probe reads PrimeCell
  * IDs at resource_end - 0x20 (offset 0xFFE0).  Alias the 0x1000 register
@@ -3940,6 +4035,8 @@ static void hisilicon_common_init(MachineState *machine,
     int num_pic = 0;
     int n;
     bool flash_boot = false;  /* true when booting from SPI NOR flash dump */
+    bool bios_boot = machine->firmware && machine->firmware[0];
+                                /* true when -bios loads a mask-ROM ELF */
 
     /* SRAM (skipped on STB family which has no on-chip SRAM in DT) */
     if (c->sram_size) {
@@ -4020,6 +4117,12 @@ static void hisilicon_common_init(MachineState *machine,
         }
         qdev_realize(DEVICE(cpuobj[n]), NULL, &error_fatal);
         cpu[n] = ARM_CPU(cpuobj[n]);
+    }
+
+    /* Mask-ROM ELF (-bios) is loaded once CPU 0 exists; the registered
+     * reset hook fires after cpu_reset() to redirect PC to the ELF entry. */
+    if (bios_boot) {
+        hisilicon_load_maskrom(sysmem, c, machine, cpu[0]);
     }
 
     /* Interrupt controller */
@@ -4124,6 +4227,20 @@ static void hisilicon_common_init(MachineState *machine,
         qdev_prop_set_uint32(sysctl, "v1-chip-id-8c", c->v1_chip_id_8c);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(sysctl), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(sysctl), 0, c->sysctl_base);
+
+        /*
+         * Pinstrap injection for -bios mask-ROM runs.  Real silicon
+         * drives SYSSTAT bit 5 from a BOOT_MODE pin; the av300 bootrom
+         * reads SYSCTRL+0x8c once at entry and dispatches fastboot when
+         * bit 5 is set.  Without this the bootrom falls through every
+         * load attempt and soft-resets in a loop.  Must run AFTER
+         * sysctl mmio map so the store lands in the device's regbank.
+         */
+        if (bios_boot) {
+            address_space_stl(&address_space_memory,
+                              c->sysctl_base + 0x8c, 0x20,
+                              MEMTXATTRS_UNSPECIFIED, NULL);
+        }
     }
 
     /* CRG — same caveat as sysctl: STB family uses a different layout. */
@@ -4157,7 +4274,7 @@ static void hisilicon_common_init(MachineState *machine,
      * completes.  Flash boot skips fastboot — the boot ROM runs U-Boot
      * from flash directly. */
     bool fastboot_mode = !machine->kernel_filename && !flash_boot
-                         && serial_hd(0);
+                         && !bios_boot && serial_hd(0);
     qemu_irq uart0_irq = NULL;
 
     /* UARTs */
@@ -4662,6 +4779,10 @@ static void hisilicon_common_init(MachineState *machine,
     if (flash_boot) {
         /* Boot from SPI NOR flash dump: boot ROM at 0x0 copies U-Boot from
          * flash window to DDR and jumps to it.  CPU starts at reset vector. */
+    } else if (bios_boot) {
+        /* Mask-ROM emulation: the bootrom ELF is already in ROM at
+         * 0x04000000, and a reset hook redirects PC there.  Nothing else
+         * to do — the bootrom drives the boot itself, including UART0. */
     } else if (fastboot_mode) {
         /* Boot ROM fastboot: halt CPU and wait for serial firmware upload */
         DeviceState *fb = qdev_new(TYPE_HISI_FASTBOOT);
