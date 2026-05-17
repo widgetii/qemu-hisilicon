@@ -812,12 +812,18 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .hwrng_base         = 0x120C0000,      /* HISEC_TRNG_CTRL (V3) */
     .hwrng_data_offset  = 0x204,
     /* CV300 has no on-chip DDR (external DDR3/3L up to 512 MiB).
-     * Stock CV300 cameras ship 128 MiB.  Kernel gets 32 MiB, vendor
-     * mmz.ko claims the upper 96 MiB at 0x82000000. */
+     * Stock CV300 cameras ship 128 MiB; kernel gets 32 MiB and the
+     * vendor mmz.ko claims the upper 96 MiB at 0x82000000.
+     *
+     * Do NOT inject mmz= here.  Real V3 u-boot does not set it, and
+     * OpenIPC's load_hisilicon treats the presence of mmz= as the
+     * "use CMA allocator" flag — but the cv300_lite kernel shipped
+     * in openipc.hi3516cv300-nor-lite.tgz is built without
+     * CONFIG_CMA, so the CMA branch silently fails and
+     * S99lsmodprobe never runs.  See issue #101. */
     .ram_size_default   = 128 * MiB,
     .kernel_mem_mb      = 32,
-    .extra_cmdline      = "mmz_allocator=hisi "
-                          "mmz=anonymous,0,0x82000000,96M",
+    .extra_cmdline      = NULL,
 
     .ram_base           = 0x80000000,
     .sram_base          = 0x04010000,
