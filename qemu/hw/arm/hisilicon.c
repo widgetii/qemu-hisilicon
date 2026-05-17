@@ -974,7 +974,7 @@ static const HisiSoCConfig hi3516cv500_soc = {
 
     .cpu_srst_offset    = 0x78,         /* REG_CPU_SRST_CRG for SMP bringup */
 
-    .num_regbanks       = 11,
+    .num_regbanks       = 12,
     .regbanks           = {
         { "hisi-misc",       0x12030000, 0x8000  },
         { "hisi-ddr",        0x12060000, 0x10000 },
@@ -987,6 +987,7 @@ static const HisiSoCConfig hi3516cv500_soc = {
         { "hisi-vpss",       0x11040000, 0x10000 },
         { "hisi-aiao",       0x113B0000, 0x20000 },
         { "hisi-ive",        0x11230000, 0x10000 },   /* CV500 IVE: DT @0x11230000, SPI 37 */
+        { "hisi-nnie",       0x11100000, 0x10000 },   /* CV500 NNIE: DT @0x11100000, SPI 45 */
     },
 };
 
@@ -1089,7 +1090,7 @@ static const HisiSoCConfig hi3516av300_soc = {
 
     .cpu_srst_offset    = 0x78,
 
-    .num_regbanks       = 17,
+    .num_regbanks       = 18,
     .regbanks           = {
         { "hisi-misc",       0x12030000, 0x8000  },
         { "hisi-ddr",        0x12060000, 0x10000 },
@@ -1103,6 +1104,7 @@ static const HisiSoCConfig hi3516av300_soc = {
         { "hisi-aiao",       0x113B0000, 0x20000 },
         { "hisi-npu",        0x11700000, 0x100000 },  /* 1.0 TOPS NPU */
         { "hisi-ive",        0x11230000, 0x10000 },   /* AV300 IVE: DT @0x11230000, SPI 37 */
+        { "hisi-nnie",       0x11100000, 0x10000 },   /* AV300 NNIE: DT @0x11100000, SPI 45 */
         /* Mask-ROM security peripherals — reads return 0, writes are
          * dropped.  Sufficient to keep the bootrom from faulting when
          * it touches RSA0/SPACC/KLAD/OTP during signature verification;
@@ -4622,6 +4624,17 @@ static void hisilicon_common_init(MachineState *machine,
                 sysbus_realize_and_unref(busdev, &error_fatal);
                 sysbus_mmio_map(busdev, 0, c->regbanks[n].base);
                 /* IVE IRQ: EV300=SPI51, CV500=SPI37 — extract from DTS */
+                continue;
+            }
+
+            /* NNIE: cv500-family CNN inference engine. Same pattern as
+             * IVE above — functional device, IRQ wiring TODO (the
+             * userspace test polls IRQ_STATUS like test-ive-ops.c). */
+            if (!strcmp(c->regbanks[n].name, "hisi-nnie")) {
+                DeviceState *nnie = qdev_new("hisi-nnie");
+                SysBusDevice *busdev = SYS_BUS_DEVICE(nnie);
+                sysbus_realize_and_unref(busdev, &error_fatal);
+                sysbus_mmio_map(busdev, 0, c->regbanks[n].base);
                 continue;
             }
 

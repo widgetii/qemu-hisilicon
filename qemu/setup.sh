@@ -45,6 +45,7 @@ cp qemu/hw/misc/hisi-vedu.c         "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-mipi-rx.c      "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-rtc.c          "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-ive.c          "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/hisi-nnie.c         "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-hwrng.c        "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-vi-fp.c        "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-fastboot.c     "$QEMU_DIR/hw/misc/"
@@ -153,7 +154,7 @@ fi
 
 # hw/misc/meson.build
 if ! grep -q hisi-sysctl "$QEMU_DIR/hw/misc/meson.build"; then
-    echo "system_ss.add(when: 'CONFIG_HISI_MISC', if_true: files('hisi-sysctl.c', 'hisi-crg.c', 'hisi-fmc.c', 'hisi-sfc350.c', 'hisi-himci.c', 'hisi-regbank.c', 'hisi-vedu.c', 'hisi-mipi-rx.c', 'hisi-rtc.c', 'hisi-ive.c', 'hisi-fastboot.c', 'hisi-gzip.c', 'hisi-hwrng.c', 'hisi-vi-fp.c', 'hisi-l2cache.c'))" \
+    echo "system_ss.add(when: 'CONFIG_HISI_MISC', if_true: files('hisi-sysctl.c', 'hisi-crg.c', 'hisi-fmc.c', 'hisi-sfc350.c', 'hisi-himci.c', 'hisi-regbank.c', 'hisi-vedu.c', 'hisi-mipi-rx.c', 'hisi-rtc.c', 'hisi-ive.c', 'hisi-nnie.c', 'hisi-fastboot.c', 'hisi-gzip.c', 'hisi-hwrng.c', 'hisi-vi-fp.c', 'hisi-l2cache.c'))" \
         >> "$QEMU_DIR/hw/misc/meson.build"
     echo "  patched hw/misc/meson.build"
 else
@@ -171,6 +172,11 @@ else
         sed -i "s/'hisi-vi-fp.c'/'hisi-vi-fp.c', 'hisi-l2cache.c'/" \
             "$QEMU_DIR/hw/misc/meson.build"
         echo "  hw/misc/meson.build: added hisi-l2cache.c"
+    fi
+    if ! grep -q hisi-nnie "$QEMU_DIR/hw/misc/meson.build"; then
+        sed -i "s/'hisi-ive.c'/'hisi-ive.c', 'hisi-nnie.c'/" \
+            "$QEMU_DIR/hw/misc/meson.build"
+        echo "  hw/misc/meson.build: added hisi-nnie.c"
     fi
 fi
 
