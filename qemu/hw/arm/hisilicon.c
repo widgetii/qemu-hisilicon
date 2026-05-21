@@ -3946,6 +3946,27 @@ static void hisilicon_load_maskrom(MemoryRegion *sysmem,
                            HISI_MASKROM_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, HISI_MASKROM_BASE, rom);
 
+    /*
+     * Real silicon aliases the mask-ROM at low address 0 on reset.
+     * The bootrom relies on this: media_program_a stores
+     * `0x00004680` as the SD-read function pointer and later calls it
+     * via `bx`, expecting to hit the bootrom's read-block routine.
+     * Without the alias, qemu jumps to whatever is mapped at 0x4680
+     * (the trapnull stub or unmapped memory) and the bootrom crashes
+     * before ever issuing CMD17.
+     *
+     * The alias overrides the `hisilicon.trapnull` ROM that the
+     * non-bios paths install at 0 (which we still install for
+     * compatibility, then this alias takes precedence in the
+     * memory region priority).
+     */
+    {
+        MemoryRegion *alias = g_new(MemoryRegion, 1);
+        memory_region_init_alias(alias, NULL, "hisilicon.maskrom-alias-0",
+                                 rom, 0, HISI_MASKROM_SIZE);
+        memory_region_add_subregion_overlap(sysmem, 0, alias, 1);
+    }
+
     loaded = load_elf(machine->firmware, NULL, NULL, NULL,
                       &entry, &low, &high, NULL,
                       0 /* little-endian */, EM_ARM,

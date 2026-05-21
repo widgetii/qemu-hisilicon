@@ -78,6 +78,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiHimciState, HISI_HIMCI)
 #define MCI_UHS_REG_EXT   0x108
 #define MCI_TUNING_CTRL   0x118
 
+/* FIFO data window: DW MMC exposes its FIFO at a fixed offset.  On
+ * HiSilicon V4-family silicon the av300 mask-ROM reads via
+ * SDIO0+0x200 (verified by disasm of the PIO read at bootrom
+ * 0x0400457c).  We expose 0x200..0x3FF as the data window. */
+#define MCI_FIFO_DATA_BASE  0x200
+#define MCI_FIFO_DATA_END   0x3FF
+#define MCI_FIFO_SIZE       4096   /* enough for a 512-byte block ×8 */
+
 /* ── Bit definitions ───────────────────────────────────────────────── */
 
 /* CTRL */
@@ -152,6 +160,15 @@ struct HisiHimciState {
     uint32_t adma_q_rdptr, adma_q_wrptr;
 
     uint32_t cardthrctl, uhs_reg_ext, tuning_ctrl;
+
+    /* PIO FIFO state — populated when a DATA_EXPECTED command runs
+     * without DMA (BMOD_DE=0 and CTRL_USE_IDMAC=0).  The guest reads
+     * via MCI_FIFO_DATA_BASE; STATUS bits 17..29 expose FIFO_COUNT
+     * in 32-bit words, which the av300 mask-ROM polls before each
+     * 4-byte FIFO read. */
+    uint8_t  fifo_buf[MCI_FIFO_SIZE];
+    uint32_t fifo_len;       /* bytes currently in FIFO */
+    uint32_t fifo_rd_off;    /* read cursor (bytes) */
 };
 
 /* ── IRQ ───────────────────────────────────────────────────────────── */
@@ -261,6 +278,28 @@ static void hisi_himci_do_data(HisiHimciState *s, uint32_t idmac_addr,
  * Execute a command with optional data transfer via IDMAC at dbaddr.
  * Used by the direct CMD register path (U-Boot) and clock-update bypass.
  */
+/*
+ * PIO data-transfer fallback used when neither BMOD_DE nor
+ * CTRL_USE_IDMAC is set — the av300 mask-ROM reads SD blocks this way.
+ * Drain bytcnt bytes from the SD bus into the FIFO buffer; the guest
+ * then reads from MCI_FIFO_DATA_BASE 4 bytes at a time.  Writes are
+ * symmetric but the mask-ROM never exercises them.
+ */
+static void hisi_himci_do_pio(HisiHimciState *s, bool is_write)
+{
+    uint32_t want = s->bytcnt;
+    if (want > sizeof(s->fifo_buf)) {
+        want = sizeof(s->fifo_buf);
+    }
+    if (is_write) {
+        sdbus_write_data(&s->sdbus, s->fifo_buf, want);
+    } else {
+        sdbus_read_data(&s->sdbus, s->fifo_buf, want);
+    }
+    s->fifo_len = want;
+    s->fifo_rd_off = 0;
+}
+
 static void hisi_himci_exec_cmd(HisiHimciState *s, uint32_t cmd_val,
                                 uint32_t arg)
 {
@@ -271,6 +310,9 @@ static void hisi_himci_exec_cmd(HisiHimciState *s, uint32_t cmd_val,
         bool is_write = (cmd_val & CMD_RW_WRITE) != 0;
         if ((s->bmod & BMOD_DE) || (s->ctrl & CTRL_USE_IDMAC)) {
             hisi_himci_do_data(s, s->dbaddr, is_write);
+        } else {
+            /* PIO fallback — drain the bus into the internal FIFO. */
+            hisi_himci_do_pio(s, is_write);
         }
         s->rintsts |= INT_DTO;
     }
@@ -391,7 +433,15 @@ static uint64_t hisi_himci_read(void *opaque, hwaddr offset, unsigned size)
     case MCI_RESP3:         return s->resp[3];
     case MCI_MINTSTS:       return s->rintsts & s->intmask;
     case MCI_RINTSTS:       return s->rintsts;
-    case MCI_STATUS:        return 0;
+    case MCI_STATUS: {
+        /* Expose FIFO_COUNT (in 32-bit words) in bits 17..29 so the
+         * mask-ROM's PIO read loop can poll for available data. */
+        uint32_t avail_bytes = (s->fifo_rd_off < s->fifo_len)
+                             ? (s->fifo_len - s->fifo_rd_off) : 0;
+        uint32_t words = avail_bytes / 4;
+        if (words > 0x1FFF) words = 0x1FFF;
+        return words << 17;
+    }
     case MCI_FIFOTH:        return s->fifoth;
     case MCI_CDETECT:       return s->cdetect;
     case MCI_WRTPRT:        return s->wrtprt;
@@ -418,6 +468,18 @@ static uint64_t hisi_himci_read(void *opaque, hwaddr offset, unsigned size)
     case MCI_UHS_REG_EXT:   return s->uhs_reg_ext;
     case MCI_TUNING_CTRL:   return s->tuning_ctrl;
     default:
+        /* FIFO_DATA window — return next 4 bytes from the staged PIO
+         * read buffer, advance the read cursor.  Any offset in the
+         * window does this; DW MMC FIFO is "memory-mapped" but uses
+         * an internal pointer, not the offset. */
+        if (offset >= MCI_FIFO_DATA_BASE && offset <= MCI_FIFO_DATA_END) {
+            if (s->fifo_rd_off + 4 <= s->fifo_len) {
+                uint32_t v = ldl_le_p(s->fifo_buf + s->fifo_rd_off);
+                s->fifo_rd_off += 4;
+                return v;
+            }
+            return 0;
+        }
         return 0;
     }
 }
@@ -573,6 +635,9 @@ static void hisi_himci_reset(DeviceState *dev)
     s->cardthrctl = 0;
     s->uhs_reg_ext = 0;
     s->tuning_ctrl = 0;
+
+    s->fifo_len = 0;
+    s->fifo_rd_off = 0;
 
     qemu_set_irq(s->irq, 0);
 }
