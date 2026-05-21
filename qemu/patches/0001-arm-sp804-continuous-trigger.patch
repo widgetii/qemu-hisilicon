@@ -1,0 +1,52 @@
+arm_timer: switch SP804 to CONTINUOUS_TRIGGER ptimer policy
+
+Real SP804 silicon (TRM DDI0271 §2.3) doesn't disable when the timer
+count reaches zero — in periodic mode with LOAD = 0 it just keeps
+reloading at the configured tick rate, firing the IRQ every tick (a
+harmless IRQ storm when interrupts are disabled, expected behaviour
+when they are).
+
+qemu's default PTIMER_POLICY_LEGACY guard treats "delta == 0 with
+enabled timer" as a bug and disables the underlying ptimer with
+"Timer with delta zero, disabling" on stderr.  Once disabled, the
+timer never re-arms on subsequent LOAD writes — the device freezes.
+
+That breaks guest code that programs TimerControl with the enable
+bit set BEFORE writing TimerLoad — for example the hi3516av300
+mask-ROM's main() at 0x04002704 calls timer_start (writes
+CONTROL = 0xc2, enable+periodic+32-bit) before timer_reset_counter
+(writes LOAD = 0xFFFFFFFF).  On real silicon this is fine; on qemu
+the SP804 ptimer dies between the two writes and the bootrom hangs
+forever in wait_timer_0 polling VALUE.
+
+PTIMER_POLICY_CONTINUOUS_TRIGGER is exactly the policy bit for "stay
+running with limit=0".  ptimer.c's rate-limit (10 µs minimum period)
+keeps the IRQ storm bounded.
+
+Verified: with this fix the hi3516av300 mask-ROM's timer waits
+complete normally inside qemu; the existing maskrom-av300 CI
+handshake assertion (PR widgetii/qemu-hisilicon#98) still passes
+byte-for-byte.
+
+--- a/hw/timer/arm_timer.c	2026-05-21 15:48:16.389379931 +0300
++++ b/hw/timer/arm_timer.c	2026-05-21 15:28:15.322413709 +0300
+@@ -180,7 +180,18 @@
+     s->freq = freq;
+     s->control = TIMER_CTRL_IE;
+ 
+-    s->timer = ptimer_init(arm_timer_tick, s, PTIMER_POLICY_LEGACY);
++    /*
++     * Match real SP804 silicon behaviour: when periodic mode is enabled
++     * with LOAD = 0 (count == limit == 0), the timer doesn't disable —
++     * it keeps reloading at the configured tick rate (an IRQ storm if
++     * interrupts are enabled, harmless otherwise).  Without the
++     * CONTINUOUS_TRIGGER policy, the ptimer legacy guard fires
++     * "Timer with delta zero, disabling" and freezes the device, which
++     * hangs guest code that programs CONTROL before LOAD (e.g. the
++     * hi3516av300 mask-ROM's timer_start → timer_reset_counter sequence
++     * — main() at 0x04002704 in the reverse-engineered bootrom).
++     */
++    s->timer = ptimer_init(arm_timer_tick, s, PTIMER_POLICY_CONTINUOUS_TRIGGER);
+     vmstate_register_any(NULL, &vmstate_arm_timer, s);
+     return s;
+ }
