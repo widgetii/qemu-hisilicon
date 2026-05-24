@@ -416,14 +416,18 @@ jobs:
             flash_mem: 256M
 
           # cv500 family covers av300 (same die, av300 is variant id 5);
-          # one Linux ping gate exercises both. uboot_bin skipped: the
-          # OpenIPC cv500 U-Boot resets in a loop on our QEMU model
-          # (separate bug, not blocking Linux gate).
+          # one Linux + U-Boot gate exercises both.  flash_mem=1G because
+          # the OpenIPC cv500 U-Boot is built assuming the platform-max
+          # 1 GiB DDR and relocates itself to top-of-RAM (~0xBFEE2000).
+          # The default 128 MiB ram_size leaves that target unmapped,
+          # the relocation jump faults, and the CPU resets in a loop.
           - name: hi3516cv500
             soc: hi3516cv500
             machine: hi3516cv500
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
             ping_linux: true
+            uboot_bin: u-boot-hi3516cv500-universal.bin
+            flash_mem: 1G
 
           - name: hi3519v101
             soc: hi3519v101
