@@ -288,9 +288,31 @@ static void hisi_gmac_update_irq(HisiGmacState *s)
  * later words are reserved padding, so the read/write path doesn't
  * change — only the stride between descriptors does.  Exposed as the
  * `desc-size` property (default 32, set to 16 for hi3536cv100).
+ *
+ * Auto-detect: the same SoC can run two firmwares built with different
+ * `CONFIG_HIGMAC_DESC_4_WORD` — e.g. the OpenIPC Hi3519V101 ships a
+ * U-Boot built with 4-word descriptors but a kernel built with 8-word.
+ * When SW writes a *_WR_ADDR pointer for the first time after the ring
+ * is empty, that value IS one descriptor stride, so we latch it.  This
+ * keeps both firmwares working without per-SoC config changes.
  */
 #define DESC_SIZE_BYTES_MAX     32
 #define DESC_SIZE_BYTES_DEFAULT 32
+
+/* Latch a smaller descriptor stride when SW reveals it via the first
+ * non-zero wr-ptr write to an empty ring.  No-op if the ring isn't
+ * empty (SW queued multiple descriptors at once, which we can't safely
+ * disambiguate) or if the value isn't a smaller power-of-two stride. */
+static inline void hisi_gmac_maybe_detect_stride(HisiGmacState *s,
+                                                  uint32_t wr, uint32_t rd)
+{
+    if (wr == 0 || rd != 0 || wr >= s->desc_size_bytes) {
+        return;
+    }
+    if (wr == 16) {
+        s->desc_size_bytes = 16;
+    }
+}
 
 /* Queue size in bytes from the depth register value (queue size in
  * words, so * 4).  0 if the driver hasn't programmed depth yet. */
@@ -558,6 +580,7 @@ static void hisi_gmac_write(void *opaque, hwaddr offset, uint64_t val,
     case RX_FQ_START_ADDR:   s->rx_fq_start = val; break;
     case RX_FQ_DEPTH:        s->rx_fq_depth = val; break;
     case RX_FQ_WR_ADDR:
+        hisi_gmac_maybe_detect_stride(s, val, s->rx_fq_rd);
         s->rx_fq_wr = val;
         /* New free buffers available — check if we can receive now */
         qemu_flush_queued_packets(qemu_get_queue(s->nic));
@@ -576,6 +599,7 @@ static void hisi_gmac_write(void *opaque, hwaddr offset, uint64_t val,
     case TX_BQ_START_ADDR:   s->tx_bq_start = val; break;
     case TX_BQ_DEPTH:        s->tx_bq_depth = val; break;
     case TX_BQ_WR_ADDR:
+        hisi_gmac_maybe_detect_stride(s, val, s->tx_bq_rd);
         s->tx_bq_wr = val;
         /* New TX packets queued — process them */
         hisi_gmac_tx(s);
