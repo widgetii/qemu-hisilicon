@@ -1246,7 +1246,7 @@ static const HisiSoCConfig hi3516dv300_soc = {
  *
  * V3A generation — big.LITTLE + GICv2, V3-era peripheral addresses
  * (0x121xxxxx UARTs/SPI/GPIO like CV300).
- * Uses GMAC (not FEMAC) for Ethernet; GMAC not yet emulated.
+ * Uses GMAC (HiGMAC V200, hi_gmac_v200 driver) for Ethernet.
  */
 static const HisiSoCConfig hi3519v101_soc = {
     .name               = "hi3519v101",
@@ -1298,7 +1298,12 @@ static const HisiSoCConfig hi3519v101_soc = {
     .gpio_stride        = 0x1000,
     .gpio_irq           = 43,               /* shared IRQ for all ports (GIC) */
 
-    /* No FEMAC — uses GMAC (higmac) which is not yet emulated */
+    /* Gigabit Ethernet — HiGMAC V200, DT compatible "hisilicon,higmac-v3".
+     * Vendor DTB: reg = <0x10050000 0x1000 0x120100ec 0x04>, the 2nd cell
+     * is the macif phy-mode select inside the CRG, which our hisi-regbank
+     * already covers.  IRQ confirmed from the embedded board.dtb. */
+    .gmac_base          = 0x10050000,
+    .gmac_irq           = 25,
 
     .num_himci          = 3,
     .himci_bases        = { 0x100c0000, 0x100d0000, 0x100e0000 },
@@ -1328,7 +1333,7 @@ static const HisiSoCConfig hi3519v101_soc = {
         { 0x04, (24 << 12) | 792 },
     },
 
-    .num_regbanks       = 11,
+    .num_regbanks       = 10,
     .regbanks           = {
         { "hisi-misc",       0x12030000, 0x10000 },
         { "hisi-ddr",        0x12060000, 0x10000 },
@@ -1336,7 +1341,6 @@ static const HisiSoCConfig hi3519v101_soc = {
         { "hisi-pwm",        0x12130000, 0x10000 },
         { "hisi-usb-ehci",   0x10120000, 0x10000 },
         { "hisi-usb-ohci",   0x10110000, 0x10000 },
-        { "hisi-gmac",       0x10050000, 0x10000 },
         { "hisi-vi-cap",     0x11380000, 0x100000 },
         { "hisi-vou",        0x11000000, 0x20000 },
         { "hisi-vpss",       0x11180000, 0x10000 },
@@ -1403,6 +1407,10 @@ static const HisiSoCConfig hi3516av200_soc = {
     .gpio_stride        = 0x1000,
     .gpio_irq           = 43,
 
+    /* GMAC: inherits the 3519V101 wiring (same die per vendor guide). */
+    .gmac_base          = 0x10050000,
+    .gmac_irq           = 25,
+
     .num_himci          = 3,
     .himci_bases        = { 0x100c0000, 0x100d0000, 0x100e0000 },
     .himci_irqs         = { 23, 24, 13 },
@@ -1430,7 +1438,7 @@ static const HisiSoCConfig hi3516av200_soc = {
         { 0x04, (24 << 12) | 792 },
     },
 
-    .num_regbanks       = 11,
+    .num_regbanks       = 10,
     .regbanks           = {
         { "hisi-misc",       0x12030000, 0x10000 },
         { "hisi-ddr",        0x12060000, 0x10000 },
@@ -1438,7 +1446,6 @@ static const HisiSoCConfig hi3516av200_soc = {
         { "hisi-pwm",        0x12130000, 0x10000 },
         { "hisi-usb-ehci",   0x10120000, 0x10000 },
         { "hisi-usb-ohci",   0x10110000, 0x10000 },
-        { "hisi-gmac",       0x10050000, 0x10000 },
         { "hisi-vi-cap",     0x11380000, 0x100000 },
         { "hisi-vou",        0x11000000, 0x20000 },
         { "hisi-vpss",       0x11180000, 0x10000 },

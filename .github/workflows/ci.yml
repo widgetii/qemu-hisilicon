@@ -424,6 +424,7 @@ jobs:
             soc: hi3519v101
             machine: hi3519v101
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            ping_linux: true
 
           - name: hi3516ev300
             soc: hi3516ev300
