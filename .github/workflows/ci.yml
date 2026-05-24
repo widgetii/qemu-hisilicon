@@ -521,12 +521,23 @@ jobs:
           # layout from HisiSoCConfig (measured: CV100 ~20 s, CV200
           # ~18 s, AV100 ~15 s, CV300/CV500/3519V101 <30 s, EV300 ~7 s).
           # 120 s gives us a 4× margin over the measured worst case.
+          #
+          # `-nic user,restrict=on` keeps SLIRP's internal DHCP server
+          # reachable (udhcpc still gets 10.0.2.15) but blocks all
+          # outbound traffic.  Required because busybox ntpd in OpenIPC
+          # uses a strict 0.5 ms STEP_PEER_MAX delay threshold; on
+          # GitHub-hosted runners the NAT path adds >5 ms latency,
+          # ntpd rejects every reply and loops past the 120 s deadline.
+          # See openhisilicon#104.  With restrict=on the NTP pool DNS
+          # lookups fail fast, ntpd exits, S49ntp returns "OK", and
+          # the rest of init runs deterministically.
           QEMU=./qemu-src/build/qemu-system-arm
           timeout 120 $QEMU \
             -M ${{ matrix.machine }} \
             -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
             -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
             -nographic -serial mon:stdio \
+            -nic user,restrict=on \
             -append '${{ matrix.append }}' \
             -d unimp,guest_errors -D qemu-boot/qemu.log \
             2>&1 | tee boot-output.txt &
