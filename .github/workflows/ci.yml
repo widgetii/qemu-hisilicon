@@ -447,7 +447,10 @@ jobs:
             uboot_bin: u-boot-hi3516ev300-universal.bin
             flash_mem: 128M
 
-          # hi3516cv610 (V5) excluded: no OpenIPC firmware release yet
+          # hi3516cv610 (V5) has its own boot-hi3516cv610 job below: its
+          # OpenIPC release is a combined firmware.bin (FIT kernel+dtb with an
+          # appended SquashFS) under the SoC-family name, so it needs an
+          # extraction step and doesn't fit this download/boot matrix.
 
           # NVR/DVR family — OpenIPC ships nor-lite firmware (kernel +
           # rootfs) and u-boot-${soc}-universal.bin for 3 SoCs:
@@ -723,4 +726,99 @@ jobs:
             qemu-boot/linux-network-${{ matrix.soc }}
             /tmp/*-ping.txt
             /tmp/linux-network-summary.txt
+          retention-days: 7
+
+  # hi3516cv610 (V5).  Unlike the SoCs in the matrix above, OpenIPC ships
+  # cv610 as a single firmware.bin (a FIT holding the kernel + dtb, with the
+  # SquashFS rootfs appended) under the SoC-family name "hi3516cv6xx",
+  # "ultimate" variant.  Split it into kernel/dtb/rootfs and boot like
+  # qemu-boot/run-cv610.sh.
+  boot-hi3516cv610:
+    name: Boot hi3516cv610
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 u-boot-tools
+
+      - name: Download QEMU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/
+
+      - name: Make QEMU executable
+        run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Download and split OpenIPC firmware
+        run: |
+          cd qemu-boot
+          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.hi3516cv6xx-nor-ultimate.tgz" \
+              -o openipc.hi3516cv6xx-nor-ultimate.tgz
+          tar xzf openipc.hi3516cv6xx-nor-ultimate.tgz
+          FW=firmware.bin.hi3516cv6xx
+          # FIT: image 1 = linux_kernel (zImage), image 0 = fdt-1 (dtb).
+          dumpimage -T flat_dt -p 1 -o uImage.hi3516cv610 "$FW"
+          dumpimage -T flat_dt -p 0 -o cv610.dtb          "$FW"
+          # SquashFS rootfs is appended right after the FIT.
+          sqoff=$(grep -aboP 'hsqs' "$FW" | head -1 | cut -d: -f1)
+          dd if="$FW" of=rootfs.squashfs.hi3516cv610 bs=64k iflag=skip_bytes \
+              skip="$sqoff" status=none
+          ls -la uImage.hi3516cv610 cv610.dtb rootfs.squashfs.hi3516cv610
+
+      - name: "OpenIPC kernel + rootfs boot"
+        timeout-minutes: 4
+        run: |
+          # cv610's kernel is capped to 32 MiB by default (mmz claims the
+          # rest); the "ultimate" rootfs ramdisk needs more, so pass mem=128M.
+          QEMU=./qemu-src/build/qemu-system-arm
+          timeout 150 $QEMU -M hi3516cv610 -m 256M \
+            -kernel qemu-boot/uImage.hi3516cv610 \
+            -dtb qemu-boot/cv610.dtb \
+            -initrd qemu-boot/rootfs.squashfs.hi3516cv610 \
+            -nographic -serial mon:stdio -nic user,restrict=on \
+            -append 'mem=128M console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs' \
+            -d unimp,guest_errors -D qemu-boot/qemu.log 2>&1 | tee boot-output.txt &
+          QEMU_PID=$!
+
+          # Wait for the login prompt.
+          for i in $(seq 1 150); do
+            if grep -qE "login:" boot-output.txt 2>/dev/null; then
+              echo ""
+              echo "=== Boot successful: login prompt reached ==="
+              kill $QEMU_PID 2>/dev/null || true
+              if grep -qE "SQUASHFS error|Kernel panic|deadlocked" boot-output.txt; then
+                echo "=== FAIL: squashfs corruption / kernel panic ==="
+                grep -nE "SQUASHFS error|Kernel panic|deadlocked" boot-output.txt | head
+                exit 1
+              fi
+              echo "=== Boot clean ==="
+              exit 0
+            fi
+            if ! kill -0 $QEMU_PID 2>/dev/null; then
+              echo "=== FAIL: QEMU exited before login ==="
+              tail -30 boot-output.txt
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "=== TIMEOUT: login prompt not reached ==="
+          tail -30 boot-output.txt
+          kill $QEMU_PID 2>/dev/null || true
+          exit 1
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log-hi3516cv610
+          path: |
+            boot-output.txt
+            qemu-boot/qemu.log
           retention-days: 7
