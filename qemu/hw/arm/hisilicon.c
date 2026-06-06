@@ -2179,8 +2179,18 @@ static const HisiSoCConfig hi3516cv610_soc = {
     .uart_bases         = { 0x11040000, 0x11041000, 0x11042000 },
     .uart_irqs          = { 10, 11, 12 },
 
-    /* No SP804 timers — ARM arch timer only (24 MHz) */
-    .num_timers         = 0,
+    /* Linux uses the Cortex-A7 generic timer (24 MHz, via DTB).  But the
+     * cv610 U-Boot's udelay() polls an SP804-style countdown timer at
+     * 0x11000000 (vendor platform.h: CFG_TIMERBASE, VALUE@0x4,
+     * CFG_TIMER_CLK = 3 MHz).  Without it udelay() spins forever and U-Boot
+     * hangs in the SPI-NOR probe during a flash boot (`-machine
+     * hi3516cv610,flash-file=...` with no -kernel).  Wire one SP804 so the
+     * flash-boot path works; the IRQ is unused (U-Boot polls, Linux uses the
+     * arch timer and has no DT node here), so any free SPI suffices. */
+    .num_timers         = 1,
+    .timer_bases        = { 0x11000000 },
+    .timer_irqs         = { 4 },
+    .timer_freq         = 3000000,
 
     .num_spis           = 2,
     .spi_bases          = { 0x11070000, 0x11071000 },
