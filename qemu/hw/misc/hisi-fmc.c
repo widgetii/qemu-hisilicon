@@ -195,6 +195,13 @@ struct HisiFmcState {
     uint8_t *block_ever_unlocked;
     uint32_t num_blocks;
 
+    /* block_squashfs[]: 1 for every 64KB block that falls inside a detected
+     * SquashFS filesystem (read-only rootfs).  Such blocks are never writable
+     * — real firmware mounts the rootfs read-only and never programs/erases
+     * it.  Enforced independently of WPS so a stray program/erase can't
+     * silently corrupt the booted image (and get flushed back to the file). */
+    uint8_t *block_squashfs;
+
     /* When true, the chip starts in the as-shipped factory-locked state:
      * SR3.WPS = 1, every block locked, none ever-unlocked.  Mirrors what
      * Xiongmai-flashed Winbond W25Q128s come out of the factory with —
@@ -259,12 +266,18 @@ static void hisi_fmc_flush_to_file(HisiFmcState *s, uint32_t offset,
  */
 static bool hisi_fmc_block_is_locked(HisiFmcState *s, uint32_t addr)
 {
+    uint32_t block = addr / NOR_SECTOR_SIZE;
+    if (block >= s->num_blocks)
+        return false;
+    /* A detected read-only SquashFS region is never writable, regardless of
+     * the WPS knob.  Real hardware mounts the rootfs read-only and never
+     * programs or erases it; without this a stray write silently corrupts
+     * the SquashFS in place and is flushed back to the backing image. */
+    if (s->block_squashfs && s->block_squashfs[block])
+        return true;
     if (!(s->sr3 & 0x04))  /* WPS bit in SR3 */
         return false;
     if (!s->block_locked)
-        return false;
-    uint32_t block = addr / NOR_SECTOR_SIZE;
-    if (block >= s->num_blocks)
         return false;
     return s->block_locked[block] && !s->block_ever_unlocked[block];
 }
@@ -424,7 +437,7 @@ static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
         if ((s->sr & SPI_SR_WEL) && addr < s->flash_size) {
             if (hisi_fmc_block_is_locked(s, addr)) {
                 qemu_log_mask(LOG_GUEST_ERROR,
-                              "hisi-fmc: PROGRAM blocked — addr 0x%x is WPS-locked\n",
+                              "hisi-fmc: PROGRAM blocked — addr 0x%x is write-protected\n",
                               addr);
             } else {
                 uint32_t end = addr + len;
@@ -450,7 +463,7 @@ static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
             }
             if (hisi_fmc_block_is_locked(s, base)) {
                 qemu_log_mask(LOG_GUEST_ERROR,
-                              "hisi-fmc: ERASE blocked — sector 0x%x is WPS-locked\n",
+                              "hisi-fmc: ERASE blocked — sector 0x%x is write-protected\n",
                               base);
             } else if (base < s->flash_size) {
                 memset(&s->flash[base], 0xFF, end - base);
@@ -645,7 +658,7 @@ static void hisi_fmc_exec_dma_nor(HisiFmcState *s)
         if (s->sr & SPI_SR_WEL) {
             if (hisi_fmc_block_is_locked(s, addr)) {
                 qemu_log_mask(LOG_GUEST_ERROR,
-                              "hisi-fmc: DMA WRITE blocked — addr 0x%x is WPS-locked\n",
+                              "hisi-fmc: DMA WRITE blocked — addr 0x%x is write-protected\n",
                               addr);
             } else {
                 uint8_t *buf = g_malloc(len);
@@ -942,6 +955,7 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
         s->num_blocks = NOR_FLASH_SIZE / NOR_SECTOR_SIZE;
         s->block_locked = g_malloc0(s->num_blocks);
         s->block_ever_unlocked = g_malloc0(s->num_blocks);
+        s->block_squashfs = g_malloc0(s->num_blocks);
     }
 
     /* Load flash contents from file if specified */
@@ -963,9 +977,11 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
             /* Resize block lock arrays to match */
             g_free(s->block_locked);
             g_free(s->block_ever_unlocked);
+            g_free(s->block_squashfs);
             s->num_blocks = file_size / NOR_SECTOR_SIZE;
             s->block_locked = g_malloc0(s->num_blocks);
             s->block_ever_unlocked = g_malloc0(s->num_blocks);
+            s->block_squashfs = g_malloc0(s->num_blocks);
         }
         FILE *f = fopen(s->flash_file, "rb");
         if (!f) {
@@ -1022,6 +1038,9 @@ static void hisi_fmc_realize(DeviceState *dev, Error **errp)
                     if (blk_end > s->num_blocks) blk_end = s->num_blocks;
                     for (uint32_t b = blk_start; b < blk_end; b++) {
                         s->block_ever_unlocked[b] = 0;
+                        if (s->block_squashfs) {
+                            s->block_squashfs[b] = 1; /* read-only rootfs */
+                        }
                     }
                     qemu_log("hisi-fmc: protect SquashFS at 0x%x "
                              "(%" PRIu64 " bytes, blocks %u-%u)\n",
@@ -1078,6 +1097,7 @@ static void hisi_fmc_finalize(Object *obj)
     g_free(s->nand_oob);
     g_free(s->block_locked);
     g_free(s->block_ever_unlocked);
+    g_free(s->block_squashfs);
 }
 
 static const Property hisi_fmc_properties[] = {
