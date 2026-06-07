@@ -446,6 +446,11 @@ jobs:
             ping_linux: true
             uboot_bin: u-boot-hi3516ev300-universal.bin
             flash_mem: 128M
+            # Exercise the HiFMC NOR erase+program path from Linux userspace
+            # (flash_eraseall + flashcp -v). Guards the erase-address/WEL fix
+            # that OpenIPC firstboot & sysupgrade depend on. ev300 stands in
+            # for all hisi-fmc SoCs (the fix is in shared hisi-fmc.c).
+            flash_rw: true
 
           # hi3516cv610 (V5) has its own boot-hi3516cv610 job below: its
           # OpenIPC release is a combined firmware.bin (FIT kernel+dtb with an
@@ -585,6 +590,18 @@ jobs:
           tail -30 boot-output.txt
           kill $QEMU_PID 2>/dev/null || true
           exit 1
+
+      - name: "SPI-NOR erase/program round-trip"
+        if: matrix.flash_rw
+        timeout-minutes: 5
+        run: |
+          bash qemu-boot/test-flash-rw.sh \
+            --soc "${{ matrix.soc }}" \
+            --machine "${{ matrix.machine }}" \
+            --qemu ./qemu-src/build/qemu-system-arm \
+            --output-dir "qemu-boot/flash-rw-${{ matrix.soc }}" \
+            --mem 128M \
+            --login-timeout 120
 
       - name: "Linux ping + curl test"
         if: matrix.ping_linux
