@@ -2065,6 +2065,7 @@ static const HisiSoCConfig hi3516cv608_soc = {
     .desc               = "HiSilicon Hi3516CV608 (Cortex-A7 MP2, ~CV610)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_CV608,
+    .gzip_base          = 0x170F0000,    /* V5 emar HW gzip (vendor platform.h) */
     /* 64 MiB on-chip DDR2 (512Mb).  Kernel gets 32 MiB, vendor mmz.ko
      * claims the upper 32 MiB at 0x42000000. */
     .ram_size_default   = 64 * MiB,
@@ -2156,6 +2157,7 @@ static const HisiSoCConfig hi3516cv610_soc = {
     .desc               = "HiSilicon Hi3516CV610 (Cortex-A7 MP2)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_CV610,
+    .gzip_base          = 0x170F0000,    /* V5 emar HW gzip (vendor platform.h) */
     /* 128 MiB on-chip DDR3/3L (1Gb) on CV610-20S/20G.  Kernel gets 32 MiB,
      * vendor mmz.ko claims the upper 96 MiB at 0x42000000. */
     .ram_size_default   = 128 * MiB,
@@ -2251,6 +2253,7 @@ static const HisiSoCConfig hi3516cv613_soc = {
     .desc               = "HiSilicon Hi3516CV613 (Cortex-A7 MP2, ~CV610)",
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
     .soc_id             = HISI_SOC_ID_CV613,
+    .gzip_base          = 0x170F0000,    /* V5 emar HW gzip (vendor platform.h) */
     /* CV613 is the 4K-capable V5 die (no public datasheet); follow CV610-20S.
      * Kernel gets 32 MiB, vendor mmz.ko claims upper 96 MiB at 0x42000000. */
     .ram_size_default   = 128 * MiB,
@@ -3804,33 +3807,49 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
         if (g_file_get_contents(hms->flash_file, &data, &len, NULL)) {
             const uint32_t *w = (const uint32_t *)data;
             size_t nwords = len / 4;
-            uint32_t vec0 = nwords ? le32_to_cpu(w[0]) : 0;
-            bool vec0_branch = (vec0 & 0xFF000000) == 0xEA000000;  /* b <imm24>   */
-            bool vec0_ldrpc  = (vec0 & 0xFFFFF000) == 0xE59FF000;  /* ldr pc,[pc] */
-            const int MARK_RUN = 8;                     /* 8x 0xdeadbeef */
+            /*
+             * The loader self-descriptor is a run of >= 4 0xdeadbeef marker
+             * words immediately followed by the loader's absolute load
+             * address.  The loader block (its ARM reset-vector word) begins
+             * 0x40 bytes — 16 words of vector table + markers — before that
+             * address word, however the run is split:
+             *   xm720/V500  : 8 vectors + 8 markers, block @0x7000 -> 0x40707000
+             *   V5 / cv6xx  : 12 vectors + 4 markers, block @0x0000 -> 0x41700000
+             * The run length (>= 4) distinguishes these from older V4 images,
+             * which use a 2-marker descriptor in a different layout and boot
+             * correctly from ram_base via a position-independent reset branch —
+             * those are left untouched.
+             */
+            const size_t MIN_RUN = 4;
             size_t scan = MIN(nwords, (size_t)(0x40000 / 4));  /* first 256 KiB */
-            if (!vec0_branch && !vec0_ldrpc) {
-                for (size_t i = 0; i + MARK_RUN + 1 <= scan; i++) {
-                    if (le32_to_cpu(w[i]) != 0xdeadbeef) {
-                        continue;
-                    }
-                    int run = 0;
-                    while (run < MARK_RUN &&
-                           le32_to_cpu(w[i + run]) == 0xdeadbeef) {
-                        run++;
-                    }
-                    if (run < MARK_RUN || i < (size_t)MARK_RUN) {
-                        continue;
-                    }
-                    /* Load address immediately follows the marker run; the
-                     * loader's vector table is the 8 words before the run. */
-                    uint32_t load_addr = le32_to_cpu(w[i + MARK_RUN]);
-                    if ((load_addr & ~0xFFFFu) >= c->ram_base) {
-                        flash_src += (i - MARK_RUN) * 4;
-                        ram_dst = load_addr;
-                    }
+            for (size_t i = 0; i + MIN_RUN <= scan; i++) {
+                if (le32_to_cpu(w[i]) != 0xdeadbeef) {
+                    continue;
+                }
+                size_t run = 0;
+                while (i + run < scan && le32_to_cpu(w[i + run]) == 0xdeadbeef) {
+                    run++;
+                }
+                if (run < MIN_RUN) {
+                    i += run;             /* skip this short run */
+                    continue;
+                }
+                size_t la_idx = i + run;  /* load-address word follows the run */
+                if (la_idx < 16 || la_idx >= scan) {
                     break;
                 }
+                uint32_t load_addr = le32_to_cpu(w[la_idx]);
+                size_t blk_off = (la_idx - 16) * 4; /* block opens 0x40 earlier */
+                uint32_t blk_vec = le32_to_cpu(w[la_idx - 16]);
+                /* Sanity: load address lands in DRAM and the block opens with
+                 * a reset branch (b <imm24>). */
+                if ((load_addr & ~0xFFFFu) >= c->ram_base &&
+                    (load_addr - c->ram_base) < 0x20000000 &&
+                    (blk_vec & 0xFF000000) == 0xEA000000) {
+                    flash_src += blk_off;
+                    ram_dst = load_addr;
+                }
+                break;
             }
             g_free(data);
         }
