@@ -3781,6 +3781,62 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
     }
 
     /*
+     * xm720 / Goke-V500 (gk7205v500/v510/v530) multi-section vendor images
+     * carry no vector table at flash offset 0 — the first 64 bytes are zero
+     * and the first-stage loader sits deeper in the image, prefixed by its
+     * own ARM vector table and a run of 8 0xdeadbeef marker words that is
+     * immediately followed by the loader's absolute load address (e.g.
+     * 0x40707000).  Real silicon's boot ROM parses this layout; mirror it
+     * here.  When flash offset 0 is not a reset branch (so the naive
+     * copy-to-ram_base / jump-to-0 path would just execute zeros), scan for
+     * the marker run, take the load address that follows it, and copy/jump
+     * from the loader's vector table 8 words (32 bytes) before the markers.
+     *
+     * Read the flash image from the file directly: at machine-init time the
+     * FMC memory window is not yet readable through the address space (the
+     * copy loop only reads the real flash at guest runtime), so we inspect the
+     * backing file to learn the layout.
+     */
+    HisiMachineState *hms = (HisiMachineState *)machine;
+    if (hms->flash_file && hms->flash_file[0]) {
+        char *data = NULL;
+        gsize len = 0;
+        if (g_file_get_contents(hms->flash_file, &data, &len, NULL)) {
+            const uint32_t *w = (const uint32_t *)data;
+            size_t nwords = len / 4;
+            uint32_t vec0 = nwords ? le32_to_cpu(w[0]) : 0;
+            bool vec0_branch = (vec0 & 0xFF000000) == 0xEA000000;  /* b <imm24>   */
+            bool vec0_ldrpc  = (vec0 & 0xFFFFF000) == 0xE59FF000;  /* ldr pc,[pc] */
+            const int MARK_RUN = 8;                     /* 8x 0xdeadbeef */
+            size_t scan = MIN(nwords, (size_t)(0x40000 / 4));  /* first 256 KiB */
+            if (!vec0_branch && !vec0_ldrpc) {
+                for (size_t i = 0; i + MARK_RUN + 1 <= scan; i++) {
+                    if (le32_to_cpu(w[i]) != 0xdeadbeef) {
+                        continue;
+                    }
+                    int run = 0;
+                    while (run < MARK_RUN &&
+                           le32_to_cpu(w[i + run]) == 0xdeadbeef) {
+                        run++;
+                    }
+                    if (run < MARK_RUN || i < (size_t)MARK_RUN) {
+                        continue;
+                    }
+                    /* Load address immediately follows the marker run; the
+                     * loader's vector table is the 8 words before the run. */
+                    uint32_t load_addr = le32_to_cpu(w[i + MARK_RUN]);
+                    if ((load_addr & ~0xFFFFu) >= c->ram_base) {
+                        flash_src += (i - MARK_RUN) * 4;
+                        ram_dst = load_addr;
+                    }
+                    break;
+                }
+            }
+            g_free(data);
+        }
+    }
+
+    /*
      * Build a small boot ROM that copies U-Boot from the SPI NOR flash
      * memory window to DDR and jumps to it.
      *
