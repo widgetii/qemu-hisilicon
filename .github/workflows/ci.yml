@@ -452,6 +452,19 @@ jobs:
             # for all hisi-fmc SoCs (the fix is in shared hisi-fmc.c).
             flash_rw: true
 
+          # gk7205v500 (Goke V500) full-Linux boot regression gate.
+          # The goke V500 OpenIPC kernel uses an "xmsp804" timer
+          # (4 single-timer blocks at 0x100 stride, hisi-xmsp804.c);
+          # before the fix Linux hung at "Calibrating delay loop" because
+          # the periodic timer IRQ at block1 (0x12000100, GIC SPI 27) was
+          # never delivered.  Plain console=ttyAMA0 (no earlycon) suffices
+          # once the timer IRQ works.  Stands in for the whole V500 family
+          # (gk7205v510/v530, gk7202v330 share the xmsp804 wiring).
+          - name: gk7205v500
+            soc: gk7205v500
+            machine: gk7205v500,sensor=none
+            append: "console=ttyAMA0,115200 root=/dev/ram0 rootfstype=squashfs"
+
           # hi3516cv610 (V5) has its own boot-hi3516cv610 job below: its
           # OpenIPC release is a combined firmware.bin (FIT kernel+dtb with an
           # appended SquashFS) under the SoC-family name, so it needs an

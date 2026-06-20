@@ -2013,6 +2013,7 @@ static const HisiSoCConfig gk7205v500_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_64M,                /* 512Mb DDR2 MCP */
     HISI_V4_COMMON_PERIPH,
+    .xmsp804_timer      = true,     /* goke V500 kernel uses xmedia,sp804 */
 };
 
 static const HisiSoCConfig gk7205v510_soc = {
@@ -2022,6 +2023,7 @@ static const HisiSoCConfig gk7205v510_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_128M,               /* 1Gb DDR3 MCP */
     HISI_V4_COMMON_PERIPH,
+    .xmsp804_timer      = true,     /* goke V500 kernel uses xmedia,sp804 */
 };
 
 static const HisiSoCConfig gk7205v530_soc = {
@@ -2031,6 +2033,7 @@ static const HisiSoCConfig gk7205v530_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_128M,               /* external DDR, 128 MiB typical */
     HISI_V4_COMMON_PERIPH,
+    .xmsp804_timer      = true,     /* goke V500 kernel uses xmedia,sp804 */
 };
 
 static const HisiSoCConfig gk7202v330_soc = {
@@ -2040,6 +2043,7 @@ static const HisiSoCConfig gk7202v330_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_64M,                /* 512Mb DDR2 MCP */
     HISI_V4_COMMON_PERIPH,
+    .xmsp804_timer      = true,     /* same GK7205V500 register family / goke V500 kernel */
 };
 
 /*
@@ -4441,18 +4445,34 @@ static void hisilicon_common_init(MachineState *machine,
         hisi_register_uart_pre_enable_reset(c);
     }
 
-    /* Timers (SP804) */
-    for (n = 0; n < c->num_timers; n++) {
-        if (c->timer_freq) {
-            DeviceState *t = qdev_new("sp804");
-            qdev_prop_set_uint32(t, "freq0", c->timer_freq);
-            qdev_prop_set_uint32(t, "freq1", c->timer_freq);
-            sysbus_realize_and_unref(SYS_BUS_DEVICE(t), &error_fatal);
-            sysbus_mmio_map(SYS_BUS_DEVICE(t), 0, c->timer_bases[n]);
-            sysbus_connect_irq(SYS_BUS_DEVICE(t), 0, pic[c->timer_irqs[n]]);
-        } else {
-            sysbus_create_simple("sp804", c->timer_bases[n],
-                                 pic[c->timer_irqs[n]]);
+    /* Timers */
+    if (c->xmsp804_timer) {
+        /*
+         * Goke V500 (gk7205v500/v510/v530, gk7202v330) xmsp804: four
+         * single-timer blocks at 0x100 stride at timer_bases[0] (0x12000000).
+         * Per xm720xxx.dtsi the per-block IRQs are GIC SPI 27, 6, 28 for
+         * blocks 1/2/3 (block0 is the free-running clocksource, no IRQ).
+         */
+        DeviceState *t = qdev_new("hisi-xmsp804");
+        qdev_prop_set_uint32(t, "freq", 24000000);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(t), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(t), 0, c->timer_bases[0]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(t), 1, pic[27]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(t), 2, pic[6]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(t), 3, pic[28]);
+    } else {
+        for (n = 0; n < c->num_timers; n++) {
+            if (c->timer_freq) {
+                DeviceState *t = qdev_new("sp804");
+                qdev_prop_set_uint32(t, "freq0", c->timer_freq);
+                qdev_prop_set_uint32(t, "freq1", c->timer_freq);
+                sysbus_realize_and_unref(SYS_BUS_DEVICE(t), &error_fatal);
+                sysbus_mmio_map(SYS_BUS_DEVICE(t), 0, c->timer_bases[n]);
+                sysbus_connect_irq(SYS_BUS_DEVICE(t), 0, pic[c->timer_irqs[n]]);
+            } else {
+                sysbus_create_simple("sp804", c->timer_bases[n],
+                                     pic[c->timer_irqs[n]]);
+            }
         }
     }
 

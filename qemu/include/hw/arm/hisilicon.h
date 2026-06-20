@@ -130,6 +130,12 @@ typedef struct HisiSoCConfig {
     hwaddr          timer_bases[HISI_MAX_TIMERS];
     int             timer_irqs[HISI_MAX_TIMERS];
     uint32_t        timer_freq;     /* 0 = device default */
+    /*
+     * Goke V500 "xmsp804": one hisi-xmsp804 device (4 single-timer blocks at
+     * 0x100 stride) at timer_bases[0] instead of the stock dual-timer sp804s.
+     * When set, the sp804 loop above is skipped.  See hisi-xmsp804.c.
+     */
+    bool            xmsp804_timer;
 
     /* SPI (PL022) */
     int             num_spis;
