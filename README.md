@@ -134,6 +134,9 @@ qemu-boot/
 ├── run-3519v101.sh
 ├── run-ev300.sh
 ├── run-ev300-flash.sh           # Boot from SPI NOR flash dump (no -kernel needed)
+├── mk-ev300-nand.sh             # Assemble OpenIPC ev300 SPI-NAND/UBI image
+├── run-ev300-nand.sh            # Boot from SPI NAND image (UBI rootfs)
+├── run-gk7205v510-nand.sh       # Boot a GD5F1GM7 SPI-NAND camera dump
 ├── run-cv610.sh
 ├── test-ive-init.c              # IVE basic test (hw_id, dma, sad, ccl)
 ├── test-ive-ops.c               # IVE operations test for QEMU (register-level)
@@ -236,6 +239,31 @@ will succeed
 A test passes only if the firmware actually issues the unlock
 sequence — without the knob, the same firmware silently "works"
 against an emulator that never had the lock to begin with.
+
+#### SPI-NAND flash boot (UBI/UBIFS)
+
+`hisi-fmc` also models a SPI-NAND chip (GigaDevice GD5F1GM7 by default:
+2 KiB page, 128 KiB block, 128 MiB), so NAND/UBI firmware boots straight
+from a flash image — boot ROM → U-Boot → UBI → kernel → UBIFS/ubiblock
+root, the same path as silicon. A `flash-file` larger than 16 MiB is
+auto-detected as SPI-NAND, and the SoC's SYSSTAT boot-strap reports the
+NAND boot device so U-Boot takes the NAND path instead of probing NOR.
+
+```bash
+# Goke GK7205V510 — boot a real 128 MiB GD5F1GM7 camera dump:
+bash qemu-boot/run-gk7205v510-nand.sh nand-dump.bin
+
+# OpenIPC hi3516ev300 NAND build — assemble image, then flash-boot it:
+bash qemu-boot/mk-ev300-nand.sh        # u-boot + ubinize(kernel+rootfs+rootfs_data)
+bash qemu-boot/run-ev300-nand.sh
+```
+
+`nand-jedec` overrides the READ-ID and `nand-oob-size` the spare-area size
+(128 for GD5F1GM7, 64 for W25N01GV) for firmware whose ID table differs —
+e.g. the OpenIPC ev300 U-Boot wants W25N01GV
+(`-global hisi-fmc.nand-jedec=0xEFAA21 -global hisi-fmc.nand-oob-size=64`).
+Dual NOR+NAND boards (NOR boot/env, NAND rootfs) attach the second chip
+with `-global hisi-fmc.nand-file=…`.
 
 ### Method 2: Boot with separate kernel and rootfs
 

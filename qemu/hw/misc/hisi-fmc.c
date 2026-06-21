@@ -1,14 +1,14 @@
 /*
  * HiSilicon HiFMC V100 Flash Memory Controller emulation.
  *
- * Emulates the FMC found on Hi3516CV300 / Hi3516EV300 SoCs, with a
- * RAM-backed SPI NOR flash (Winbond W25Q64, 8 MiB) or SPI NAND flash
- * (Winbond W25N01GV, 128 MiB).  Supports both register-mode (small
- * reads via memory window) and DMA-mode transfers.
+ * Emulates the FMC found on Hi3516CV300 / Hi3516EV300 / Goke-V500 SoCs,
+ * with a RAM-backed SPI NOR flash (Winbond W25Q64, 8 MiB) or SPI NAND
+ * flash (GigaDevice GD5F1GM7, 128 MiB).  Supports both register-mode
+ * (small reads via memory window) and DMA-mode transfers.
  *
  * The flash-type property selects which flash is physically present:
  *   0 = SPI NOR  (default, W25Q64 8 MiB)
- *   1 = SPI NAND (W25N01GV 128 MiB, 2K+64 pages)
+ *   1 = SPI NAND (GD5F1GM7 128 MiB, 2K page + 128B OOB)
  *
  * Copyright (c) 2026 OpenIPC.
  * Written by Dmitry Ilyin
@@ -63,6 +63,10 @@
 #define FMC_OP_ADDR_EN          BIT(6)
 #define FMC_OP_CMD1_EN          BIT(7)
 
+/* FMC_OP_CFG bits */
+#define FMC_OP_CFG_FM_CS_SHIFT  11
+#define FMC_OP_CFG_FM_CS_MASK   (0x3 << FMC_OP_CFG_FM_CS_SHIFT)
+
 /* FMC_OP_CTRL bits */
 #define FMC_OP_CTRL_DMA_OP_READY BIT(0)
 #define FMC_OP_CTRL_RW_OP        BIT(1)
@@ -114,13 +118,16 @@
 #define NOR_SECTOR_SIZE     (64 * 1024)
 #define NOR_PAGE_SIZE       256
 
-/* NAND flash identity: Winbond W25N01GV (128 MiB) */
-#define NAND_JEDEC_0        0xEF    /* Winbond */
-#define NAND_JEDEC_1        0xAA
-#define NAND_JEDEC_2        0x21
+/* NAND flash identity: GigaDevice GD5F1GM7UEYIG (128 MiB, on-die 24b/1K ECC)
+ * READ_ID (0x9F) returns mfr 0xC8 (GigaDevice) + device 0x91; the hifmc100
+ * driver compares id_len = 2 bytes.  Override with the `flash-jedec`
+ * property (e.g. 0xC8AA21 to emulate a Winbond W25N01GV instead). */
+#define NAND_JEDEC_0        0xC8    /* GigaDevice */
+#define NAND_JEDEC_1        0x91    /* GD5F1GM7 device ID */
+#define NAND_JEDEC_2        0x00
 #define NAND_FLASH_SIZE     (128 * 1024 * 1024)
 #define NAND_PAGE_SIZE      2048
-#define NAND_OOB_SIZE       64
+#define NAND_OOB_SIZE       128     /* GD5F1GM7 spare area */
 #define NAND_PAGES_PER_BLOCK 64
 #define NAND_BLOCK_SIZE     (NAND_PAGE_SIZE * NAND_PAGES_PER_BLOCK)
 #define NAND_BLOCK_COUNT    1024
@@ -142,9 +149,25 @@ struct HisiFmcState {
     MemoryRegion mem_iomem;
 
     /* Configuration properties */
-    uint32_t flash_type;          /* 0=NOR, 1=NAND */
+    uint32_t flash_type;          /* 0=NOR, 1=NAND — type of the flash-file image */
     char    *flash_file;          /* optional: path to flash dump to load */
-    uint32_t flash_jedec;         /* optional: JEDEC ID override (e.g. 0xEF4018) */
+    char    *nand_file;           /* optional: 2nd image for dual NOR+NAND boards
+                                   * (flash-file is NOR u-boot+env, nand-file is
+                                   * the SPI-NAND rootfs).  See widgetii#115. */
+    uint32_t flash_jedec;         /* optional: NOR JEDEC ID override */
+    uint32_t nand_jedec;          /* optional: NAND READ_ID override (e.g. 0xEFAA21
+                                   * to present W25N01GV instead of GD5F1GM7) */
+    uint32_t nand_oob_size;       /* spare bytes/page (128 GD5F1GM7, 64 W25N01GV) */
+
+    /* Which chips are physically present (dual-flash capable) + their
+     * chip-selects.  The guest selects a CS via FMC_OP_CFG bits[12:11]
+     * (OP_CFG_FM_CS); a chip must only answer on its own CS, otherwise the
+     * NOR scan phantom-detects the NOR on every CS and claims them all
+     * (shared hifmc_cs_user[]), starving the NAND of a free CS. */
+    bool     has_nor;
+    bool     has_nand;
+    uint32_t nor_cs;              /* NOR chip-select (boot flash = 0) */
+    uint32_t nand_cs;             /* NAND chip-select (0 alone, 1 if NOR present) */
 
     /* Control registers */
     uint32_t cfg;
@@ -171,11 +194,13 @@ struct HisiFmcState {
     uint8_t  sr;
     uint8_t  sr2;                 /* Status Register-2 (QE bit at bit 1) */
     uint8_t  sr3;                 /* Status Register-3 */
-    uint8_t *flash;
+    uint8_t *flash;               /* SPI NOR data (XIP-able boot/env) */
     uint32_t flash_size;
 
     /* NAND-specific state */
-    uint8_t *nand_oob;            /* OOB area: NAND_OOB_SIZE per page */
+    uint8_t *nand_data;           /* SPI NAND page data */
+    uint32_t nand_size;           /* NAND data area size */
+    uint8_t *nand_oob;            /* OOB area: nand_oob_size per page */
     uint8_t  nand_feature_protect; /* feature reg 0xA0 */
     uint8_t  nand_feature_config;  /* feature reg 0xB0 */
 
@@ -218,30 +243,46 @@ static inline int hisi_fmc_current_flash_sel(HisiFmcState *s)
 }
 
 /*
- * Write-back modified flash data to the backing file.
- * Called after every erase / page-program / DMA-write so that the
- * on-disk image stays in sync with the in-memory flash array — matching
- * real NOR flash persistence behavior.
+ * Write-back modified flash data to a backing file so the on-disk image
+ * stays in sync with the in-memory array (matches real flash persistence).
  */
-static void hisi_fmc_flush_to_file(HisiFmcState *s, uint32_t offset,
-                                    uint32_t len)
+static void hisi_fmc_flush(const char *file, const uint8_t *data,
+                           uint32_t total, uint32_t offset, uint32_t len)
 {
-    if (!s->flash_file || !s->flash_file[0]) {
+    if (!file || !file[0]) {
         return;
     }
-    if (offset + len > s->flash_size) {
-        len = s->flash_size - offset;
+    if (offset >= total) {
+        return;
     }
-    FILE *f = fopen(s->flash_file, "r+b");
+    if (offset + len > total) {
+        len = total - offset;
+    }
+    FILE *f = fopen(file, "r+b");
     if (!f) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "hisi-fmc: cannot open '%s' for write-back\n",
-                      s->flash_file);
+                      "hisi-fmc: cannot open '%s' for write-back\n", file);
         return;
     }
     fseek(f, offset, SEEK_SET);
-    fwrite(&s->flash[offset], 1, len, f);
+    fwrite(&data[offset], 1, len, f);
     fclose(f);
+}
+
+/* NOR write-back: NOR always lives in flash-file. */
+static void hisi_fmc_flush_to_file(HisiFmcState *s, uint32_t offset,
+                                    uint32_t len)
+{
+    hisi_fmc_flush(s->flash_file, s->flash, s->flash_size, offset, len);
+}
+
+/* NAND write-back: backing file is flash-file when the NAND is the only
+ * chip (flash_type=NAND), or the separate nand-file on dual NOR+NAND boards. */
+static void hisi_fmc_flush_nand(HisiFmcState *s, uint32_t offset, uint32_t len)
+{
+    const char *file = (s->flash_type == FLASH_TYPE_SPI_NAND)
+                       ? s->flash_file : s->nand_file;
+    hisi_fmc_flush(file, s->nand_data, s->nand_size, offset, len);
 }
 
 /*
@@ -510,9 +551,17 @@ static void hisi_fmc_exec_nand_reg_op(HisiFmcState *s)
 
     switch (spi_cmd) {
     case SPI_CMD_READ_ID:
-        s->iobuf[0] = NAND_JEDEC_0;
-        s->iobuf[1] = NAND_JEDEC_1;
-        s->iobuf[2] = NAND_JEDEC_2;
+        if (s->nand_jedec) {
+            /* User-specified NAND ID, e.g. 0xEFAA21 for Winbond W25N01GV */
+            s->iobuf[0] = (s->nand_jedec >> 16) & 0xFF;
+            s->iobuf[1] = (s->nand_jedec >> 8) & 0xFF;
+            s->iobuf[2] = s->nand_jedec & 0xFF;
+        } else {
+            /* Default: GigaDevice GD5F1GM7 (0xC8 0x91) */
+            s->iobuf[0] = NAND_JEDEC_0;
+            s->iobuf[1] = NAND_JEDEC_1;
+            s->iobuf[2] = NAND_JEDEC_2;
+        }
         if (len > 3) {
             memset(&s->iobuf[3], 0, len - 3);
         }
@@ -566,13 +615,16 @@ static void hisi_fmc_exec_nand_reg_op(HisiFmcState *s)
     case SPI_CMD_SECTOR_ERASE: { /* 0xD8 = Block Erase for NAND */
         if (s->sr & SPI_SR_WEL) {
             uint32_t block, page, column;
+            uint32_t nblocks = s->nand_size / NAND_BLOCK_SIZE;
             hisi_fmc_nand_decode_addr(s, &block, &page, &column);
-            if (block < NAND_BLOCK_COUNT) {
+            if (block < nblocks) {
                 uint32_t flash_off = block * NAND_BLOCK_SIZE;
-                uint32_t oob_off = block * NAND_PAGES_PER_BLOCK * NAND_OOB_SIZE;
-                memset(&s->flash[flash_off], 0xFF, NAND_BLOCK_SIZE);
+                uint32_t oob_off = block * NAND_PAGES_PER_BLOCK *
+                                   s->nand_oob_size;
+                memset(&s->nand_data[flash_off], 0xFF, NAND_BLOCK_SIZE);
                 memset(&s->nand_oob[oob_off], 0xFF,
-                       NAND_PAGES_PER_BLOCK * NAND_OOB_SIZE);
+                       NAND_PAGES_PER_BLOCK * s->nand_oob_size);
+                hisi_fmc_flush_nand(s, flash_off, NAND_BLOCK_SIZE);
             }
             s->sr &= ~SPI_SR_WEL;
         }
@@ -588,23 +640,32 @@ static void hisi_fmc_exec_nand_reg_op(HisiFmcState *s)
 
 /* ── Register-mode dispatch ──────────────────────────────────────────── */
 
-/* Returns true if the command wrote results to iobuf */
+/* Returns true if the command wrote results to iobuf.
+ *
+ * Routing is by the FMC's current flash-select (FMC_CFG) AND which chips are
+ * physically present.  On dual NOR+NAND boards both are present and the guest
+ * driver flips FMC_CFG before NOR vs NAND ops (hifmc_dev_type_switch); when a
+ * chip is absent the bus floats, so we return 0x00 so its probe fails cleanly. */
 static bool hisi_fmc_exec_reg_op(HisiFmcState *s)
 {
     bool wrote_iobuf = true;
-    if (s->flash_type == FLASH_TYPE_SPI_NAND &&
-        hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NAND) {
+    int sel = hisi_fmc_current_flash_sel(s);
+    uint32_t cs = (s->op_cfg & FMC_OP_CFG_FM_CS_MASK) >> FMC_OP_CFG_FM_CS_SHIFT;
+
+    if (sel == FLASH_TYPE_SPI_NAND && s->has_nand && cs == s->nand_cs) {
         hisi_fmc_exec_nand_reg_op(s);
-    } else if (s->flash_type == FLASH_TYPE_SPI_NOR &&
-               hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NOR) {
+    } else if (sel == FLASH_TYPE_SPI_NOR && s->has_nor && cs == s->nor_cs) {
         wrote_iobuf = hisi_fmc_exec_nor_reg_op(s);
     } else {
-        /* Wrong flash selected — no chip responds, return 0x00 ID */
+        /* Selected chip not present — the SPI bus floats high, so a real
+         * controller reads 0xFF (not 0x00).  U-Boot's NOR probe treats an
+         * all-0x00 ID as a present-but-unknown chip and retries forever; 0xFF
+         * is "no device" and it gives up cleanly. */
         uint32_t len = s->data_num & 0x3FFF;
         if (len > IOBUF_SIZE) {
             len = IOBUF_SIZE;
         }
-        memset(s->iobuf, 0x00, len);
+        memset(s->iobuf, 0xFF, len);
     }
     s->fmc_int |= FMC_INT_OP_DONE;
     return wrote_iobuf;
@@ -699,7 +760,8 @@ static void hisi_fmc_exec_dma_nand(HisiFmcState *s)
 
     hisi_fmc_nand_decode_addr(s, &block, &page, &column);
 
-    if (block >= NAND_BLOCK_COUNT || page >= NAND_PAGES_PER_BLOCK) {
+    uint32_t nblocks = s->nand_size / NAND_BLOCK_SIZE;
+    if (block >= nblocks || page >= NAND_PAGES_PER_BLOCK) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "hisi-fmc: NAND DMA out of range block=%u page=%u\n",
                       block, page);
@@ -708,49 +770,52 @@ static void hisi_fmc_exec_dma_nand(HisiFmcState *s)
 
     uint32_t page_idx = block * NAND_PAGES_PER_BLOCK + page;
     uint32_t flash_off = page_idx * NAND_PAGE_SIZE;
-    uint32_t oob_off = page_idx * NAND_OOB_SIZE;
-    uint32_t dma_len = s->dma_len;
+    uint32_t oob_off = page_idx * s->nand_oob_size;
 
-    if (dma_len > NAND_PAGE_SIZE) {
-        dma_len = NAND_PAGE_SIZE;
-    }
-
+    /*
+     * The hifmc100 driver only programs FMC_DMA_LEN for OOB-only / ecc0
+     * transfers (drivers/mtd/nand/hifmc100/hifmc100.c).  A normal page DMA
+     * always moves a full page + spare, selected by FMC_OP_CTRL's RD_OP_SEL
+     * field (READ_ALL_PAGE), NOT by FMC_DMA_LEN — which keeps a stale value
+     * (e.g. the last OOB size) from a prior op.  Sizing the data copy by
+     * s->dma_len therefore truncated every page read (corrupting the U-Boot
+     * env CRC and all UBI reads).  Always transfer a whole page + OOB.
+     */
     if (!is_write) {
-        /* DMA read: flash → guest memory (page data) */
-        if (dma_len > 0) {
-            dma_memory_write(&address_space_memory, dma_addr,
-                             &s->flash[flash_off], dma_len,
-                             MEMTXATTRS_UNSPECIFIED);
-        }
-        /* OOB → guest memory */
+        /* DMA read: flash → guest memory (full page data + spare) */
+        dma_memory_write(&address_space_memory, dma_addr,
+                         &s->nand_data[flash_off], NAND_PAGE_SIZE,
+                         MEMTXATTRS_UNSPECIFIED);
         if (s->dma_saddr_oob) {
             dma_memory_write(&address_space_memory, dma_oob_addr,
-                             &s->nand_oob[oob_off], NAND_OOB_SIZE,
+                             &s->nand_oob[oob_off], s->nand_oob_size,
                              MEMTXATTRS_UNSPECIFIED);
         }
     } else {
-        /* DMA write: guest memory → flash (page program) */
+        /* DMA write: guest memory → flash (full page program) */
         if (s->sr & SPI_SR_WEL) {
-            if (dma_len > 0) {
-                uint8_t *buf = g_malloc(dma_len);
-                dma_memory_read(&address_space_memory, dma_addr,
-                                buf, dma_len, MEMTXATTRS_UNSPECIFIED);
-                /* NAND program: can only clear bits */
-                for (uint32_t i = 0; i < dma_len; i++) {
-                    s->flash[flash_off + i] &= buf[i];
-                }
-                g_free(buf);
+            uint8_t *buf = g_malloc(NAND_PAGE_SIZE);
+            dma_memory_read(&address_space_memory, dma_addr,
+                            buf, NAND_PAGE_SIZE, MEMTXATTRS_UNSPECIFIED);
+            /* NAND program: can only clear bits */
+            for (uint32_t i = 0; i < NAND_PAGE_SIZE; i++) {
+                s->nand_data[flash_off + i] &= buf[i];
             }
+            g_free(buf);
             /* OOB write */
             if (s->dma_saddr_oob) {
-                uint8_t oob_buf[NAND_OOB_SIZE];
+                uint8_t *oob_buf = g_malloc(s->nand_oob_size);
                 dma_memory_read(&address_space_memory, dma_oob_addr,
-                                oob_buf, NAND_OOB_SIZE,
+                                oob_buf, s->nand_oob_size,
                                 MEMTXATTRS_UNSPECIFIED);
-                for (int i = 0; i < NAND_OOB_SIZE; i++) {
+                for (uint32_t i = 0; i < s->nand_oob_size; i++) {
                     s->nand_oob[oob_off + i] &= oob_buf[i];
                 }
+                g_free(oob_buf);
             }
+            /* Persist the page so saveenv / UBI writes survive (matches the
+             * NOR write-back behaviour; OOB lives only in RAM). */
+            hisi_fmc_flush_nand(s, flash_off, NAND_PAGE_SIZE);
             s->sr &= ~SPI_SR_WEL;
         }
     }
@@ -758,14 +823,14 @@ static void hisi_fmc_exec_dma_nand(HisiFmcState *s)
 
 static void hisi_fmc_exec_dma_op(HisiFmcState *s)
 {
-    if (s->flash_type == FLASH_TYPE_SPI_NAND &&
-        hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NAND) {
+    int sel = hisi_fmc_current_flash_sel(s);
+
+    if (sel == FLASH_TYPE_SPI_NAND && s->has_nand) {
         hisi_fmc_exec_dma_nand(s);
-    } else if (s->flash_type == FLASH_TYPE_SPI_NOR &&
-               hisi_fmc_current_flash_sel(s) == FLASH_TYPE_SPI_NOR) {
+    } else if (sel == FLASH_TYPE_SPI_NOR && s->has_nor) {
         hisi_fmc_exec_dma_nor(s);
     }
-    /* else: wrong flash type selected, no-op */
+    /* else: selected chip not present, no-op */
 
     s->fmc_int |= FMC_INT_OP_DONE;
 }
@@ -898,16 +963,20 @@ static uint64_t hisi_fmc_mem_read(void *opaque, hwaddr offset, unsigned size)
         return s->iobuf[offset];
     }
 
-    /* Direct flash read — memory-mapped XIP access used by boot ROM and
-     * U-Boot to read flash contents from the FMC memory window. */
-    if (s->flash && offset < s->flash_size) {
+    /* Direct flash read — memory-mapped XIP access used by the boot ROM and
+     * U-Boot to read flash from the FMC memory window.  The boot/XIP chip is
+     * NOR when present (dual NOR+NAND or NOR-only boards); on NAND-only boards
+     * the boot ROM XIPs the NAND data area linearly (data-only dump). */
+    const uint8_t *xip = s->has_nor ? s->flash : s->nand_data;
+    uint32_t xip_size = s->has_nor ? s->flash_size : s->nand_size;
+    if (xip && offset < xip_size) {
         if (size == 4 && (offset & 3) == 0) {
-            return ldl_le_p(&s->flash[offset]);
+            return ldl_le_p(&xip[offset]);
         }
         if (size == 2 && (offset & 1) == 0) {
-            return lduw_le_p(&s->flash[offset]);
+            return lduw_le_p(&xip[offset]);
         }
-        return s->flash[offset];
+        return xip[offset];
     }
 
     return 0;
@@ -937,80 +1006,102 @@ static const MemoryRegionOps hisi_fmc_mem_ops = {
 
 /* ── Device lifecycle ────────────────────────────────────────────────── */
 
+/* Load a backing file into a buffer of at least min_size, growing to fit a
+ * larger image.  Returns the allocated buffer (0xFF-filled past the file) and
+ * its size via *out_size, or sets errp and returns NULL. */
+static uint8_t *hisi_fmc_load_image(const char *file, uint32_t min_size,
+                                    uint32_t *out_size, Error **errp)
+{
+    struct stat st;
+    uint32_t size = min_size;
+    if (file && file[0]) {
+        if (stat(file, &st) != 0) {
+            error_setg(errp, "hisi-fmc: cannot stat flash file '%s'", file);
+            return NULL;
+        }
+        if ((uint32_t)st.st_size > size) {
+            size = (uint32_t)st.st_size;
+        }
+    }
+    uint8_t *buf = g_malloc(size);
+    memset(buf, 0xFF, size);
+    if (file && file[0]) {
+        FILE *f = fopen(file, "rb");
+        if (!f) {
+            error_setg(errp, "hisi-fmc: cannot open flash file '%s'", file);
+            g_free(buf);
+            return NULL;
+        }
+        size_t nread = fread(buf, 1, st.st_size, f);
+        fclose(f);
+        if (nread != (size_t)st.st_size) {
+            error_setg(errp, "hisi-fmc: short read from '%s'", file);
+            g_free(buf);
+            return NULL;
+        }
+        qemu_log("hisi-fmc: loaded %u bytes from '%s'\n",
+                 (uint32_t)st.st_size, file);
+    }
+    *out_size = size;
+    return buf;
+}
+
 static void hisi_fmc_realize(DeviceState *dev, Error **errp)
 {
     HisiFmcState *s = HISI_FMC(dev);
 
-    if (s->flash_type == FLASH_TYPE_SPI_NAND) {
-        s->flash_size = NAND_FLASH_SIZE;
-        s->flash = g_malloc(NAND_FLASH_SIZE);
-        memset(s->flash, 0xFF, NAND_FLASH_SIZE);
-        s->nand_oob = g_malloc(NAND_TOTAL_PAGES * NAND_OOB_SIZE);
-        memset(s->nand_oob, 0xFF, NAND_TOTAL_PAGES * NAND_OOB_SIZE);
-        /* Set initial FMC_CFG to SPI_NAND */
-        s->cfg = (s->cfg & ~FMC_CFG_FLASH_SEL_MASK) |
-                 (FLASH_TYPE_SPI_NAND << FMC_CFG_FLASH_SEL_SHIFT);
-    } else {
-        s->flash_size = NOR_FLASH_SIZE;
-        s->flash = g_malloc(NOR_FLASH_SIZE);
-        memset(s->flash, 0xFF, NOR_FLASH_SIZE);
-        /* FMC_CFG defaults to 0 (SPI_NOR) */
-        /* Many NOR flash chips ship with QE (Quad Enable) bit set in SR2.
-         * XM firmware expects to read SR2 and find QE=1, then disables it.
-         * Default 0x02 matches common factory programming. */
-        s->sr2 = 0x02;
+    /*
+     * Chip topology:
+     *   flash_type == NAND  → flash-file is the SPI-NAND image (NAND-only).
+     *   flash_type == NOR   → flash-file is the SPI-NOR image (NOR present).
+     *   nand-file given     → an additional SPI-NAND chip (dual NOR+NAND
+     *                         board: NOR holds u-boot+env, NAND holds rootfs).
+     */
+    const char *nor_file  = (s->flash_type == FLASH_TYPE_SPI_NOR)
+                            ? s->flash_file : NULL;
+    const char *nand_file = (s->flash_type == FLASH_TYPE_SPI_NAND)
+                            ? s->flash_file : s->nand_file;
 
-        /* WPS block lock array — all blocks start unlocked.
-         * On real hardware, blocks default to locked when WPS is first
-         * enabled, but the flash image we load represents a previously-
-         * configured device where firmware has already set the lock state.
-         * Starting unlocked lets the firmware's Global Lock (0x7E) + selective
-         * Unlock (0x39) sequence establish the correct protection map. */
-        s->num_blocks = NOR_FLASH_SIZE / NOR_SECTOR_SIZE;
+    /* ── SPI NOR ── */
+    if (s->flash_type == FLASH_TYPE_SPI_NOR) {
+        s->has_nor = true;
+        /* Many NOR chips ship with QE set in SR2; XM firmware expects QE=1. */
+        s->sr2 = 0x02;
+        s->flash = hisi_fmc_load_image(nor_file, NOR_FLASH_SIZE,
+                                       &s->flash_size, errp);
+        if (!s->flash) {
+            return;
+        }
+        /* WPS block-lock arrays — all blocks start unlocked. */
+        s->num_blocks = s->flash_size / NOR_SECTOR_SIZE;
         s->block_locked = g_malloc0(s->num_blocks);
         s->block_ever_unlocked = g_malloc0(s->num_blocks);
     }
 
-    /* Load flash contents from file if specified */
-    if (s->flash_file && s->flash_file[0]) {
-        struct stat st;
-        if (stat(s->flash_file, &st) != 0) {
-            error_setg(errp, "hisi-fmc: cannot stat flash file '%s'",
-                       s->flash_file);
+    /* ── SPI NAND ── */
+    if (nand_file || s->flash_type == FLASH_TYPE_SPI_NAND) {
+        s->has_nand = true;
+        /* NAND sits on its own chip-select.  Alone it is CS0; alongside a NOR
+         * boot flash (CS0) it is CS1, matching dual NOR+NAND board wiring. */
+        s->nand_cs = s->has_nor ? 1 : 0;
+        s->nand_data = hisi_fmc_load_image(nand_file, NAND_FLASH_SIZE,
+                                           &s->nand_size, errp);
+        if (!s->nand_data) {
             return;
         }
-        uint32_t file_size = (uint32_t)st.st_size;
-        if (file_size > s->flash_size) {
-            /* Re-allocate to fit the larger dump */
-            g_free(s->flash);
-            s->flash_size = file_size;
-            s->flash = g_malloc(file_size);
-            memset(s->flash, 0xFF, file_size);
+        uint32_t npages = s->nand_size / NAND_PAGE_SIZE;
+        s->nand_oob = g_malloc(npages * s->nand_oob_size);
+        memset(s->nand_oob, 0xFF, npages * s->nand_oob_size);
+        /* On NAND-only boards the boot ROM XIPs NAND and the guest starts in
+         * NAND mode; on dual boards FMC_CFG stays NOR for the NOR-resident
+         * u-boot+env and the driver flips it before NAND ops. */
+        if (!s->has_nor) {
+            s->cfg = (s->cfg & ~FMC_CFG_FLASH_SEL_MASK) |
+                     (FLASH_TYPE_SPI_NAND << FMC_CFG_FLASH_SEL_SHIFT);
+        }
+    }
 
-            /* Resize block lock arrays to match */
-            g_free(s->block_locked);
-            g_free(s->block_ever_unlocked);
-            s->num_blocks = file_size / NOR_SECTOR_SIZE;
-            s->block_locked = g_malloc0(s->num_blocks);
-            s->block_ever_unlocked = g_malloc0(s->num_blocks);
-        }
-        FILE *f = fopen(s->flash_file, "rb");
-        if (!f) {
-            error_setg(errp, "hisi-fmc: cannot open flash file '%s'",
-                       s->flash_file);
-            return;
-        }
-        size_t nread = fread(s->flash, 1, file_size, f);
-        fclose(f);
-        if (nread != file_size) {
-            error_setg(errp, "hisi-fmc: short read from '%s' "
-                       "(got %zu, expected %u)", s->flash_file,
-                       nread, file_size);
-            return;
-        }
-        qemu_log("hisi-fmc: loaded %u bytes from '%s'\n",
-                 file_size, s->flash_file);
-
+    if (s->has_nor) {
         /* Scan for SquashFS partitions and pre-mark non-SquashFS blocks as
          * ever_unlocked.  This protects SquashFS data from errant erases
          * while allowing the firmware to freely erase/write other blocks
@@ -1102,6 +1193,7 @@ static void hisi_fmc_finalize(Object *obj)
 {
     HisiFmcState *s = HISI_FMC(obj);
     g_free(s->flash);
+    g_free(s->nand_data);
     g_free(s->nand_oob);
     g_free(s->block_locked);
     g_free(s->block_ever_unlocked);
@@ -1111,7 +1203,16 @@ static const Property hisi_fmc_properties[] = {
     DEFINE_PROP_UINT32("flash-type", HisiFmcState, flash_type,
                        FLASH_TYPE_SPI_NOR),
     DEFINE_PROP_STRING("flash-file", HisiFmcState, flash_file),
+    /* Second image for dual NOR+NAND boards: flash-file is the SPI-NOR
+     * (u-boot + env), nand-file is the SPI-NAND (rootfs UBI). */
+    DEFINE_PROP_STRING("nand-file", HisiFmcState, nand_file),
     DEFINE_PROP_UINT32("flash-jedec", HisiFmcState, flash_jedec, 0),
+    /* NAND READ_ID override (default GigaDevice GD5F1GM7 0xC8 0x91); set
+     * 0xEFAA21 to present Winbond W25N01GV for firmware whose SPI-NAND ID
+     * table lacks GD5F1GM7. */
+    DEFINE_PROP_UINT32("nand-jedec", HisiFmcState, nand_jedec, 0),
+    /* NAND spare bytes per page: 128 (GD5F1GM7), 64 (W25N01GV). */
+    DEFINE_PROP_UINT32("nand-oob-size", HisiFmcState, nand_oob_size, 128),
     /* Start the chip in the as-shipped factory-locked state for SPI NOR.
      * When on: SR3.WPS = 1, every block individually locked, no block
      * ever-unlocked.  Lets CI exercise the recovery-unlock path

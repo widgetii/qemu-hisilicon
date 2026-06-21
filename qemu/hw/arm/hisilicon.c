@@ -48,6 +48,7 @@
 #include <libfdt.h>
 #include "hw/loader.h"
 #include <zlib.h>  /* crc32() for uImage header fixup */
+#include <glib/gstdio.h>  /* g_stat() for flash-image size sniffing */
 
 
 /* ── SoC configuration tables ──────────────────────────────────────── */
@@ -4160,6 +4161,7 @@ static void hisilicon_common_init(MachineState *machine,
     int num_pic = 0;
     int n;
     bool flash_boot = false;  /* true when booting from SPI NOR flash dump */
+    bool fmc_nand_boot = false; /* true when the FMC boot flash is SPI NAND */
     bool bios_boot = machine->firmware && machine->firmware[0];
                                 /* true when -bios loads a mask-ROM ELF */
 
@@ -4193,11 +4195,46 @@ static void hisilicon_common_init(MachineState *machine,
         HisiMachineState *hms = (HisiMachineState *)machine;
         if (hms->flash_file && hms->flash_file[0]) {
             qdev_prop_set_string(fmc, "flash-file", hms->flash_file);
+
+            /*
+             * Auto-select SPI-NAND mode by image size.  The hisi-fmc model
+             * backs SPI NOR up to 16 MiB; anything larger is a SPI-NAND dump
+             * (e.g. the 128 MiB GD5F1GM7 on Goke-V500 NAND boards).  Setting
+             * flash-type=1 before realize makes the FMC allocate the NAND
+             * array + OOB and report the GigaDevice ID, so U-Boot/Linux can
+             * attach UBI and flash-boot straight from the dump.  Only the
+             * hisi-fmc controller has a flash-type property (hisi-sfc350 is
+             * NOR-only), so gate on the device type.  See widgetii#115.
+             */
+            if (!c->fmc_type || !strcmp(fmc_type, "hisi-fmc")) {
+                GStatBuf st;
+                if (g_stat(hms->flash_file, &st) == 0 &&
+                    st.st_size > 16 * 1024 * 1024) {
+                    qdev_prop_set_uint32(fmc, "flash-type", 1 /* SPI NAND */);
+                    fmc_nand_boot = true;
+                }
+            }
         }
 
         sysbus_realize_and_unref(fmcbus, &error_fatal);
         sysbus_mmio_map(fmcbus, 0, c->fmc_ctrl_base);
         sysbus_mmio_map(fmcbus, 1, c->fmc_mem_base);
+
+        /*
+         * Dual NOR+NAND boards (e.g. OpenIPC hi3516ev300 NAND: u-boot+env in
+         * SPI-NOR, rootfs in SPI-NAND) pass `-global hisi-fmc.nand-file=...`
+         * (applied during realize, so this is queried afterwards).  Their boot
+         * flash device type is SPI-NAND, so report that in SYSSTAT too — after
+         * the NOR scan U-Boot's dev_type_switch(DEFAULT) returns the FMC to
+         * NAND mode, letting hifmc100_host_init succeed.
+         */
+        if (!c->fmc_type || !strcmp(fmc_type, "hisi-fmc")) {
+            char *nf = object_property_get_str(OBJECT(fmc), "nand-file", NULL);
+            if (nf && nf[0]) {
+                fmc_nand_boot = true;
+            }
+            g_free(nf);
+        }
 
         /* Check if flash-file was set (via either the machine-level
          * property or a device-level -global). */
@@ -4361,9 +4398,28 @@ static void hisilicon_common_init(MachineState *machine,
          * load attempt and soft-resets in a loop.  Must run AFTER
          * sysctl mmio map so the store lands in the device's regbank.
          */
+        /*
+         * SYSSTAT (0x8c) boot-strap bits, OR-ed together:
+         *   bit5 (0x20) — BOOT_MODE fastboot pin, for -bios mask-ROM runs.
+         *   SPI device type = SPI NAND.  U-Boot's get_boot_media() reads
+         *     GET_SPI_DEVICE_TYPE(SYSSTAT); if it isn't NAND, spi_flash_probe()
+         *     drives the SPI-NOR path (env-in-NOR, NOR scan) instead of NAND,
+         *     so NAND-boot OpenIPC images loop on the missing NOR env and never
+         *     attach UBI.  The strap BIT IS SOC-SPECIFIC: bit10 (0x400) on
+         *     ev200/ev300/dv200/3518ev300, bit6 (0x40) on cv500/dv300.  Set
+         *     both so whichever bit the running SoC samples reads NAND; the
+         *     unused one is harmless.  See widgetii#115.
+         */
+        uint32_t sysstat = 0;
         if (bios_boot) {
+            sysstat |= 0x20;
+        }
+        if (fmc_nand_boot) {
+            sysstat |= 0x40 | 0x400;
+        }
+        if (sysstat) {
             address_space_stl(&address_space_memory,
-                              c->sysctl_base + 0x8c, 0x20,
+                              c->sysctl_base + 0x8c, sysstat,
                               MEMTXATTRS_UNSPECIFIED, NULL);
         }
     }

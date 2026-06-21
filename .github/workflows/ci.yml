@@ -852,3 +852,92 @@ jobs:
             boot-output.txt
             qemu-boot/qemu.log
           retention-days: 7
+
+  boot-hi3516ev300-nand:
+    name: Boot hi3516ev300 (SPI-NAND / UBI)
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 \
+            mtd-utils squashfs-tools python3-pip
+          pip3 install --break-system-packages ubi_reader
+
+      - name: Download QEMU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/
+
+      - name: Make QEMU executable
+        run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Assemble SPI-NAND image from OpenIPC ev300 NAND release
+        run: bash qemu-boot/mk-ev300-nand.sh
+
+      - name: "OpenIPC NAND/UBI flash-boot"
+        timeout-minutes: 4
+        run: |
+          # Boots ENTIRELY from the emulated SPI-NAND (no -kernel): boot ROM ->
+          # U-Boot (attaches UBI, reads kernel volume) -> kernel -> ubiblock
+          # squashfs root.  nand-jedec/nand-oob-size present the W25N01GV the
+          # OpenIPC ev300 U-Boot SPI-NAND id table knows.
+          #
+          # The gate is the NAND/UBI storage chain itself — U-Boot + kernel
+          # attach UBI from the emulated NAND and mount the squashfs rootfs via
+          # ubiblock — which is exactly what this PR delivers and is fully
+          # deterministic.  It deliberately does NOT wait for a login prompt:
+          # the OpenIPC "ultimate" rootfs (the only NAND build OpenIPC ships
+          # for ev300) runs load_hisilicon, which insmods the vendor MPP/mmz
+          # blob that hangs on QEMU regardless of storage backend.
+          QEMU=./qemu-src/build/qemu-system-arm
+          timeout 180 $QEMU -M hi3516ev300,sensor=none,flash-file=qemu-boot/ev300-nand.img \
+            -global hisi-fmc.nand-jedec=0xEFAA21 \
+            -global hisi-fmc.nand-oob-size=64 \
+            -nographic -serial mon:stdio -nic user,restrict=on \
+            -d unimp,guest_errors -D qemu-boot/qemu.log 2>&1 | tee boot-output.txt &
+          QEMU_PID=$!
+
+          for i in $(seq 1 180); do
+            if grep -q "Mounted root (squashfs filesystem)" boot-output.txt 2>/dev/null; then
+              echo ""
+              echo "=== NAND -> UBI -> squashfs root mounted ==="
+              kill $QEMU_PID 2>/dev/null || true
+              # The whole chain must have run, and cleanly.
+              grep -q "block ubiblock0_1: created from ubi0:1(rootfs)" boot-output.txt \
+                || { echo "FAIL: ubiblock not created from NAND UBI"; exit 1; }
+              if grep -qE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed" boot-output.txt; then
+                echo "=== FAIL: panic / NAND-boot regression ==="
+                grep -nE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed" boot-output.txt | head
+                exit 1
+              fi
+              echo "=== Boot clean (boot ROM -> U-Boot UBI -> kernel UBI -> ubiblock -> squashfs root) ==="
+              exit 0
+            fi
+            if ! kill -0 $QEMU_PID 2>/dev/null; then
+              echo "=== FAIL: QEMU exited before mounting root ==="
+              tail -40 boot-output.txt
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "=== TIMEOUT: root not mounted from NAND/UBI ==="
+          tail -40 boot-output.txt
+          kill $QEMU_PID 2>/dev/null || true
+          exit 1
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log-hi3516ev300-nand
+          path: |
+            boot-output.txt
+            qemu-boot/qemu.log
+          retention-days: 7
