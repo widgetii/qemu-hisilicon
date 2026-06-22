@@ -972,6 +972,12 @@ jobs:
           name: qemu-aarch64
           path: qemu-src/build
 
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
+
       - name: Boot U-Boot smoke image
         run: |
           chmod +x qemu-src/build/qemu-system-aarch64
