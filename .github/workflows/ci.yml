@@ -716,14 +716,19 @@ jobs:
           echo "setenv gatewayip 10.0.10.1" >&3
           echo "setenv netmask 255.255.255.0" >&3
           sleep 1
-          echo "ping 10.0.10.1" >&3
-
-          # Wait for ping result (up to 30s)
-          for i in $(seq 1 30); do
-            if grep -qE "alive|ARP Retry" /tmp/uboot-ping.txt 2>/dev/null; then
-              break
-            fi
-            sleep 1
+          # U-Boot's first ping right after PHY link-up frequently loses its
+          # ARP (autoneg/host not ready) and its small fixed ARP-retry budget
+          # is exhausted before the host replies.  Re-issue the ping until we
+          # see a result, so a single dropped ARP doesn't fail the whole test.
+          # (up to ~30s, mirroring the old single-send + 30s poll budget)
+          for i in $(seq 1 10); do
+            echo "ping 10.0.10.1" >&3
+            for j in $(seq 1 3); do
+              if grep -q "is alive" /tmp/uboot-ping.txt 2>/dev/null; then
+                break 2
+              fi
+              sleep 1
+            done
           done
 
           exec 3>&-
