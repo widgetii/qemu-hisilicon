@@ -64,16 +64,19 @@ Builds two QEMU targets:
 
 | Machine | Generation | CPU | IRQ | Boot tested |
 |---------|-----------|-----|-----|-------------|
-| `hi3519dv500` | V5 (HISI_OT) | **Cortex-A55** (ARMv8) | GIC | U-Boot smoke |
-| `hi3516dv500` | V5 (HISI_OT) | **Cortex-A55** (ARMv8) | GIC | U-Boot smoke |
+| `hi3519dv500` | V5 (HISI_OT) | **Cortex-A55** (ARMv8) | GIC | U-Boot¹ |
+| `hi3516dv500` | V5 (HISI_OT) | **Cortex-A55** (ARMv8) | GIC | U-Boot¹ |
 
 These share the V5/SS626 0x11xxxxxx peripheral map with CV610 but are 64-bit and
 boot the gzip self-extracting vendor U-Boot (`u-boot-z.bin`) via the on-die HW
-gzip engine — see `qemu-boot/run-hi3519dv500.sh` and OpenIPC/u-boot-hi3519dv500.
+gzip engine — run locally with `qemu-boot/run-hi3519dv500.sh <u-boot-z.bin>`.
 
-All 42 machines build; the 40 IPC/STB Linux machines boot to a shell prompt and
-the two V5 aarch64 machines boot vendor U-Boot, with kernels/rootfs/scripts
-staged in `qemu-boot/run-<machine>.sh`.
+¹ Boot-tested by OpenIPC/u-boot-hi3519dv500's `qemu_smoke` CI, which builds the
+U-Boot image fresh and boots it on this machine (so no vendor binary is vendored
+here). This repo's CI only checks the machines register.
+
+All 42 machines build; the 40 IPC/STB Linux machines boot to a shell prompt
+(artifacts/scripts staged in `qemu-boot/run-<machine>.sh`).
 
 ### V5 Model Suffix → Chip ID Mapping
 
