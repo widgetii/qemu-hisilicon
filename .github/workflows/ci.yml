@@ -37,12 +37,21 @@ jobs:
           echo "Registered machines: $count"
           ./qemu-src/build/qemu-system-arm -machine help | grep -E '(hi35|gk7)'
           [ "$count" -ge 21 ]
+          # aarch64 V5 machines (Hi3519DV500 / Hi3516DV500)
+          ./qemu-src/build/qemu-system-aarch64 -machine help | grep -E 'hi3519dv500|hi3516dv500'
 
       - name: Upload QEMU binary
         uses: actions/upload-artifact@v4
         with:
           name: qemu-arm
           path: qemu-src/build/qemu-system-arm
+          retention-days: 1
+
+      - name: Upload QEMU aarch64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-aarch64
+          path: qemu-src/build/qemu-system-aarch64
           retention-days: 1
 
       - name: Upload IVE test initramfs
@@ -940,4 +949,47 @@ jobs:
           path: |
             boot-output.txt
             qemu-boot/qemu.log
+
+  # ── U-Boot smoke on the aarch64 V5 machines (Hi3519DV500 / Hi3516DV500) ──
+  # Boots the committed raw gzip self-extracting u-boot-z fixture
+  # (qemu-boot/smoke-hi3519dv500.bin, from OpenIPC/u-boot-hi3519dv500) and
+  # asserts the U-Boot banner.  The downstream u-boot repo's qemu_smoke job
+  # boots a freshly-built image against this same machine.
+  uboot-smoke-dv500:
+    name: U-Boot smoke ${{ matrix.machine }}
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        machine: [hi3519dv500, hi3516dv500]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download QEMU aarch64
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-aarch64
+          path: qemu-src/build
+
+      - name: Boot U-Boot smoke image
+        run: |
+          chmod +x qemu-src/build/qemu-system-aarch64
+          timeout 60 qemu-src/build/qemu-system-aarch64 \
+            -M ${{ matrix.machine }},flash-file=qemu-boot/smoke-hi3519dv500.bin \
+            -nographic -serial mon:stdio -d unimp,guest_errors \
+            </dev/null > boot.txt 2>&1 || true
+          echo "===== serial ====="; cat boot.txt
+          if grep -qE 'U-Boot 2022|DRAM:|Hit any key' boot.txt; then
+            echo "PASS: U-Boot banner reached"
+          else
+            echo "FAIL: no U-Boot banner"; exit 1
+          fi
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log-${{ matrix.machine }}
+          path: boot.txt
           retention-days: 7

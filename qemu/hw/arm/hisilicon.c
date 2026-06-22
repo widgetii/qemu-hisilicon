@@ -2339,6 +2339,128 @@ static const HisiSoCConfig hi3516cv613_soc = {
 };
 
 /*
+ * Hi3519DV500 / Hi3516DV500 — V5 "HISI_OT" aarch64 die (Cortex-A55, ~2024).
+ * Shares the V5/SS626 0x11xxxxxx peripheral map with CV610 (PL011 UART0 @
+ * 0x11040000, sysctl 0x11020000, crg 0x11010000, GIC @ 0x124xxxxx, HiFMC @
+ * 0x10000000, emar HW gzip @ 0x170F0000) but is 64-bit and boots a gzip
+ * self-extracting u-boot-z.bin: the boot ROM/GSL loads the image at its link
+ * address CONFIG_SYS_TEXT_BASE_ORI=0x48700000, the on-die HW gzip (hisi-gzip)
+ * decompresses it to CONFIG_SYS_TEXT_BASE=0x48800000, and U-Boot runs from DDR.
+ * Used by OpenIPC/u-boot-hi3519dv500 for the qemu_smoke gate.
+ */
+static const HisiSoCConfig hi3519dv500_soc = {
+    .name               = "hi3519dv500",
+    .desc               = "HiSilicon Hi3519DV500 (Cortex-A55, V5/aarch64)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a55"),
+    .soc_id             = HISI_SOC_ID_DV500,
+    .aarch64            = true,
+    .uboot_load_addr    = 0x48700000,   /* CONFIG_SYS_TEXT_BASE_ORI (u-boot.lds) */
+    .psci_conduit       = 1,            /* QEMU_PSCI_CONDUIT_SMC (kernel SMP) */
+    .gzip_base          = 0x170F0000,   /* V5 emar HW gzip (shared with CV610) */
+
+    /* DDR @ 0x40000000.  Vendor U-Boot probes 512 MiB and relocates itself to
+     * the top of RAM (~0x5ff20000), so map the full 512 MiB.  Smoke boots
+     * U-Boot only (no Linux), so no kernel_mem/mmz reservation. */
+    .ram_size_default   = 512 * MiB,
+    .ram_base           = 0x40000000,
+    .sram_base          = 0x04020000,
+    .sram_size          = 128 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x12401000,
+    .gic_cpu_base       = 0x12402000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x11020000,
+    .crg_base           = 0x11010000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x11040000, 0x11041000, 0x11042000 },
+    .uart_irqs          = { 10, 11, 12 },
+
+    /* U-Boot udelay() polls an SP804-style countdown timer at 0x11000000
+     * (vendor platform.h CFG_TIMERBASE, 3 MHz) — wire one so the flash boot
+     * path's SPI-NOR probe doesn't spin forever (same as CV610). */
+    .num_timers         = 1,
+    .timer_bases        = { 0x11000000 },
+    .timer_irqs         = { 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x11070000, 0x11071000 },
+    .spi_irqs           = { 19, 20 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x0F000000,
+
+    .gpio_base          = 0x11090000,
+    .gpio_count         = 11,
+    .gpio_stride        = 0x1000,
+    .gpio_irq_start     = 23,
+
+    .num_regbanks       = 4,
+    .regbanks           = {
+        { "hisi-misc",       0x11024000, 0x5000  },
+        { "hisi-ddr",        0x11140000, 0x20000 },
+        { "hisi-iocfg0",     0x10260000, 0x10000 },
+        { "hisi-iocfg1",     0x11130000, 0x10000 },
+    },
+};
+
+static const HisiSoCConfig hi3516dv500_soc = {
+    .name               = "hi3516dv500",
+    .desc               = "HiSilicon Hi3516DV500 (Cortex-A55, V5/aarch64)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a55"),
+    .soc_id             = HISI_SOC_ID_3516DV500,
+    .aarch64            = true,
+    .uboot_load_addr    = 0x48700000,
+    .psci_conduit       = 1,
+    .gzip_base          = 0x170F0000,
+
+    .ram_size_default   = 512 * MiB,  /* U-Boot relocates to top of 512 MiB */
+    .ram_base           = 0x40000000,
+    .sram_base          = 0x04020000,
+    .sram_size          = 128 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x12401000,
+    .gic_cpu_base       = 0x12402000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x11020000,
+    .crg_base           = 0x11010000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x11040000, 0x11041000, 0x11042000 },
+    .uart_irqs          = { 10, 11, 12 },
+
+    .num_timers         = 1,
+    .timer_bases        = { 0x11000000 },
+    .timer_irqs         = { 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x11070000, 0x11071000 },
+    .spi_irqs           = { 19, 20 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x0F000000,
+
+    .gpio_base          = 0x11090000,
+    .gpio_count         = 11,
+    .gpio_stride        = 0x1000,
+    .gpio_irq_start     = 23,
+
+    .num_regbanks       = 4,
+    .regbanks           = {
+        { "hisi-misc",       0x11024000, 0x5000  },
+        { "hisi-ddr",        0x11140000, 0x20000 },
+        { "hisi-iocfg0",     0x10260000, 0x10000 },
+        { "hisi-iocfg1",     0x11130000, 0x10000 },
+    },
+};
+
+/*
  * Hi3536DV100 (DVR/NVR family): 2017, single Cortex-A7 @850MHz, decode-only NVR.
  * H.265/H.264 dec, 4×1080p20, FE Ethernet, 1×SATA 2.0, USB 2.0 host.
  * First DVR/NVR-class machine in this fork — see plan
@@ -3750,6 +3872,16 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
                                      const HisiSoCConfig *c,
                                      MachineState *machine)
 {
+    /*
+     * aarch64 V5 SoCs (Hi3519DV500/Hi3516DV500) don't use the ARMv7/v5
+     * flash->DDR copy stub: the gzip self-extracting u-boot-z.bin is placed
+     * at its DDR link address and CPU0's reset PC is set there, after the
+     * CPUs are created (see the flash_boot branch in hisilicon_common_init).
+     */
+    if (c->aarch64) {
+        return;
+    }
+
     hwaddr flash_src = c->fmc_mem_base;         /* e.g. 0x14000000 */
     hwaddr ram_dst   = c->ram_base;             /* e.g. 0x40000000 */
     /*
@@ -4985,8 +5117,31 @@ static void hisilicon_common_init(MachineState *machine,
     }
 
     if (flash_boot) {
-        /* Boot from SPI NOR flash dump: boot ROM at 0x0 copies U-Boot from
-         * flash window to DDR and jumps to it.  CPU starts at reset vector. */
+        if (c->aarch64) {
+            /* aarch64 V5 (Hi3519DV500/Hi3516DV500): place the gzip
+             * self-extracting u-boot-z.bin at its DDR link address and start
+             * CPU0 there.  The on-die HW gzip (hisi-gzip @ gzip_base)
+             * decompresses it to CONFIG_SYS_TEXT_BASE at runtime. */
+            HisiMachineState *hms = (HisiMachineState *)machine;
+            char *udata = NULL;
+            gsize ulen = 0;
+            if (!hms->flash_file ||
+                !g_file_get_contents(hms->flash_file, &udata, &ulen, NULL)) {
+                error_report("hisilicon: %s needs -machine %s,flash-file="
+                             "<u-boot-z.bin>", c->name, c->name);
+                exit(1);
+            }
+            rom_add_blob_fixed("hisilicon.uboot", udata, ulen,
+                               c->uboot_load_addr);
+            g_free(udata);
+
+            HisiMaskromReset *info = g_new0(HisiMaskromReset, 1);
+            info->cpu = cpu[0];
+            info->entry = c->uboot_load_addr;
+            qemu_register_reset(hisilicon_maskrom_cpu_reset, info);
+        }
+        /* else ARMv7/v5: boot ROM at 0x0 (built by hisilicon_write_bootrom)
+         * copies U-Boot from the flash window to DDR; CPU starts at reset 0. */
     } else if (bios_boot) {
         /* Mask-ROM emulation: the bootrom ELF is already in ROM at
          * 0x04000000, and a reset hook redirects PC there.  Nothing else
@@ -5160,6 +5315,8 @@ DEFINE_HISI_MACHINE("gk7202v330", gk7202v330, gk7202v330_soc)
 DEFINE_HISI_MACHINE("hi3516cv608", hi3516cv608, hi3516cv608_soc)
 DEFINE_HISI_MACHINE("hi3516cv610", hi3516cv610, hi3516cv610_soc)
 DEFINE_HISI_MACHINE("hi3516cv613", hi3516cv613, hi3516cv613_soc)
+DEFINE_HISI_MACHINE("hi3519dv500", hi3519dv500, hi3519dv500_soc)
+DEFINE_HISI_MACHINE("hi3516dv500", hi3516dv500, hi3516dv500_soc)
 DEFINE_HISI_MACHINE("hi3536dv100", hi3536dv100, hi3536dv100_soc)
 DEFINE_HISI_MACHINE("hi3521a",     hi3521a,     hi3521a_soc)
 DEFINE_HISI_MACHINE("hi3531a",     hi3531a,     hi3531a_soc)

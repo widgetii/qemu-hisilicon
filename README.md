@@ -8,7 +8,7 @@ Builds two QEMU targets:
 - `qemu-system-arm` — 28 IPC + 12 DVR/NVR + 1 STB (ARMv7-A)
 - `qemu-system-aarch64` — 1 STB (ARMv8-A, Hi3798CV200 Cortex-A53)
 
-## Supported Machines (40 total)
+## Supported Machines (42 total)
 
 ### IPC family — V1 through V5 (`qemu-system-arm`)
 
@@ -60,8 +60,20 @@ Builds two QEMU targets:
 | `hi3796mv100` | `qemu-system-arm` | Cortex-A7 quad | 4.9.37 backported from vendor 3.10 (HiSTB) | yes |
 | `hi3798cv200` | `qemu-system-aarch64` | **Cortex-A53 quad** (ARMv8) | mainline Linux 7.1 + Poplar DT | yes |
 
-All 40 machines build; **40/40 boot to a shell prompt** with kernels
-and rootfs artifacts staged in `qemu-boot/run-<machine>.sh`.
+### IPC family — V5 aarch64 (`qemu-system-aarch64`)
+
+| Machine | Generation | CPU | IRQ | Boot tested |
+|---------|-----------|-----|-----|-------------|
+| `hi3519dv500` | V5 (HISI_OT) | **Cortex-A55** (ARMv8) | GIC | U-Boot smoke |
+| `hi3516dv500` | V5 (HISI_OT) | **Cortex-A55** (ARMv8) | GIC | U-Boot smoke |
+
+These share the V5/SS626 0x11xxxxxx peripheral map with CV610 but are 64-bit and
+boot the gzip self-extracting vendor U-Boot (`u-boot-z.bin`) via the on-die HW
+gzip engine — see `qemu-boot/run-hi3519dv500.sh` and OpenIPC/u-boot-hi3519dv500.
+
+All 42 machines build; the 40 IPC/STB Linux machines boot to a shell prompt and
+the two V5 aarch64 machines boot vendor U-Boot, with kernels/rootfs/scripts
+staged in `qemu-boot/run-<machine>.sh`.
 
 ### V5 Model Suffix → Chip ID Mapping
 
@@ -76,8 +88,9 @@ From datasheet Section 1.2.14 and lab identification:
 | 20G | unknown | — | 1 TOPS | 4K | DDR3 1Gb | QFN, GB35114 |
 | 00G | unknown | — | 1 TOPS | 4K | ext DDR3 4Gb | BGA, GB35114 |
 
-ipctool also lists Hi3516DV500 (`0x3516D500`) and Hi3519DV500 (`0x3519D500`)
-as `HISI_OT` generation — likely same V5 address map, awaiting SDK/lab confirmation.
+Hi3516DV500 (`0x3516D500`) and Hi3519DV500 (`0x3519D500`) are the `HISI_OT`
+aarch64 die (Cortex-A55) — same V5 0x11xxxxxx peripheral map, now emulated as the
+`hi3519dv500` / `hi3516dv500` machines (confirmed against the SPC011 SDK U-Boot).
 
 ## Peripheral Support Matrix
 

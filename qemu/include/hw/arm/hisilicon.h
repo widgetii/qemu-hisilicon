@@ -309,6 +309,13 @@ typedef struct HisiSoCConfig {
      * CPUs are released by PSCI calls into QEMU's SMC handler. */
     int             psci_conduit;
 
+    /* ARMv8/aarch64 V5 SoCs (Cortex-A55, Hi3519DV500/Hi3516DV500): boot the
+     * gzip self-extracting u-boot-z.bin directly from DDR instead of the
+     * ARMv7/v5 flash->DDR copy stub.  uboot_load_addr is the image link/entry
+     * address (CONFIG_SYS_TEXT_BASE_ORI, e.g. 0x48700000). */
+    bool            aarch64;
+    hwaddr          uboot_load_addr;
+
     /* CRG register defaults (mimics U-Boot clock init before kernel boot) */
     int             num_crg_defaults;
     struct { uint32_t offset; uint32_t value; } crg_defaults[HISI_MAX_CRG_DEFAULTS];
@@ -380,6 +387,11 @@ typedef struct HisiSoCConfig {
 #define HISI_SOC_ID_CV608       0x3516C608  /* consumer, 0.2 TOPS, 3M */
 #define HISI_SOC_ID_CV610       0x3516C610  /* 10B: 0.5 TOPS, 5M */
 #define HISI_SOC_ID_CV613       0x3516C613  /* 20S: 1 TOPS, 4K */
+
+/* V5 HISI_OT aarch64 die (Cortex-A55, ~2024) — shares the V5 0x11xxxxxx
+ * peripheral map with CV610 but is 64-bit and boots a gzip-compressed u-boot. */
+#define HISI_SOC_ID_DV500       0x3519D500  /* Hi3519DV500 */
+#define HISI_SOC_ID_3516DV500   0x3516D500  /* Hi3516DV500 */
 
 /* Goke chips — die-identical V4 silicon with different SoC IDs */
 #define GOKE_SOC_ID_7205V200    0x72050200  /* = hi3516ev200 */
