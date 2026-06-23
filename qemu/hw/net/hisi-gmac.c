@@ -201,6 +201,13 @@ struct HisiGmacState {
     /* Descriptor size in bytes (16 or 32; CONFIG_HIGMAC_DESC_4_WORD). */
     uint32_t desc_size_bytes;
 
+    /* Offset into each RX buffer at which the MAC DMAs the frame.  The newer
+     * "gmac-v5" vendor driver (Hi3519DV500) allocates buffers at offset 0 and
+     * skb_reserve(NET_IP_ALIGN) on RX, so it expects the frame 2 bytes in; the
+     * older hi_gmac_v200 driver's buffer address already includes the
+     * alignment, so it wants offset 0.  Configurable via "rx-pkt-offset". */
+    uint32_t rx_pkt_offset;
+
     /* Backing register array for misc registers */
     uint32_t regs[MMIO_SIZE / 4];
 };
@@ -230,8 +237,11 @@ static uint16_t hisi_gmac_phy_read(HisiGmacState *s, int reg)
 static void hisi_gmac_phy_write(HisiGmacState *s, int reg, uint16_t val)
 {
     if (reg == 0) {
-        /* BMCR — accept writes but keep link up */
-        s->phy_regs[0] = val & ~BIT(15); /* clear reset bit */
+        /* BMCR — accept writes but keep link up.  RESET (bit15) and
+         * ANRESTART (bit9) are self-clearing in real PHYs: genphy sets
+         * ANRESTART to restart auto-negotiation and then polls BMCR until it
+         * clears, so we must clear both or the link never comes up. */
+        s->phy_regs[0] = val & ~(BIT(15) | BIT(9));
         s->phy_regs[1] |= BIT(2) | BIT(5); /* link up, auto-neg complete */
     } else if (reg < 32 && reg >= 4) {
         s->phy_regs[reg] = val;
@@ -435,12 +445,15 @@ static ssize_t hisi_gmac_receive(NetClientState *nc, const uint8_t *buf,
     uint32_t w1 = desc[1];
     uint32_t buffer_len = (w1 & 0x7FF) + 1;
 
-    if (size > buffer_len) {
+    /* DMA the frame at the configured RX offset (rx-pkt-offset): the gmac-v5
+     * driver skb_reserve()s NET_IP_ALIGN and expects the frame 2 bytes into
+     * the buffer; hi_gmac_v200's buffer address already includes it (offset
+     * 0).  Wrong offset => every frame delivered shifted and dropped. */
+    if (size + s->rx_pkt_offset > buffer_len) {
         return -1;
     }
 
-    /* Write packet data to guest buffer */
-    dma_memory_write(&address_space_memory, data_addr,
+    dma_memory_write(&address_space_memory, data_addr + s->rx_pkt_offset,
                      buf, size, MEMTXATTRS_UNSPECIFIED);
 
     /* Advance RX_FQ read pointer */
@@ -707,6 +720,9 @@ static const Property hisi_gmac_properties[] = {
      * stride differs. */
     DEFINE_PROP_UINT32("desc-size", HisiGmacState, desc_size_bytes,
                        DESC_SIZE_BYTES_DEFAULT),
+    /* RX DMA offset into each buffer (NET_IP_ALIGN).  0 for hi_gmac_v200,
+     * 2 for the gmac-v5 driver (Hi3519DV500). */
+    DEFINE_PROP_UINT32("rx-pkt-offset", HisiGmacState, rx_pkt_offset, 0),
 };
 
 static void hisi_gmac_class_init(ObjectClass *klass, const void *data)
