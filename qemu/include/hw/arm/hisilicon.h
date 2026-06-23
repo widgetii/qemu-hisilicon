@@ -41,6 +41,7 @@ typedef struct HisiSoCConfig {
     uint32_t        soc_id;
     ram_addr_t      ram_size_default;
     int             max_cpus;       /* 0 = 1 (default) */
+    int             default_cpus;   /* 0 = QEMU default (1); else cores at boot */
 
     /*
      * Default image sensor model name, applied when the user did not
@@ -77,9 +78,14 @@ typedef struct HisiSoCConfig {
     /* Interrupt controller — VIC or GIC, selected by use_gic */
     bool            use_gic;
     hwaddr          vic_base;       /* PL190, when !use_gic */
-    hwaddr          gic_dist_base;  /* GICv2, when use_gic */
-    hwaddr          gic_cpu_base;
+    hwaddr          gic_dist_base;  /* GICv2 dist / GICv3 GICD, when use_gic */
+    hwaddr          gic_cpu_base;   /* GICv2 only */
     int             gic_num_spi;
+    /* GIC architecture version: 0/2 = GICv2 (default), 3 = GICv3.  GICv3
+     * (e.g. Hi3519DV500/Hi3516DV500) has a redistributor instead of a CPU
+     * interface MMIO; gic_cpu_base is then ignored and gic_redist_base used. */
+    int             gic_version;
+    hwaddr          gic_redist_base; /* GICv3 GICR base, when gic_version == 3 */
     /* Cortex-A9 family: use combined a9mpcore_priv (SCU + GIC + gtimer +
      * mptimer + wdt at MPCORE_PERIPHBASE+0x000/0x100/0x200/0x600/0x1000).
      * When set, gic_dist_base / gic_cpu_base are ignored.  Plain GIC is
@@ -180,6 +186,9 @@ typedef struct HisiSoCConfig {
      * for SoCs whose vendor higmacv300 driver defines
      * CONFIG_HIGMAC_DESC_4_WORD — currently hi3536cv100. */
     uint32_t        gmac_desc_size;
+    /* RX DMA offset (NET_IP_ALIGN) the MAC writes each frame at.  0 (default)
+     * for hi_gmac_v200; 2 for the gmac-v5 driver (Hi3519DV500/Hi3516DV500). */
+    int             gmac_rx_offset;
 
     /* SD/MMC — himciv200 (older SoCs) */
     int             num_himci;

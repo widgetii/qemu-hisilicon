@@ -28,6 +28,8 @@
 #include "hw/char/pl011.h"
 #include "hw/intc/arm_gic_common.h"
 #include "hw/intc/arm_gic.h"
+#include "hw/intc/arm_gicv3_common.h"
+#include "qobject/qlist.h"
 #include "hw/arm/hisilicon.h"
 #include "hw/misc/hisi-fastboot.h"
 #include "hw/arm/machines-qom.h"
@@ -2346,7 +2348,6 @@ static const HisiSoCConfig hi3516cv613_soc = {
  * self-extracting u-boot-z.bin: the boot ROM/GSL loads the image at its link
  * address CONFIG_SYS_TEXT_BASE_ORI=0x48700000, the on-die HW gzip (hisi-gzip)
  * decompresses it to CONFIG_SYS_TEXT_BASE=0x48800000, and U-Boot runs from DDR.
- * Used by OpenIPC/u-boot-hi3519dv500 for the qemu_smoke gate.
  */
 static const HisiSoCConfig hi3519dv500_soc = {
     .name               = "hi3519dv500",
@@ -2354,21 +2355,23 @@ static const HisiSoCConfig hi3519dv500_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a55"),
     .soc_id             = HISI_SOC_ID_DV500,
     .aarch64            = true,
+    .max_cpus           = 2,            /* dual Cortex-A55 */
+    .default_cpus       = 2,            /* boot both cores by default */
     .uboot_load_addr    = 0x48700000,   /* CONFIG_SYS_TEXT_BASE_ORI (u-boot.lds) */
     .psci_conduit       = 1,            /* QEMU_PSCI_CONDUIT_SMC (kernel SMP) */
     .gzip_base          = 0x170F0000,   /* V5 emar HW gzip (shared with CV610) */
 
     /* DDR @ 0x40000000.  Vendor U-Boot probes 512 MiB and relocates itself to
-     * the top of RAM (~0x5ff20000), so map the full 512 MiB.  Smoke boots
-     * U-Boot only (no Linux), so no kernel_mem/mmz reservation. */
+     * the top of RAM (~0x5ff20000), so map the full 512 MiB. */
     .ram_size_default   = 512 * MiB,
     .ram_base           = 0x40000000,
     .sram_base          = 0x04020000,
     .sram_size          = 128 * KiB,
 
     .use_gic            = true,
-    .gic_dist_base      = 0x12401000,
-    .gic_cpu_base       = 0x12402000,
+    .gic_version        = 3,            /* vendor dtsi: compatible "arm,gic-v3" */
+    .gic_dist_base      = 0x12400000,   /* GICD (dtsi reg[0]) */
+    .gic_redist_base    = 0x12440000,   /* GICR redistributor (dtsi reg[1]) */
     .gic_num_spi        = 128,
 
     .sysctl_base        = 0x11020000,
@@ -2376,7 +2379,18 @@ static const HisiSoCConfig hi3519dv500_soc = {
 
     .num_uarts          = 3,
     .uart_bases         = { 0x11040000, 0x11041000, 0x11042000 },
-    .uart_irqs          = { 10, 11, 12 },
+    /* vendor dtsi: uart0=GIC_SPI 5, uart1=6, uart2=7.  Polled u-boot ignored
+     * these, but Linux userspace TTY output is interrupt-driven, so a wrong
+     * SPI = silent console after the kernel hands off to init. */
+    .uart_irqs          = { 5, 6, 7 },
+    /* Gigabit Ethernet: vendor "gmac-v5" (drivers/net/ethernet/vendor/gmac),
+     * same HiGMAC ring + MDIO layout as the existing hisi-gmac model, with
+     * 4-word (16-byte) descriptors.  MAC core + integrated MDIO @0x10290000,
+     * GIC_SPI 54 (queue 0). */
+    .gmac_base          = 0x10290000,
+    .gmac_irq           = 54,
+    .gmac_desc_size     = 16,
+    .gmac_rx_offset     = 2,            /* gmac-v5 driver reserves NET_IP_ALIGN */
 
     /* U-Boot udelay() polls an SP804-style countdown timer at 0x11000000
      * (vendor platform.h CFG_TIMERBASE, 3 MHz) — wire one so the flash boot
@@ -2413,6 +2427,8 @@ static const HisiSoCConfig hi3516dv500_soc = {
     .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a55"),
     .soc_id             = HISI_SOC_ID_3516DV500,
     .aarch64            = true,
+    .max_cpus           = 2,            /* dual Cortex-A55 */
+    .default_cpus       = 2,            /* boot both cores by default */
     .uboot_load_addr    = 0x48700000,
     .psci_conduit       = 1,
     .gzip_base          = 0x170F0000,
@@ -2423,8 +2439,9 @@ static const HisiSoCConfig hi3516dv500_soc = {
     .sram_size          = 128 * KiB,
 
     .use_gic            = true,
-    .gic_dist_base      = 0x12401000,
-    .gic_cpu_base       = 0x12402000,
+    .gic_version        = 3,            /* vendor dtsi: compatible "arm,gic-v3" */
+    .gic_dist_base      = 0x12400000,   /* GICD (dtsi reg[0]) */
+    .gic_redist_base    = 0x12440000,   /* GICR redistributor (dtsi reg[1]) */
     .gic_num_spi        = 128,
 
     .sysctl_base        = 0x11020000,
@@ -2432,7 +2449,18 @@ static const HisiSoCConfig hi3516dv500_soc = {
 
     .num_uarts          = 3,
     .uart_bases         = { 0x11040000, 0x11041000, 0x11042000 },
-    .uart_irqs          = { 10, 11, 12 },
+    /* vendor dtsi: uart0=GIC_SPI 5, uart1=6, uart2=7.  Polled u-boot ignored
+     * these, but Linux userspace TTY output is interrupt-driven, so a wrong
+     * SPI = silent console after the kernel hands off to init. */
+    .uart_irqs          = { 5, 6, 7 },
+    /* Gigabit Ethernet: vendor "gmac-v5" (drivers/net/ethernet/vendor/gmac),
+     * same HiGMAC ring + MDIO layout as the existing hisi-gmac model, with
+     * 4-word (16-byte) descriptors.  MAC core + integrated MDIO @0x10290000,
+     * GIC_SPI 54 (queue 0). */
+    .gmac_base          = 0x10290000,
+    .gmac_irq           = 54,
+    .gmac_desc_size     = 16,
+    .gmac_rx_offset     = 2,            /* gmac-v5 driver reserves NET_IP_ALIGN */
 
     .num_timers         = 1,
     .timer_bases        = { 0x11000000 },
@@ -4409,6 +4437,23 @@ static void hisilicon_common_init(MachineState *machine,
             object_property_set_bool(cpuobj[n], "start-powered-off", true,
                                      &error_fatal);
         }
+        if (c->aarch64) {
+            /* Enter Linux at EL1, like the vendor U-Boot does (it drops the EL
+             * before the kernel).  Otherwise qemu -kernel enters at EL2, the
+             * kernel turns on VHE and uses the EL2 (hyp) physical timer
+             * (PPI 10) — which the vendor dtb's arm,armv8-timer does not
+             * declare (only sec-EL1 PPI 13 and NS-EL1 PPI 14).  With no hyp
+             * timer interrupt there is no tick: the CPU idles in WFI forever
+             * and userspace never starts. */
+            object_property_set_bool(cpuobj[n], "has_el2", false, &error_fatal);
+            /* Match the vendor dtb's MPIDR scheme: each core is its own
+             * cluster (cpu@0 reg=0x0, cpu@1 reg=0x100, ... i.e. Aff1=index).
+             * QEMU would otherwise default to Aff0=index (0,1,...), so PSCI
+             * CPU_ON(0x100) for the secondary would find no CPU (-EINVAL) and
+             * SMP would fail. */
+            object_property_set_uint(cpuobj[n], "mp-affinity",
+                                     (uint64_t)n << 8, &error_fatal);
+        }
         qdev_realize(DEVICE(cpuobj[n]), NULL, &error_fatal);
         cpu[n] = ARM_CPU(cpuobj[n]);
     }
@@ -4437,6 +4482,22 @@ static void hisilicon_common_init(MachineState *machine,
             gicbus = SYS_BUS_DEVICE(gicdev);
             sysbus_realize_and_unref(gicbus, &error_fatal);
             sysbus_mmio_map(gicbus, 0, c->gic_mpcore_base);
+        } else if (c->gic_version == 3) {
+            /* GICv3 (Hi3519DV500/Hi3516DV500): distributor + redistributor,
+             * no CPU-interface MMIO -- the CPU interface is accessed via system
+             * registers.  One redistributor region with one frame per CPU. */
+            QList *redist_region_count = qlist_new();
+            gicdev = qdev_new(gicv3_class_name());
+            qdev_prop_set_uint32(gicdev, "revision", 3);
+            qdev_prop_set_uint32(gicdev, "num-cpu", smp_cpus);
+            qdev_prop_set_uint32(gicdev, "num-irq", num_irq);
+            qlist_append_int(redist_region_count, smp_cpus);
+            qdev_prop_set_array(gicdev, "redist-region-count",
+                                redist_region_count);
+            gicbus = SYS_BUS_DEVICE(gicdev);
+            sysbus_realize_and_unref(gicbus, &error_fatal);
+            sysbus_mmio_map(gicbus, 0, c->gic_dist_base);   /* GICD */
+            sysbus_mmio_map(gicbus, 1, c->gic_redist_base); /* GICR */
         } else {
             gicdev = qdev_new(gic_class_name());
             qdev_prop_set_uint32(gicdev, "revision", 2);
@@ -4728,6 +4789,9 @@ static void hisilicon_common_init(MachineState *machine,
         qemu_configure_nic_device(gmac, true, NULL);
         if (c->gmac_desc_size) {
             qdev_prop_set_uint32(gmac, "desc-size", c->gmac_desc_size);
+        }
+        if (c->gmac_rx_offset) {
+            qdev_prop_set_uint32(gmac, "rx-pkt-offset", c->gmac_rx_offset);
         }
         SysBusDevice *busdev = SYS_BUS_DEVICE(gmac);
         sysbus_realize_and_unref(busdev, &error_fatal);
@@ -5281,6 +5345,9 @@ static void hisi_machine_set_flash_file(Object *obj, const char *value,
             "instantiates: hisi-fmc or hisi-sfc350).");              \
         if (config.max_cpus > 0) {                                   \
             mc->max_cpus = config.max_cpus;                          \
+        }                                                            \
+        if (config.default_cpus > 0) {                               \
+            mc->default_cpus = config.default_cpus;                  \
         }                                                            \
     }                                                                \
     DEFINE_MACHINE_EXTENDED(namestr, MACHINE, HisiMachineState,      \
