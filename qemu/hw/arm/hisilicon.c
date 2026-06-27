@@ -2412,12 +2412,20 @@ static const HisiSoCConfig hi3519dv500_soc = {
     .gpio_stride        = 0x1000,
     .gpio_irq_start     = 23,
 
-    .num_regbanks       = 4,
+    .num_regbanks       = 7,
     .regbanks           = {
         { "hisi-misc",       0x11024000, 0x5000  },
         { "hisi-ddr",        0x11140000, 0x20000 },
+        /* Pinmux (IOCFG) controllers — vendor sys_config: iocfg=0x10260000,
+         * iocfg2=0x179F0000, iocfg3=0x0EFF0000; plus the AON pad-mux in the
+         * PMC at 0x11120000.  RAM-backed regbanks so the kernel's pin_mux.c
+         * writes persist and /dev/mem pinmux tools (ipctool reginfo) read the
+         * configured mux selections instead of all-zero. */
         { "hisi-iocfg0",     0x10260000, 0x10000 },
-        { "hisi-iocfg1",     0x11130000, 0x10000 },
+        { "hisi-iocfg1",     0x11130000, 0x10000 },   /* CORE_IOCFG window, kept as a stub */
+        { "hisi-iocfg2",     0x179F0000, 0x10000 },
+        { "hisi-iocfg3",     0x0EFF0000, 0x10000 },
+        { "hisi-pmc",        0x11120000, 0x10000 },   /* AON pad-mux (GPIO9) + PMC regs */
     },
 };
 
@@ -2479,12 +2487,20 @@ static const HisiSoCConfig hi3516dv500_soc = {
     .gpio_stride        = 0x1000,
     .gpio_irq_start     = 23,
 
-    .num_regbanks       = 4,
+    .num_regbanks       = 7,
     .regbanks           = {
         { "hisi-misc",       0x11024000, 0x5000  },
         { "hisi-ddr",        0x11140000, 0x20000 },
+        /* Pinmux (IOCFG) controllers — vendor sys_config: iocfg=0x10260000,
+         * iocfg2=0x179F0000, iocfg3=0x0EFF0000; plus the AON pad-mux in the
+         * PMC at 0x11120000.  RAM-backed regbanks so the kernel's pin_mux.c
+         * writes persist and /dev/mem pinmux tools (ipctool reginfo) read the
+         * configured mux selections instead of all-zero. */
         { "hisi-iocfg0",     0x10260000, 0x10000 },
-        { "hisi-iocfg1",     0x11130000, 0x10000 },
+        { "hisi-iocfg1",     0x11130000, 0x10000 },   /* CORE_IOCFG window, kept as a stub */
+        { "hisi-iocfg2",     0x179F0000, 0x10000 },
+        { "hisi-iocfg3",     0x0EFF0000, 0x10000 },
+        { "hisi-pmc",        0x11120000, 0x10000 },   /* AON pad-mux (GPIO9) + PMC regs */
     },
 };
 
