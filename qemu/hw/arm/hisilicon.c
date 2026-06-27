@@ -2290,7 +2290,13 @@ static const HisiSoCConfig hi3516cv613_soc = {
     .uart_bases         = { 0x11040000, 0x11041000, 0x11042000 },
     .uart_irqs          = { 10, 11, 12 },
 
-    .num_timers         = 0,
+    /* Same SP804-style udelay timer as cv610/cv608 (cv613 is the same A7 MP2
+     * die): without it U-Boot's udelay() spins forever and hangs in the
+     * SPI-NOR probe on a flash boot (-machine hi3516cv613,flash-file=...). */
+    .num_timers         = 1,
+    .timer_bases        = { 0x11000000 },
+    .timer_irqs         = { 4 },
+    .timer_freq         = 3000000,
 
     .num_spis           = 2,
     .spi_bases          = { 0x11070000, 0x11071000 },
