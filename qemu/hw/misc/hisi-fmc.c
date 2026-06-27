@@ -1000,8 +1000,16 @@ static const MemoryRegionOps hisi_fmc_mem_ops = {
     .read  = hisi_fmc_mem_read,
     .write = hisi_fmc_mem_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
+    /* Accept up to 64-bit accesses: the aarch64 (Hi3519DV500) fmc100 driver
+     * reads the register-mode result (e.g. the JEDEC ID memcpy'd from the
+     * FMC buffer window) with a single 8-byte load.  valid.max_access_size=4
+     * rejected that, so the read returned 0xFF without ever reaching .read and
+     * the NOR probe failed.  impl.max_access_size=4 makes the memory core split
+     * a 64-bit access into the 4-byte handler above (which serves iobuf/XIP). */
     .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
+    .valid.max_access_size = 8,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 4,
 };
 
 /* ── Device lifecycle ────────────────────────────────────────────────── */

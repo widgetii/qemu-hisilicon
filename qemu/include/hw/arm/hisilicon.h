@@ -159,6 +159,8 @@ typedef struct HisiSoCConfig {
     int             gpio_stride;    /* address step between ports (0x1000 or 0x10000) */
     int             gpio_irq;       /* VIC: shared IRQ for all ports */
     int             gpio_irq_start; /* GIC: first SPI, one per port */
+    uint32_t        gpio0_input_high; /* mask of GPIO0 input pins to drive high
+                                       * (board pull-ups, e.g. update button) */
 
     /*
      * Extra GPIO ports at non-contiguous addresses or with

@@ -2423,6 +2423,7 @@ static const HisiSoCConfig hi3519dv500_soc = {
     .gpio_count         = 11,
     .gpio_stride        = 0x1000,
     .gpio_irq_start     = 23,
+    .gpio0_input_high   = (1u << 0),    /* GPIO0_0 update-button pull-up (high) */
 
     .num_regbanks       = 7,
     .regbanks           = {
@@ -2498,6 +2499,7 @@ static const HisiSoCConfig hi3516dv500_soc = {
     .gpio_count         = 11,
     .gpio_stride        = 0x1000,
     .gpio_irq_start     = 23,
+    .gpio0_input_high   = (1u << 0),    /* GPIO0_0 update-button pull-up (high) */
 
     .num_regbanks       = 7,
     .regbanks           = {
@@ -4298,8 +4300,8 @@ static void hisilicon_load_maskrom(MemoryRegion *sysmem,
  * IDs at resource_end - 0x20 (offset 0xFFE0).  Alias the 0x1000 register
  * page at offset 0xF000 so IDs at 0xFE0..0xFFF also appear at 0xFFE0..0xFFFF.
  */
-static void hisilicon_create_pl061(MemoryRegion *sysmem, hwaddr base,
-                                   int stride, qemu_irq irq)
+static DeviceState *hisilicon_create_pl061(MemoryRegion *sysmem, hwaddr base,
+                                           int stride, qemu_irq irq)
 {
     DeviceState *pl061 = qdev_new("pl061");
     SysBusDevice *sbd = SYS_BUS_DEVICE(pl061);
@@ -4316,6 +4318,27 @@ static void hisilicon_create_pl061(MemoryRegion *sysmem, hwaddr base,
                                  "pl061-primecell-id-alias",
                                  pl061_mr, 0, 0x1000);
         memory_region_add_subregion(sysmem, base + 0xF000, alias);
+    }
+
+    return pl061;
+}
+
+/* Re-assert "pulled-up" GPIO inputs after every system reset (pl061_reset
+ * zeroes the data register, so a one-time qemu_set_irq at init wouldn't
+ * survive).  Models board pull-ups the vendor firmware samples at boot. */
+typedef struct {
+    DeviceState *dev;
+    uint32_t     mask;
+} HisiGpioPull;
+
+static void hisilicon_gpio_pull_reset(void *opaque)
+{
+    HisiGpioPull *p = opaque;
+    int b;
+    for (b = 0; b < 8; b++) {
+        if (p->mask & (1u << b)) {
+            qemu_set_irq(qdev_get_gpio_in(p->dev, b), 1);
+        }
     }
 }
 
@@ -4480,14 +4503,18 @@ static void hisilicon_common_init(MachineState *machine,
                                      &error_fatal);
         }
         if (c->aarch64) {
-            /* Enter Linux at EL1, like the vendor U-Boot does (it drops the EL
-             * before the kernel).  Otherwise qemu -kernel enters at EL2, the
-             * kernel turns on VHE and uses the EL2 (hyp) physical timer
-             * (PPI 10) — which the vendor dtb's arm,armv8-timer does not
-             * declare (only sec-EL1 PPI 13 and NS-EL1 PPI 14).  With no hyp
-             * timer interrupt there is no tick: the CPU idles in WFI forever
-             * and userspace never starts. */
+            /* Reset straight into EL1 (no EL2, no EL3).  Two reasons:
+             *  - qemu -kernel: entering at EL2 makes the kernel turn on VHE and
+             *    use the EL2 (hyp) physical timer (PPI 10), which the vendor dtb's
+             *    arm,armv8-timer does not declare (only sec-EL1 PPI 13 / NS-EL1
+             *    PPI 14) — no tick, CPU idles in WFI forever, userspace never
+             *    starts.
+             *  - Flash boot: U-Boot would otherwise reset at EL3 and its bootm
+             *    EL-drop ("exception return") to the (now absent) EL2 faults
+             *    with "Illegal exception return at EL3".  At EL1 U-Boot just
+             *    jumps to the kernel directly. */
             object_property_set_bool(cpuobj[n], "has_el2", false, &error_fatal);
+            object_property_set_bool(cpuobj[n], "has_el3", false, &error_fatal);
             /* Match the vendor dtb's MPIDR scheme: each core is its own
              * cluster (cpu@0 reg=0x0, cpu@1 reg=0x100, ... i.e. Aff1=index).
              * QEMU would otherwise default to Aff0=index (0,1,...), so PSCI
@@ -4495,6 +4522,17 @@ static void hisilicon_common_init(MachineState *machine,
              * SMP would fail. */
             object_property_set_uint(cpuobj[n], "mp-affinity",
                                      (uint64_t)n << 8, &error_fatal);
+            /* Enable QEMU's built-in PSCI-over-SMC emulation on the CPU
+             * itself.  arm_load_kernel() only applies psci_conduit on the
+             * -kernel path; when flash-booting (U-Boot → kernel, no
+             * -kernel) it is never reached, so the guest's PSCI SMC would
+             * trap as an Undefined instruction at EL1 (no EL3 to service
+             * it) and the kernel panics in psci_get_version().  Setting it
+             * here covers both boot paths. */
+            if (c->psci_conduit) {
+                object_property_set_int(cpuobj[n], "psci-conduit",
+                                        c->psci_conduit, &error_fatal);
+            }
         }
         qdev_realize(DEVICE(cpuobj[n]), NULL, &error_fatal);
         cpu[n] = ARM_CPU(cpuobj[n]);
@@ -4802,7 +4840,21 @@ static void hisilicon_common_init(MachineState *machine,
         } else {
             irq = pic[c->gpio_irq];           /* shared IRQ (VIC or GIC) */
         }
-        hisilicon_create_pl061(sysmem, gpio_base, c->gpio_stride, irq);
+        DeviceState *gp = hisilicon_create_pl061(sysmem, gpio_base,
+                                                 c->gpio_stride, irq);
+
+        /* Drive selected GPIO0 inputs high to model board pull-ups.  On
+         * Hi3519DV500 the vendor U-Boot reads GPIO0_0 as an "USB/SD update"
+         * request and treats LOW as "pressed"; with PL061 inputs defaulting
+         * to 0 the board would wrongly enter the download loop instead of
+         * booting.  GPIO0_0 has a pull-up on real boards (high = not pressed). */
+        if (n == 0 && c->gpio0_input_high) {
+            HisiGpioPull *p = g_new0(HisiGpioPull, 1);
+            p->dev = gp;
+            p->mask = c->gpio0_input_high;
+            qemu_register_reset(hisilicon_gpio_pull_reset, p);
+            hisilicon_gpio_pull_reset(p);
+        }
     }
 
     /* Extra GPIO ports at non-contiguous addresses / IRQs */
