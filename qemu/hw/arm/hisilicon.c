@@ -2096,7 +2096,13 @@ static const HisiSoCConfig hi3516cv608_soc = {
     .uart_bases         = { 0x11040000, 0x11041000, 0x11042000 },
     .uart_irqs          = { 10, 11, 12 },
 
-    .num_timers         = 0,
+    /* Same SP804-style udelay timer as cv610 (cv608 is the same A7 MP2 die):
+     * without it U-Boot's udelay() spins forever and hangs in the SPI-NOR
+     * probe on a flash boot (-machine hi3516cv608,flash-file=...). */
+    .num_timers         = 1,
+    .timer_bases        = { 0x11000000 },
+    .timer_irqs         = { 4 },
+    .timer_freq         = 3000000,
 
     .num_spis           = 2,
     .spi_bases          = { 0x11070000, 0x11071000 },
@@ -3995,7 +4001,11 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
              * 0x40 bytes — 16 words of vector table + markers — before that
              * address word, however the run is split:
              *   xm720/V500  : 8 vectors + 8 markers, block @0x7000 -> 0x40707000
-             *   V5 / cv6xx  : 12 vectors + 4 markers, block @0x0000 -> 0x41700000
+             *   cv6xx raw   : 8 vectors + 8 markers, block @0x0000 -> 0x41700000
+             *   cv6xx signed: same descriptor, but the u-boot block sits behind
+             *                 the GSL/DDR header so the block opens @0x9400; the
+             *                 header also contains a spurious 0xdeadbeef run, so
+             *                 the scan must keep going until a run passes sanity.
              * The run length (>= 4) distinguishes these from older V4 images,
              * which use a 2-marker descriptor in a different layout and boot
              * correctly from ram_base via a position-independent reset branch —
@@ -4017,7 +4027,8 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
                 }
                 size_t la_idx = i + run;  /* load-address word follows the run */
                 if (la_idx < 16 || la_idx >= scan) {
-                    break;
+                    i += run;             /* run too near the edges — keep scanning */
+                    continue;
                 }
                 uint32_t load_addr = le32_to_cpu(w[la_idx]);
                 size_t blk_off = (la_idx - 16) * 4; /* block opens 0x40 earlier */
@@ -4029,8 +4040,17 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
                     (blk_vec & 0xFF000000) == 0xEA000000) {
                     flash_src += blk_off;
                     ram_dst = load_addr;
+                    break;                /* real loader descriptor found */
                 }
-                break;
+                /*
+                 * A 0xdeadbeef run that fails the sanity check is not the
+                 * loader descriptor — e.g. the GSL-signed cv6xx boot image
+                 * carries a spurious 6-word run inside its DDR-init blob (~0xc00)
+                 * ahead of the real u-boot descriptor at 0x9420.  Skip it and
+                 * keep scanning instead of giving up (which left the stub copying
+                 * the GSL header at offset 0 to DRAM and hanging).
+                 */
+                i += run;
             }
             g_free(data);
         }
