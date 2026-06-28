@@ -5289,7 +5289,34 @@ static void hisilicon_common_init(MachineState *machine,
                              "<u-boot-z.bin>", c->name, c->name);
                 exit(1);
             }
-            rom_add_blob_fixed("hisilicon.uboot", udata, ulen,
+            /*
+             * The flash may hold either the raw self-extracting u-boot-z at
+             * offset 0, or a full NOR image whose first partition is the
+             * GSL-signed boot image (boot-<soc>-<binning>-nor.bin) — there the
+             * GSL/DDR header sits at offset 0 and the u-boot-z payload is
+             * embedded deeper (e.g. 0x11200). Both open with an aarch64 reset
+             * branch (b, opcode 0x14......) immediately followed by a run of
+             * 0xdeadbeef self-descriptor markers, so locate that block and load
+             * it at the DDR link address. Loading the GSL header verbatim would
+             * land non-executable bytes at the entry and hang at "Starting".
+             */
+            size_t uoff = 0;
+            {
+                const uint32_t *w = (const uint32_t *)udata;
+                size_t nw = ulen / 4;
+                size_t scan = MIN(nw, (size_t)(0x40000 / 4)); /* first 256 KiB */
+                for (size_t i = 0; i + 5 <= scan; i++) {
+                    if ((le32_to_cpu(w[i]) & 0xFC000000) == 0x14000000 &&
+                        le32_to_cpu(w[i + 1]) == 0xdeadbeef &&
+                        le32_to_cpu(w[i + 2]) == 0xdeadbeef &&
+                        le32_to_cpu(w[i + 3]) == 0xdeadbeef &&
+                        le32_to_cpu(w[i + 4]) == 0xdeadbeef) {
+                        uoff = (size_t)i * 4;
+                        break;
+                    }
+                }
+            }
+            rom_add_blob_fixed("hisilicon.uboot", udata + uoff, ulen - uoff,
                                c->uboot_load_addr);
             g_free(udata);
 
