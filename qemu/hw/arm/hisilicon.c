@@ -2050,6 +2050,155 @@ static const HisiSoCConfig gk7202v330_soc = {
 };
 
 /*
+ * Goke third generation (2025-2026) — Goke's own designs on the XMedia
+ * "Lotus" SDK (ShiMetaPi shimetapi_pico_gx), split into two product lines
+ * like HiSilicon's 3516/3519:
+ *   GK7206 (codename "xmorca")  — A7 mainstream, embedded DDR, 5M.
+ *   GK7606 (codename "xmfalcon")— A55 high-end, external DDR, 4K.
+ * Both keep the gk7205v5xx-style 0x12xxxxxx control block (UART 0x12040000,
+ * sysctl 0x12020000, CRG 0x12010000, xmedia,sp804 timers 0x12000000, GPIO
+ * 0x120b0000), RAM @0x40000000, an ATF BL1->BL31->BL33(u-boot-2020.01)
+ * chain, and a RISC-V MCU coprocessor.  Chip ID at REG_SC_CHIPID 0x12020EE0.
+ *
+ * ---- GK7206V1 series (codename xmorca) — IMPLEMENTED ----
+ * Variants (QFN92/QFN128): V10 / V10B / V11 / V11A / V11AT / V12A, embedded
+ * 512Mb DDR2 / 1Gb / 2Gb DDR3L KGD.  Dual Cortex-A7 MP2 + RISC-V MCU; NPU
+ * 1.0 TOPS (INT16/8/4); "圆鸮" AI ISP; H.265 5M@30 (V12A 4K@25).
+ *
+ * Map from the SDK u-boot arch/arm/include/asm/arch-xmorca/platform.h.  The
+ * gk7205v5xx V4-common block is exact for the control plane; the only delta
+ * is the FE MAC (GMAC_REG_BASE), which orca moved 0x10040000 -> 0x100d0000.
+ * Uses the xmedia,sp804 timer like gk7205v500.  (DDRC is at 0x11330000 vs
+ * the V4-common 0x120d0000 hisi-ddr stub; left as-is for now — a RAM-backed
+ * stub either way, not touched on the -kernel boot path.)
+ *
+ * Declares 2 CPUs (dual A7 MP2): the GICv2 makes ITARGETSR RAZ for a
+ * uniprocessor GIC, so a 1-CPU model makes the kernel's gic_get_cpumask()
+ * read 0 ("GIC CPU mask not found — kernel will fail to boot") and wedges
+ * every interrupt-driven probe.  With 2 CPU interfaces ITARGETSR reports the
+ * real mask and interrupts work.  CPU1 itself never onlines — the vendor
+ * "lotus,xmorca-smp" release method isn't modeled — but the kernel times out
+ * on it gracefully and continues single-core (same as the DTS expects).
+ *
+ * Boots the vendor SDK kernel (linux-5.10.y, xmorca_defconfig) to full
+ * device init via -kernel with the appended xmorca.dtb.  Reaching userspace
+ * still needs a rootfs (flash image or initramfs) — root=/dev/mtdblock4 in
+ * the vendor bootargs otherwise panics after driver init.
+ */
+static const HisiSoCConfig gk7206v10_soc = {
+    .name               = "gk7206v10",
+    .desc               = "Goke GK7206V10 (Cortex-A7 MP2 + RISC-V MCU, 1.0 TOPS NPU)",
+    .soc_id             = GOKE_SOC_ID_7206V10,
+    .max_cpus           = 2,            /* dual Cortex-A7 MP2 */
+    .default_cpus       = 2,            /* 2 GIC CPU interfaces (ITARGETSR !RAZ) */
+    .gpio_count         = 10,           /* GPIO0..GPIO9 @ 0x120b0000..0x120b9000 */
+    HISI_V4_DDR_64M,                    /* GK7206V10: embedded 512Mb DDR2 */
+    HISI_V4_COMMON_PERIPH,
+    .xmsp804_timer      = true,         /* XMedia kernel uses xmedia,sp804 */
+    .femac_base         = 0x100d0000,   /* GMAC_REG_BASE — orca relocated FE MAC */
+    /* Flash: "lotus,fmc" (fmc100) — same IP as HiFMC V100 but a shuffled
+     * register map, and the DT "control" reg sits at 0x10000010 (not
+     * 0x10000000).  Memory window stays at 0x14000000 (from V4 common). */
+    .fmc_ctrl_base      = 0x10000010,
+    .fmc_variant        = 1,            /* FMC_VARIANT_FMC100 */
+    .fmc_irq            = 36,           /* DTS: flash-memory-controller irq SPI 36 */
+    /* SD/MMC — three "lotus,sdhci" controllers.  The V4-common defaults
+     * (2 ports @0x10010000/0x10020000, IRQ 30/31) don't match orca, so
+     * override with the DTS map: mmc0 eMMC @0x10010000 irq32,
+     * mmc1 @0x10040000 irq33, mmc2 SDIO @0x10020000 irq34.  A wrong IRQ
+     * leaves the eMMC probe waiting forever for command-complete (which is
+     * why the sdhci node used to be DTB-disabled). */
+    .num_sdhci          = 3,
+    .sdhci_bases        = { 0x10010000, 0x10040000, 0x10020000 },
+    .sdhci_irqs         = { 32, 33, 34 },
+    /* Pre-mark the SD/MMC DLL (delay-locked-loop) status registers as
+     * locked/ready in the CRG.  The lotus,sdhci driver reads these via its
+     * crg_regmap phandle (drivers/mmc/host/sdhci-xmorca.c) to pick a data
+     * sampling phase; if they never report ready it settles on a bad phase
+     * and card data init loops ("Skipping voltage switch").  DRV_DLL_STATUS
+     * = LOCK|READY (bit15|bit14), SAMPL/DS/DS180 = SLAVE_READY (bit0). */
+    .num_crg_defaults   = 8,
+    .crg_defaults       = {
+        { 0x208, 0x00000001 },  /* eMMC  SAMPL_DLL_STATUS: SLAVE_READY */
+        { 0x210, 0x0000C000 },  /* eMMC  DRV_DLL_STATUS:   LOCK|READY  */
+        { 0x214, 0x00000001 },  /* eMMC  DS_DLL_STATUS:    READY       */
+        { 0x218, 0x00000001 },  /* eMMC  DS180_DLL_STATUS: READY       */
+        { 0x224, 0x00000001 },  /* SDIO0 SAMPL_DLL_STATUS: SLAVE_READY */
+        { 0x228, 0x0000C000 },  /* SDIO0 DRV_DLL_STATUS:   LOCK|READY  */
+        { 0x238, 0x00000001 },  /* SDIO1 SAMPL_DLL_STATUS: SLAVE_READY */
+        { 0x23c, 0x0000C000 },  /* SDIO1 DRV_DLL_STATUS:   LOCK|READY  */
+    },
+};
+
+/*
+ * ---- GK7606V1 series (codename xmfalcon) — PLACEHOLDER ----
+ * Goke's A55 high-end 4K line, sibling of GK7206.  Cortex-A55 (aarch64),
+ * external DDR3/DDR4/LPDDR4, adds USB3.  The SDK ships NO xmfalcon board
+ * config (only xmorca/GK7206), so the map below — from the SDK u-boot
+ * arch/arm/include/asm/arch-xmfalcon/platform.h — is UNVERIFIED against
+ * silicon or a boot.  Registered so the machine name exists and future work
+ * has a scaffold; NOT expected to boot yet.  UNKNOWNS flagged inline:
+ *   - GIC physical bases (u-boot uses virtual 0xf6801000/0xf6802000);
+ *   - all IRQ numbers (borrowed from hi3519dv500, likely wrong);
+ *   - SoC ID and external DDR size.
+ * Deltas from GK7206/xmorca: A55 aarch64 + GICv3 + ATF/PSCI SMP; FE/GMAC
+ * 0x100d0000 -> gigabit GMAC 0x11900000; adds USB3 @0x10040000; ext DDR.
+ * Shared 0x12xx control block (UART/sysctl/CRG/sp804/GPIO) is authoritative.
+ */
+static const HisiSoCConfig gk7606v1_soc = {
+    .name               = "gk7606v1",
+    .desc               = "Goke GK7606V1 (Cortex-A55, 4K — PLACEHOLDER, does not boot yet)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a55"),
+    .soc_id             = GOKE_SOC_ID_7606V1,
+    .aarch64            = true,
+    .uboot_load_addr    = 0x40700000,   /* CONFIG_SYS_TEXT_BASE_ORI (xmfalcon.h) */
+    .psci_conduit       = 1,
+
+    .ram_size_default   = 256 * MiB,    /* external DDR; size UNVERIFIED */
+    .ram_base           = 0x40000000,
+    .sram_base          = 0x04020000,
+    .sram_size          = 128 * KiB,
+
+    .use_gic            = true,
+    .gic_version        = 3,
+    .gic_dist_base      = 0x12400000,   /* PLACEHOLDER — u-boot virt 0xf6801000 */
+    .gic_redist_base    = 0x12440000,   /* PLACEHOLDER — u-boot virt 0xf6802000 */
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12020000,   /* SYS_CTRL_REG_BASE (authoritative) */
+    .crg_base           = 0x12010000,   /* CRG_REG_BASE (authoritative) */
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12040000, 0x12041000, 0x12042000 }, /* authoritative */
+    .uart_irqs          = { 5, 6, 7 },  /* PLACEHOLDER irqs */
+
+    .xmsp804_timer      = true,         /* xmedia,sp804 @ 0x12000000 */
+    .num_timers         = 1,
+    .timer_bases        = { 0x12000000 },
+    .timer_irqs         = { 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x12070000, 0x12071000 },
+    .spi_irqs           = { 19, 20 },   /* PLACEHOLDER irqs */
+
+    .fmc_ctrl_base      = 0x10000000,   /* FMC_REG_BASE (authoritative) */
+    .fmc_mem_base       = 0x14000000,   /* FMC_MEM_BASE (authoritative) */
+
+    .gpio_base          = 0x120b0000,   /* GPIO0_REG_BASE (authoritative) */
+    .gpio_count         = 10,
+    .gpio_stride        = 0x1000,
+    .gpio_irq_start     = 23,           /* PLACEHOLDER */
+
+    /* Gigabit GMAC (GMAC_REG_BASE 0x11900000).  Model like hi3519dv500's
+     * gmac-v5 (16-byte descriptors); IRQ is a PLACEHOLDER. */
+    .gmac_base          = 0x11900000,
+    .gmac_irq           = 54,           /* PLACEHOLDER */
+    .gmac_desc_size     = 16,
+    .gmac_rx_offset     = 2,
+};
+
+/*
  * V5 family (~2023): Hi3516CV608 / CV610 / CV613 — Dual Cortex-A7 MP2 + NPU.
  * Video: H.265/H.264, up to 4K.  New 0x11xxxxxx address map, GIC @ 0x124xxxxx.
  * NPU: 0.2 TOPS (CV608), 0.5 TOPS (CV610), 1 TOPS (CV613).
@@ -3815,6 +3964,47 @@ static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
         }
     }
 
+    /*
+     * Widen an under-sized GICv2 CPU-interface reg window.
+     *
+     * Some vendor DTBs declare the GIC CPU interface as only 0x100 bytes
+     * (e.g. Goke xmorca / GK7206: reg = <0x10301000 0x1000 0x10302000
+     * 0x100>).  The Linux GICv2 driver requires the CPU-interface region to
+     * be >= SZ_8K (0x2000) or it refuses to probe ("GIC: GICv2 detected, but
+     * range too small ... will fail to boot", drivers/irqchip/irq-gic.c),
+     * which then wedges every interrupt-driven device (SDHCI, etc.).  Real
+     * GIC-400 silicon has a 0x2000 CPU interface; the DTS just undersized it
+     * (the physical board's U-Boot env compensates with
+     * irqchip.gicv2_force_probe=1).  Rather than require an extra bootarg,
+     * bump the size to 0x2000 here so the stock driver probes normally.
+     * QEMU only maps 0x100 of CPU-interface MMIO, but the machine sets
+     * ignore_memory_transaction_failures, so reads of the unmapped tail
+     * return 0 harmlessly — exactly like the known-good Hi3516CV610 DTB,
+     * which already declares 0x2000.  Only fires when the window is smaller
+     * than 0x2000, so correctly-sized DTBs are left untouched.
+     */
+    {
+        static const char * const gicv2_compat[] = {
+            "arm,gic-400", "arm,cortex-a7-gic", "arm,cortex-a15-gic",
+            "arm,cortex-a9-gic", "arm,gic-v2", NULL
+        };
+        for (int i = 0; gicv2_compat[i]; i++) {
+            int gic = fdt_node_offset_by_compatible(dtb, -1, gicv2_compat[i]);
+            if (gic < 0) {
+                continue;
+            }
+            int len = 0;
+            const uint32_t *reg = fdt_getprop(dtb, gic, "reg", &len);
+            /* 1/1 address/size cells: <dist_base dist_sz cpu_base cpu_sz> */
+            if (reg && len >= 4 * (int)sizeof(uint32_t) &&
+                be32_to_cpu(reg[3]) < 0x2000) {
+                g_autofree uint32_t *newreg = g_memdup2(reg, len);
+                newreg[3] = cpu_to_be32(0x2000);
+                fdt_setprop_inplace(dtb, gic, "reg", newreg, len);
+            }
+        }
+    }
+
     /* Pack then re-expand with padding for kernel's atags_to_fdt() */
     fdt_pack(dtb);
     uint32_t packed = fdt_totalsize(dtb);
@@ -4385,6 +4575,7 @@ static void hisilicon_common_init(MachineState *machine,
     qemu_irq pic[256];
     int num_pic = 0;
     int n;
+    SysBusDevice *fmc_irq_dev = NULL; /* FMC, IRQ-connected after pic[] is built */
     bool flash_boot = false;  /* true when booting from SPI NOR flash dump */
     bool fmc_nand_boot = false; /* true when the FMC boot flash is SPI NAND */
     bool bios_boot = machine->firmware && machine->firmware[0];
@@ -4403,6 +4594,12 @@ static void hisilicon_common_init(MachineState *machine,
         const char *fmc_type = c->fmc_type ? c->fmc_type : "hisi-fmc";
         DeviceState *fmc = qdev_new(fmc_type);
         SysBusDevice *fmcbus = SYS_BUS_DEVICE(fmc);
+
+        /* Select the register-map variant (0 = HiFMC V100, 1 = fmc100 for
+         * Goke xmorca / GK7206).  Only the hisi-fmc model has this property. */
+        if (c->fmc_variant && (!c->fmc_type || !strcmp(fmc_type, "hisi-fmc"))) {
+            qdev_prop_set_uint32(fmc, "variant", c->fmc_variant);
+        }
 
         /*
          * Forward the machine-level "flash-file" property to whichever
@@ -4444,6 +4641,10 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_realize_and_unref(fmcbus, &error_fatal);
         sysbus_mmio_map(fmcbus, 0, c->fmc_ctrl_base);
         sysbus_mmio_map(fmcbus, 1, c->fmc_mem_base);
+        /* The fmc100 (lotus,fmc) driver waits on an interrupt for DMA-read
+         * completion.  The IRQ can only be connected once the GIC has built
+         * pic[] (below), so stash the device and wire it up after that. */
+        fmc_irq_dev = fmcbus;
 
         /*
          * Dual NOR+NAND boards (e.g. OpenIPC hi3516ev300 NAND: u-boot+env in
@@ -4648,6 +4849,11 @@ static void hisilicon_common_init(MachineState *machine,
         for (n = 0; n < num_pic; n++) {
             pic[n] = qdev_get_gpio_in(vic, n);
         }
+    }
+
+    /* Now that pic[] exists, wire the FMC op/DMA-done IRQ (fmc100 only). */
+    if (fmc_irq_dev && c->fmc_irq && c->fmc_irq < num_pic) {
+        sysbus_connect_irq(fmc_irq_dev, 0, pic[c->fmc_irq]);
     }
 
     /* SysCtrl — V1–V5 IPC and DVR/NVR scheme; STB family (HiSTB) uses
@@ -5500,6 +5706,8 @@ DEFINE_HISI_MACHINE("gk7205v500", gk7205v500, gk7205v500_soc)
 DEFINE_HISI_MACHINE("gk7205v510", gk7205v510, gk7205v510_soc)
 DEFINE_HISI_MACHINE("gk7205v530", gk7205v530, gk7205v530_soc)
 DEFINE_HISI_MACHINE("gk7202v330", gk7202v330, gk7202v330_soc)
+DEFINE_HISI_MACHINE("gk7206v10",  gk7206v10,  gk7206v10_soc)
+DEFINE_HISI_MACHINE("gk7606v1",   gk7606v1,   gk7606v1_soc)
 DEFINE_HISI_MACHINE("hi3516cv608", hi3516cv608, hi3516cv608_soc)
 DEFINE_HISI_MACHINE("hi3516cv610", hi3516cv610, hi3516cv610_soc)
 DEFINE_HISI_MACHINE("hi3516cv613", hi3516cv613, hi3516cv613_soc)

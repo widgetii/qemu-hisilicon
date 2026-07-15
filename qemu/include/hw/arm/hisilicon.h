@@ -22,7 +22,7 @@
 #define HISI_MAX_TIMERS   4
 #define HISI_MAX_SPIS     4
 #define HISI_MAX_HIMCI    3
-#define HISI_MAX_SDHCI    2
+#define HISI_MAX_SDHCI    3
 #define HISI_MAX_I2C      8
 #define HISI_MAX_REGBANKS 20
 #define HISI_MAX_CRG_DEFAULTS 8
@@ -152,6 +152,12 @@ typedef struct HisiSoCConfig {
     hwaddr          fmc_ctrl_base;  /* 0 = no flash controller */
     hwaddr          fmc_mem_base;
     const char     *fmc_type;       /* NULL = "hisi-fmc", or "hisi-sfc350" */
+    /* hisi-fmc register-map variant: 0 = HiFMC V100 (default), 1 = fmc100
+     * ("lotus,fmc" on Goke xmorca / GK7206 — same IP, shuffled offsets). */
+    uint32_t        fmc_variant;
+    /* FMC op/DMA-done IRQ (GIC SPI).  0 = unconnected (V100 users poll);
+     * the fmc100 driver waits on an interrupt for DMA completion. */
+    int             fmc_irq;
 
     /* GPIO (PL061) */
     hwaddr          gpio_base;
@@ -415,5 +421,23 @@ typedef struct HisiSoCConfig {
 #define GOKE_SOC_ID_7205V510    0x72050510  /* 5M, 1.0 TOPS, 1Gb DDR3 */
 #define GOKE_SOC_ID_7205V530    0x72050530  /* 5M, 1.0 TOPS, ext DDR */
 #define GOKE_SOC_ID_7202V330    0x72020330  /* 5M, 0.5 TOPS, no FEPHY */
+
+/*
+ * Goke third generation (2025-2026) — Goke's own designs on the XMedia
+ * "Lotus" SDK (ShiMetaPi shimetapi_pico_gx), split into two product lines
+ * the way HiSilicon splits 3516 (mainstream) / 3519 (high-end):
+ *   GK7206 — codename "xmorca",  Cortex-A7 MP2, embedded DDR, 5M.
+ *   GK7606 — codename "xmfalcon", Cortex-A55, external DDR, 4K.
+ * Both keep the gk7205v5xx-style 0x12xxxxxx control block (sysctl
+ * 0x12020000, CRG 0x12010000, UART 0x12040000, xmedia,sp804 0x12000000),
+ * RAM @0x40000000, an ATF BL1->BL31->BL33(u-boot) chain, and a RISC-V MCU
+ * coprocessor.  The chip ID is read from REG_SC_CHIPID = sysctl_base + 0xEE0
+ * (= 0x12020EE0, verified in the SDK u-boot arch-xmorca/platform.h).  The
+ * ID *values* below are PLACEHOLDERS pending a live SCSYSID/CHIPID capture —
+ * the silicon value is not encoded anywhere in the SDK source (u-boot just
+ * prints whatever it reads).  Boot does not depend on them (ipctool reads
+ * them post-boot); they follow the 0x72050500-style Goke encoding. */
+#define GOKE_SOC_ID_7206V10     0x72060010  /* GK7206V10, dual A7 MP2, 1.0 TOPS; placeholder */
+#define GOKE_SOC_ID_7606V1      0x76060100  /* GK7606V1, A55 4K; placeholder */
 
 #endif /* HW_ARM_HISILICON_H */
