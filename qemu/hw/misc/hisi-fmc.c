@@ -19,6 +19,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
 #include "hw/qdev-properties.h"
 #include "qemu/log.h"
 #include "system/dma.h"
@@ -76,6 +77,47 @@
 
 /* FMC_INT bits */
 #define FMC_INT_OP_DONE     BIT(0)
+
+/*
+ * Register-map variant.  The Goke xmorca / GK7206 "lotus,fmc" (fmc100) is the
+ * same controller IP as the HiFMC V100 modelled above, but its register block
+ * is shuffled to a different offset layout (and reports VERSION 0x200 instead
+ * of 0x100).  The *operational* model is byte-for-byte identical — register-
+ * mode ops are triggered by the OP register's START bit (bit 0 in both), DMA
+ * ops by OP_CTRL's DMA_OP_READY bit (bit 0 in both, RW_OP = bit 1 in both),
+ * and results are served from the memory window.  So we translate an fmc100
+ * offset back to the canonical HiFMC offset and reuse one set of handlers.
+ */
+#define FMC_VARIANT_HIFMC   0
+#define FMC_VARIANT_FMC100  1
+
+/* fmc100 register offsets (drivers/mtd/fmc100/fmc100_reg.h), control base is
+ * the DT "control" reg (0x10000010 on xmorca). */
+static hwaddr fmc100_to_canonical(hwaddr off)
+{
+    switch (off) {
+    case 0x00: return FMC_SPI_TIMING_CFG; /* TIMING_SPI_CFG */
+    case 0x08: return FMC_CFG;
+    case 0x0c: return FMC_GLOBAL_CFG;
+    case 0x10: return FMC_INT;
+    case 0x14: return FMC_INT_EN;
+    case 0x28: return FMC_INT_CLR;
+    case 0x20: return FMC_ADDRH;
+    case 0x24: return FMC_ADDRL;
+    case 0x2c: return FMC_CMD;
+    case 0x30: return FMC_DATA_NUM;
+    case 0x34: return FMC_OP;
+    case 0x38: return FMC_OP_CFG;
+    case 0x40: return FMC_DMA_AHB_CTRL;
+    case 0x44: return FMC_DMA_SADDR_D0;
+    case 0x48: return FMC_DMA_LEN;
+    case 0x54: return FMC_DMA_SADDR_OOB;
+    case 0x60: return FMC_OP_CTRL;
+    case 0xa4: return FMC_STATUS;
+    case 0xb4: return FMC_VERSION;
+    default:   return (hwaddr)-1;  /* unmapped: read 0 / ignore write */
+    }
+}
 
 /* SPI commands (shared NOR + NAND) */
 #define SPI_CMD_WRITE_ENABLE  0x06
@@ -147,8 +189,10 @@ struct HisiFmcState {
 
     MemoryRegion ctrl_iomem;
     MemoryRegion mem_iomem;
+    qemu_irq irq;                 /* op/DMA-done IRQ (fmc100 uses it; V100 polls) */
 
     /* Configuration properties */
+    uint32_t variant;             /* FMC_VARIANT_HIFMC (default) or _FMC100 */
     uint32_t flash_type;          /* 0=NOR, 1=NAND — type of the flash-file image */
     char    *flash_file;          /* optional: path to flash dump to load */
     char    *nand_file;           /* optional: 2nd image for dual NOR+NAND boards
@@ -240,6 +284,17 @@ struct HisiFmcState {
 static inline int hisi_fmc_current_flash_sel(HisiFmcState *s)
 {
     return (s->cfg >> FMC_CFG_FLASH_SEL_SHIFT) & 0x3;
+}
+
+/* Level-triggered op/DMA-done interrupt.  The fmc100 driver waits on a
+ * completion signalled from the FMC ISR (INT & INT_EN), rather than polling;
+ * the HiFMC V100 users leave the IRQ unconnected and poll, so this is a no-op
+ * for them. */
+static void hisi_fmc_update_irq(HisiFmcState *s)
+{
+    if (s->irq) {
+        qemu_set_irq(s->irq, (s->fmc_int & s->int_en) ? 1 : 0);
+    }
 }
 
 /*
@@ -686,7 +741,7 @@ static void hisi_fmc_exec_dma_nor(HisiFmcState *s)
      * XIP reads work. If the kernel driver forgets to set this, DMA reads
      * return 0xFF (erased flash).
      */
-    if (!(s->cfg & 1)) {
+    if (s->variant != FMC_VARIANT_FMC100 && !(s->cfg & 1)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "hisi-fmc: DMA op with FMC_CFG=0x%x (not in NORMAL mode),"
                       " returning 0xFF\n", s->cfg);
@@ -841,7 +896,17 @@ static uint64_t hisi_fmc_ctrl_read(void *opaque, hwaddr offset, unsigned size)
 {
     HisiFmcState *s = HISI_FMC(opaque);
 
+    if (s->variant == FMC_VARIANT_FMC100) {
+        hwaddr c = fmc100_to_canonical(offset);
+        if (c == (hwaddr)-1) {
+            return 0;
+        }
+        offset = c;
+    }
+
     switch (offset) {
+    case FMC_VERSION:
+        return s->variant == FMC_VARIANT_FMC100 ? 0x200 : 0x100;
     case FMC_CFG:           return s->cfg;
     case FMC_GLOBAL_CFG:    return s->global_cfg;
     case FMC_SPI_TIMING_CFG: return s->spi_timing;
@@ -860,7 +925,6 @@ static uint64_t hisi_fmc_ctrl_read(void *opaque, hwaddr offset, unsigned size)
     case FMC_DMA_SADDR_OOB: return s->dma_saddr_oob;
     case FMC_OP_CTRL:       return 0; /* DMA_OP_READY always reads as clear */
     case FMC_STATUS:        return s->status;
-    case FMC_VERSION:       return 0x100; /* HIFMC_VER_100 */
     case FMC_DMA_SADDRH_D0: return s->dma_saddrh_d0;
     case FMC_DMA_SADDRH_OOB: return s->dma_saddrh_oob;
     default:
@@ -876,12 +940,20 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
 {
     HisiFmcState *s = HISI_FMC(opaque);
 
+    if (s->variant == FMC_VARIANT_FMC100) {
+        hwaddr c = fmc100_to_canonical(offset);
+        if (c == (hwaddr)-1) {
+            return;  /* unmapped fmc100 reg (OP_PARA, timing…): ignore */
+        }
+        offset = c;
+    }
+
     switch (offset) {
     case FMC_CFG:           s->cfg = value;           break;
     case FMC_GLOBAL_CFG:    s->global_cfg = value;    break;
     case FMC_SPI_TIMING_CFG: s->spi_timing = value;   break;
-    case FMC_INT_EN:        s->int_en = value;        break;
-    case FMC_INT_CLR:       s->fmc_int &= ~value;     break;
+    case FMC_INT_EN:        s->int_en = value;   hisi_fmc_update_irq(s); break;
+    case FMC_INT_CLR:       s->fmc_int &= ~value; hisi_fmc_update_irq(s); break;
     case FMC_CMD:           s->cmd = value;           break;
     case FMC_ADDRH:         s->addrh = value;         break;
     case FMC_ADDRL:         s->addrl = value;         break;
@@ -898,7 +970,11 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
     case FMC_OP:
         s->iobuf_valid = false;
         if (value & FMC_OP_REG_OP_START) {
-            if (value & FMC_OP_READ_STATUS_EN) {
+            /* On fmc100 bit1 is ADDR_EN, not READ_STATUS_EN — always dispatch
+             * by SPI command (READ_STATUS 0x05 lands the SR in iobuf, which the
+             * driver reads back from the memory window like every other op). */
+            if (s->variant != FMC_VARIANT_FMC100 &&
+                (value & FMC_OP_READ_STATUS_EN)) {
                 /* Hardware reads SPI status register directly into FMC_STATUS.
                  * The actual SPI opcode in FMC_CMD selects WHICH register. */
                 uint8_t cmd = s->cmd & 0xFF;
@@ -920,6 +996,7 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
                 s->iobuf_valid = hisi_fmc_exec_reg_op(s);
             }
             s->fmc_int |= FMC_INT_OP_DONE;
+            hisi_fmc_update_irq(s);
         }
         break;
 
@@ -928,6 +1005,7 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
         s->iobuf_valid = false;
         if (value & FMC_OP_CTRL_DMA_OP_READY) {
             hisi_fmc_exec_dma_op(s);
+            hisi_fmc_update_irq(s);
         }
         break;
 
@@ -1195,6 +1273,8 @@ static void hisi_fmc_init(Object *obj)
     memory_region_init_io(&s->mem_iomem, obj, &hisi_fmc_mem_ops, s,
                           "hisi-fmc.mem", MEM_WINDOW_SIZE);
     sysbus_init_mmio(sbd, &s->mem_iomem);
+
+    sysbus_init_irq(sbd, &s->irq);
 }
 
 static void hisi_fmc_finalize(Object *obj)
@@ -1208,6 +1288,9 @@ static void hisi_fmc_finalize(Object *obj)
 }
 
 static const Property hisi_fmc_properties[] = {
+    /* Register-map variant: 0 = HiFMC V100 (default), 1 = fmc100 (lotus,fmc
+     * on Goke xmorca / GK7206).  Same IP, shuffled register offsets. */
+    DEFINE_PROP_UINT32("variant", HisiFmcState, variant, FMC_VARIANT_HIFMC),
     DEFINE_PROP_UINT32("flash-type", HisiFmcState, flash_type,
                        FLASH_TYPE_SPI_NOR),
     DEFINE_PROP_STRING("flash-file", HisiFmcState, flash_file),
