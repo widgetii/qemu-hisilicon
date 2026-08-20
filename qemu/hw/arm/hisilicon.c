@@ -2091,11 +2091,18 @@ static const HisiSoCConfig gk7206v10_soc = {
     .soc_id             = GOKE_SOC_ID_7206V10,
     .max_cpus           = 2,            /* dual Cortex-A7 MP2 */
     .default_cpus       = 2,            /* 2 GIC CPU interfaces (ITARGETSR !RAZ) */
-    .gpio_count         = 10,           /* GPIO0..GPIO9 @ 0x120b0000..0x120b9000 */
+    .gpio_count         = 9,            /* GPIO0..GPIO8 @ 0x120b0000..0x120b8000 (DTS) */
     HISI_V4_DDR_64M,                    /* GK7206V10: embedded 512Mb DDR2 */
     HISI_V4_COMMON_PERIPH,
+    /* 9 GPIO banks on GIC SPI 22..30 (DTS gpio_chip irqs 0x16..0x1e).  Must
+     * follow the macro, which sets the wrong V4 gpio_irq_start=16 — a 16-base
+     * would put GPIO3..5 on 19..21 and clobber the SPIs below. */
+    .gpio_irq_start     = 22,
     .xmsp804_timer      = true,         /* XMedia kernel uses xmedia,sp804 */
     .femac_base         = 0x100d0000,   /* GMAC_REG_BASE — orca relocated FE MAC */
+    /* DTS ethernet@100d0000 irq 0x25.  V4 common's femac_irq=33 is both wrong
+     * for orca and collides with sdhci mmc1 (also 33) below. */
+    .femac_irq          = 37,
     /* Flash: "lotus,fmc" (fmc100) — same IP as HiFMC V100 but a shuffled
      * register map, and the DT "control" reg sits at 0x10000010 (not
      * 0x10000000).  Memory window stays at 0x14000000 (from V4 common). */
@@ -2127,6 +2134,75 @@ static const HisiSoCConfig gk7206v10_soc = {
         { 0x228, 0x0000C000 },  /* SDIO0 DRV_DLL_STATUS:   LOCK|READY  */
         { 0x238, 0x00000001 },  /* SDIO1 SAMPL_DLL_STATUS: SLAVE_READY */
         { 0x23c, 0x0000C000 },  /* SDIO1 DRV_DLL_STATUS:   LOCK|READY  */
+    },
+    /*
+     * ---- xmorca-specific overrides (from qemu-boot/gk7206/xmorca.dts.tmp) ----
+     * HISI_V4_COMMON_PERIPH carries the Hi3516EV/DV V4-die counts, bases and
+     * IRQs; several don't match the GK7206 xmorca die.  Everything below is
+     * re-specified from the vendor DTS so kernel probes land on real MMIO and
+     * wire the right GIC lines instead of the inherited V4 numbers.
+     */
+
+    /* 4 PL011 UARTs @ 0x1204{0..3}000, GIC SPI 11..14 (V4 common had 3 @7..9). */
+    .num_uarts          = 4,
+    .uart_bases         = { 0x12040000, 0x12041000, 0x12042000, 0x12043000 },
+    .uart_irqs          = { 11, 12, 13, 14 },
+
+    /* 4 I2C @ 0x1206{0..3}000 (V4 common had 3; I2C wires no IRQ here). */
+    .num_i2c            = 4,
+    .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000, 0x12063000 },
+
+    /* 3 PL022 SPI @ 0x1207{0..2}000, GIC SPI 19..21 (V4 common had 2 @14..15). */
+    .num_spis           = 3,
+    .spi_bases          = { 0x12070000, 0x12071000, 0x12072000 },
+    .spi_irqs           = { 19, 20, 21 },
+
+    /*
+     * VEDU relocated on orca: DTS vedu@0x11800000 with a 2nd reg window at
+     * 0x11420000 (V4 common put the primary block at 0x11410000).  jpge_base
+     * stays 0x11420000 — that is exactly VEDU's 2nd window on this die, mapped
+     * as the hisi-vedu device's MMIO region 1.  DTS shares GIC SPI 45 between
+     * VEDU and MIPI RX; QEMU's GIC has one level per input, so we keep the
+     * inherited vedu_irq (47, otherwise unused in this model) rather than
+     * clobber MIPI's pic[45].  The encoder IRQ isn't exercised on -kernel boot.
+     */
+    .vedu_base          = 0x11800000,
+
+    /*
+     * Full regbank re-list for xmorca (V4 common's array can't be
+     * partially overridden).  Deltas vs HISI_V4_COMMON_PERIPH:
+     *   - hisi-ive relocated 0x11320000 -> 0x11490000 (DTS ive@11490000).
+     *     "hisi-ive" instantiates the real functional IVE device, so this
+     *     moves it to orca's address, not just a stub.
+     *   - added hisi-lsadc, hisi-cipher, hisi-vo, hisi-gdc, hisi-iocfg-vo
+     *     (adc@120a0000, cipher@10050000, vo/gfbg@11280000, gdc@11480000,
+     *     iocfg-controller3@11980000) — present in the DTS, previously
+     *     unmapped so the kernel drivers faulted on probe.
+     * Note: 2nd watchdog@12030020 (DTS) sits inside wdt@12030000's window and
+     * is left unmodelled.  hisi-jpge stays folded into hisi-vedu (see above).
+     */
+    .num_regbanks       = 20,
+    .regbanks           = {
+        { "hisi-misc",       0x12028000, 0x8000  },
+        { "hisi-ddr",        0x120d0000, 0x10000 },
+        { "hisi-iocfg-vio",  0x112c0000, 0x10000 },
+        { "hisi-iocfg-core", 0x120c0000, 0x10000 },
+        { "hisi-iocfg-ahb",  0x100c0000, 0x10000 },
+        { "hisi-pwm",        0x12080000, 0x10000 },
+        { "hisi-usb3",       0x10030000, 0x10000 },
+        { "hisi-aiao",       0x100e0000, 0x10000 },
+        { "hisi-acodec",     0x100f0000, 0x10000 },
+        { "hisi-vi-cap",     0x11000000, 0x200000 },
+        { "hisi-vi-proc",    0x11200000, 0x40000 },
+        { "hisi-vgs",        0x11300000, 0x10000 },
+        { "hisi-ive",        0x11490000, 0x10000 },  /* orca: was 0x11320000 */
+        { "hisi-npu",        0x11340000, 0x10000 },
+        { "hisi-vpss",       0x11400000, 0x10000 },
+        { "hisi-lsadc",      0x120a0000, 0x1000  },  /* adc@120a0000 lotus,lsadc */
+        { "hisi-cipher",     0x10050000, 0x10000 },  /* cipher@10050000 AES/SHA/RSA */
+        { "hisi-vo",         0x11280000, 0x40000 },  /* vo/gfbg@11280000 display */
+        { "hisi-gdc",        0x11480000, 0x10000 },  /* gdc@11480000 lens distort */
+        { "hisi-iocfg-vo",   0x11980000, 0x10000 },  /* iocfg-controller3@11980000 */
     },
 };
 
