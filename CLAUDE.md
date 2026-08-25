@@ -215,9 +215,11 @@ in this order:
 ## Adding a SoC or a device
 
 New machine: add the `HisiSoCConfig` + one `DEFINE_HISI_MACHINE` line, rebuild,
-smoke-test, then add it to the README machine table (the table lags the source
-— it currently says 42 machines against 45 defined; `-machine help` is the real
-answer) and to the CI matrix if it can boot real firmware.
+smoke-test, then add it to the README machine table and to the CI matrix if it
+can boot real firmware. `-machine help` on the built binary is the
+authoritative list — keep the README tables *and* their totals (the "N total"
+heading and the per-target counts at the top) in sync, since those drift
+silently otherwise.
 
 New device file: `qemu/setup.sh` must learn about it in **both** branches of
 each build-system patch block — the fresh-tree `cat >>` heredoc *and* the
