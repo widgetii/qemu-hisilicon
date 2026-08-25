@@ -202,6 +202,35 @@ static void hisi_spi_write(void *opaque, hwaddr offset,
         hisi_spi_xfer(s);
         break;
     case 0x08: /* DR */
+        /*
+         * A disabled SSP must not latch TX data.  hisi_spi_xfer() bails out
+         * while SSE is clear, so a word written here would sit in the FIFO
+         * and then be shifted out the instant the guest sets SSE — landing
+         * an extra, unasked-for word in the RX FIFO at the head of the *next*
+         * transfer.
+         *
+         * The vendor spi-pl022 driver (OpenIPC linux, hisilicon-hi3516cv6xx)
+         * enables the port and only then unmasks interrupts:
+         *
+         *     writew(readw(SSP_CR1) | SSP_CR1_MASK_SSE, SSP_CR1);
+         *     writew(irqflags, SSP_IMSC);          // 0x0b: ROR|RT|TX, no RX
+         *
+         * so that stale word is already in RX before the first interrupt is
+         * even armed.  readwriter() then consumes it as if it belonged to the
+         * transfer, so pl022->rx and exp_fifo_level run one ahead of reality,
+         * the rx == rx_end completion test never trips, and the ISR never
+         * reaches the writes that mask TXIM.  With TX asserted on an empty
+         * FIFO the level interrupt then re-fires forever, the tick is starved,
+         * and Hi3516CV610 freezes part-way through userspace init.
+         *
+         * Dropping the write keeps the FIFOs consistent with a disabled port
+         * and leaves the interrupt semantics upstream pl022.c defines — which
+         * Hi3516CV500 and Hi3519V101 depend on, as their driver arms TXIM on
+         * an empty FIFO to learn it may write.
+         */
+        if ((s->cr1 & HISI_SPI_CR1_SSE) == 0) {
+            break;
+        }
         if (s->tx_fifo_len < 8) {
             s->tx_fifo[s->tx_fifo_head] = value & s->bitmask;
             s->tx_fifo_head = (s->tx_fifo_head + 1) & 7;

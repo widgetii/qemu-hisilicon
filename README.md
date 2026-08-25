@@ -5,10 +5,10 @@ targeting QEMU v10.2.0. Boots unmodified [OpenIPC](https://openipc.org/) firmwar
 and vendor SDK kernels to a full Linux userspace on all supported platforms.
 
 Builds two QEMU targets:
-- `qemu-system-arm` — 28 IPC + 12 DVR/NVR + 1 STB (ARMv7-A)
-- `qemu-system-aarch64` — 1 STB (ARMv8-A, Hi3798CV200 Cortex-A53)
+- `qemu-system-arm` — 29 IPC + 11 DVR/NVR + 1 STB (ARMv7-A)
+- `qemu-system-aarch64` — 3 IPC + 1 STB (ARMv8-A, Cortex-A53/A55)
 
-## Supported Machines (42 total)
+## Supported Machines (45 total)
 
 ### IPC family — V1 through V5 (`qemu-system-arm`)
 
@@ -24,7 +24,9 @@ Builds two QEMU targets:
 | `hi3516cv300` | V3 | ARM926EJ-S | VIC | 3.18.20 | yes |
 | `hi3516cv500` | V3.5 | Cortex-A7 | GIC | 4.9.37 | yes |
 | `hi3516dv300` | V4A | Cortex-A7 | GIC | 4.9.37 | yes |
+| `hi3516av300` | V4A | Cortex-A7 ×2 | GIC | 4.9.37 | yes |
 | `hi3519v101` | V3A | Cortex-A7 | GIC | 3.18.20 | yes |
+| `hi3516av200` | V3A | Cortex-A7 | GIC | 3.18.20 | yes |
 | `hi3516ev300` | V4 | Cortex-A7 | GIC | 4.9.37 | yes |
 | `hi3516ev200` | V4 | Cortex-A7 | GIC | — | — |
 | `hi3518ev300` | V4 | Cortex-A7 | GIC | — | — |
@@ -33,9 +35,24 @@ Builds two QEMU targets:
 | `gk7205v300` | V4/Goke | Cortex-A7 | GIC | — | — |
 | `gk7202v300` | V4/Goke | Cortex-A7 | GIC | — | — |
 | `gk7605v100` | V4/Goke | Cortex-A7 | GIC | — | — |
+| `gk7205v500` | V4/Goke V500 | Cortex-A7 | GIC | 4.9.37 | yes |
+| `gk7205v510` | V4/Goke V500 | Cortex-A7 | GIC | 4.9.37 | yes |
+| `gk7205v530` | V4/Goke V500 | Cortex-A7 | GIC | — | —¹ |
+| `gk7202v330` | V4/Goke V500 | Cortex-A7 | GIC | — | —¹ |
+| `gk7206v10` | Goke/XMedia | Cortex-A7 MP2 | GIC | 5.10 | yes² |
 | `hi3516cv608` | V5 | Cortex-A7 MP2 | GIC | 5.10 | — |
 | `hi3516cv610` | **V5** | Cortex-A7 MP2 | GIC | **5.10** | yes |
 | `hi3516cv613` | V5 | Cortex-A7 MP2 | GIC | 5.10 | — |
+
+¹ No OpenIPC release exists for these two yet, so there is nothing to boot
+them with; they build and register. The four Goke V500 parts share the
+`xmedia,sp804` timer wiring (`hisi-xmsp804.c`) that the V500 kernel needs.
+
+² `gk7206v10` (codename "xmorca") boots the **vendor** XMedia SDK kernel
+(linux-5.10.y, `xmorca_defconfig`) and busybox userspace, not OpenIPC — via
+`qemu-boot/run-gk7206.sh` for an initramfs boot or `FLASH=1` for a SPI-NOR
+boot with a jffs2 root. No vendor artifacts are committed here; see the script
+header for how to build them from the SDK.
 
 ### DVR/NVR family — surveillance back-end SoCs (`qemu-system-arm`)
 
@@ -66,17 +83,26 @@ Builds two QEMU targets:
 |---------|-----------|-----|-----|-------------|
 | `hi3519dv500` | V5 (HISI_OT) | **Cortex-A55** (ARMv8) | GIC | U-Boot¹ |
 | `hi3516dv500` | V5 (HISI_OT) | **Cortex-A55** (ARMv8) | GIC | U-Boot¹ |
+| `gk7606v1` | Goke/XMedia | **Cortex-A55** (ARMv8) | GICv3 | no² |
 
-These share the V5/SS626 0x11xxxxxx peripheral map with CV610 but are 64-bit and
-boot the gzip self-extracting vendor U-Boot (`u-boot-z.bin`) via the on-die HW
-gzip engine — run locally with `qemu-boot/run-hi3519dv500.sh <u-boot-z.bin>`.
+The two Hi35xxDV500 parts share the V5/SS626 0x11xxxxxx peripheral map with
+CV610 but are 64-bit and boot the gzip self-extracting vendor U-Boot
+(`u-boot-z.bin`) via the on-die HW gzip engine — run locally with
+`qemu-boot/run-hi3519dv500.sh <u-boot-z.bin>`.
 
 ¹ Boot-tested by OpenIPC/u-boot-hi3519dv500's `qemu_smoke` CI, which builds the
 U-Boot image fresh and boots it on this machine (so no vendor binary is vendored
 here). This repo's CI only checks the machines register.
 
-All 42 machines build; the 40 IPC/STB Linux machines boot to a shell prompt
-(artifacts/scripts staged in `qemu-boot/run-<machine>.sh`).
+² `gk7606v1` (codename "xmfalcon", the Cortex-A55 sibling of GK7206) is a
+placeholder: it builds and registers, but does not boot yet. Much of its config
+is inherited from GK7206 and several values — DDR size among them — are still
+unverified against the vendor SDK.
+
+All 45 machines build and register. Every machine marked "yes" above boots
+OpenIPC or vendor firmware to a shell prompt (artifacts/scripts staged in
+`qemu-boot/run-<machine>.sh`); `-machine help` on either binary is the
+authoritative list.
 
 ### V5 Model Suffix → Chip ID Mapping
 
