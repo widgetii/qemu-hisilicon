@@ -61,11 +61,13 @@ timeout 20 ./qemu-src/build/qemu-system-arm -M <machine> -m 64M -nographic \
     -display none -serial null -monitor none -kernel /dev/null
 ```
 
-On 32-bit machines a clean model prints `could not load kernel '/dev/null'` and
-exits 0. `aarch64 = true` configs need `qemu-system-aarch64`, and there the
-empty file is accepted and QEMU keeps running, so `timeout` kills it (exit 143)
-— that is also a pass. A QOM property error or assert with a core dump is a
-real failure.
+On 32-bit machines a clean model runs all device init, then prints
+`qemu-system-arm: could not load kernel '/dev/null'` and exits **1** — the
+message, not the status, is the pass signal. `aarch64 = true` configs need
+`qemu-system-aarch64`, and there the empty file is accepted and QEMU keeps
+running, so `timeout` kills it and reports its own **124**; that is also a
+pass. Either way what fails is a QOM property error, an assert, or a core
+dump — so assert on the output, not on the exit status.
 
 Device register tests (self-contained, need a built QEMU):
 
@@ -118,12 +120,21 @@ locally):
 bash qemu-boot/test-flash-rw.sh --soc hi3516ev300 --machine hi3516ev300,sensor=none \
     --qemu ./qemu-src/build/qemu-system-arm --output-dir /tmp/frw
 bash qemu-boot/test-linux-network.sh --soc <soc> --machine <machine> --append '<cmdline>' \
-    --qemu ./qemu-src/build/qemu-system-arm --tap tap0 --host-ip 10.0.10.1
+    --qemu ./qemu-src/build/qemu-system-arm --setup-network
 bash qemu-boot/sofia-isp-ci-test.sh      # hi3516ev200 + sc2315e ISP regression
 python3 qemu-boot/test-fastboot-protocol.py /tmp/hisi-fb   # boot-ROM serial protocol
 ```
 
-Networking tests need a TAP device: `bash qemu-boot/net-setup.sh` /
+`test-linux-network.sh` needs `--setup-network` when run by hand: without it
+the harness assumes the caller already built the whole environment its ping and
+curl checks expect — a bridge holding `--host-ip` (default 10.0.10.1), dnsmasq
+serving DHCP on it, and a `python3 -m http.server 8080` bound to that address.
+CI creates all three inline in its "Setup TAP network" step, which is why the
+CI invocation omits the flag. `qemu-boot/net-setup.sh` is *not* a substitute:
+it builds a 192.168.0.1/24 bridge with DHCP only and no HTTP server, so the
+ping would target the wrong address and the curl would find nothing listening.
+That script is for giving the interactive `run-*.sh` scripts a bridged TAP
+(they fall back to SLIRP when `tap0` is absent); pair it with
 `net-teardown.sh`.
 
 Boot-test gotchas that will otherwise waste a session:
