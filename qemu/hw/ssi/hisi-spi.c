@@ -99,19 +99,7 @@ static void hisi_spi_update(HisiSpiState *s)
     if (s->rx_fifo_len >= 4) {
         s->is |= HISI_SPI_INT_RX;
     }
-    /*
-     * TX "FIFO at or below half full" — but only while the FIFO actually
-     * holds data.  Upstream pl022.c raises this for tx_fifo_len == 0 too,
-     * which leaves an idle controller asserting a level interrupt that the
-     * guest cannot clear: ICR only acknowledges ROR/RT, and masking is the
-     * driver's only way down.  The Hi3516CV610 vendor SPI driver keeps TXIM
-     * unmasked while it waits on vendor state we do not model (CR1 bits
-     * 0x10/0x40, registers 0x80/0x8c), so on an empty FIFO it re-entered its
-     * ISR forever — starving the timer tick and freezing the machine part-way
-     * through userspace init.  With nothing in the FIFO there is no refill for
-     * the driver to do, so raising TX buys nothing and costs a wedged guest.
-     */
-    if (s->tx_fifo_len > 0 && s->tx_fifo_len <= 4) {
+    if (s->tx_fifo_len <= 4) {
         s->is |= HISI_SPI_INT_TX;
     }
     /* HiSilicon vendor extension: receive-timeout for sub-threshold reads. */
